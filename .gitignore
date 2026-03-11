@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.darwin/
+*.log
+.env
+.env.local
+.DS_Store
+*.swp
+*.swo

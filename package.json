@@ -1,0 +1,81 @@
+{
+  "name": "darwin-agents",
+  "version": "0.4.4",
+  "description": "AI agents that improve themselves. Self-evolving prompts via A/B testing, multi-model critics, safety gates, and pattern detection.",
+  "type": "module",
+  "bin": {
+    "darwin": "./dist/cli/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./providers": {
+      "import": "./dist/providers/index.js",
+      "types": "./dist/providers/index.d.ts"
+    },
+    "./memory": {
+      "import": "./dist/memory/index.js",
+      "types": "./dist/memory/index.d.ts"
+    },
+    "./agents": {
+      "import": "./dist/agents/index.js",
+      "types": "./dist/agents/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "darwin": "tsx src/cli/index.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {},
+  "peerDependencies": {
+    "better-sqlite3": "^11.0.0",
+    "pg": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": { "optional": true },
+    "pg": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "self-evolving",
+    "darwin",
+    "claude",
+    "openai",
+    "gpt",
+    "mcp",
+    "prompt-optimization",
+    "ab-testing",
+    "multi-model",
+    "llm",
+    "evolution"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/studiomeyer-io/darwin-agents"
+  },
+  "author": "StudioMeyer <hello@studiomeyer.de>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  }
+}

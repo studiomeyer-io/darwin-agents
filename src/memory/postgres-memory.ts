@@ -14,7 +14,7 @@
  * Requires: DARWIN_POSTGRES_URL or config.postgresUrl
  */
 
-import pg from 'pg';
+import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,8 +27,6 @@ import type {
   PromptVersionStats,
   DarwinConfig,
 } from '../types.js';
-
-const { Pool } = pg;
 
 // ─── Default state for fresh installs ─────────────────
 
@@ -61,7 +59,18 @@ export class PostgresMemoryProvider implements MemoryProvider {
   // ─── Lifecycle ────────────────────────────────────
 
   async init(): Promise<void> {
-    this.pool = new Pool({
+    let pgModule: typeof pg;
+    try {
+      pgModule = (await import('pg')).default;
+    } catch {
+      throw new Error(
+        '[darwin] pg is required for PostgreSQL storage.\n' +
+        '  Install it: npm install pg\n' +
+        '  Or use SQLite (default): no extra install needed'
+      );
+    }
+
+    this.pool = new pgModule.Pool({
       connectionString: this.connectionString,
       max: 10,
       idleTimeoutMillis: 30_000,

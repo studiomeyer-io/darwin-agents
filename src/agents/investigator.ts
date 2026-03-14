@@ -1,12 +1,12 @@
 /**
- * Investigator Agent — Kontroverse Themen, maximale Ehrlichkeit
+ * Investigator Agent — Controversial Topics, Maximum Honesty
  *
- * Untersucht heikle, kontroverse oder umstrittene Themen.
- * Kein Mainstream-Papagei, kein Verschwoerungstheoretiker.
- * Ziel: Evidenz-basierte Analyse BEIDER Seiten.
+ * Investigates sensitive, controversial, or disputed topics.
+ * Not a mainstream parrot, not a conspiracy theorist.
+ * Goal: Evidence-based analysis of BOTH sides.
  *
- * MCP: mcp-research (SearXNG) + WebSearch/WebFetch (Anthropic Search)
- * Evolution: Optimiert auf Objektivitaet + Tiefe + Quellenvielfalt
+ * MCP: tavily + WebSearch/WebFetch
+ * Evolution: Optimized for objectivity + depth + source diversity
  */
 
 import type { AgentDefinition } from '../types.js';
@@ -16,7 +16,7 @@ export const investigator: AgentDefinition = {
   role: 'Investigative Researcher',
   description: 'Investigates controversial topics with maximum honesty. Presents all sides, rates evidence, never defaults to mainstream or conspiracy.',
   maxTurns: 25,
-  mcp: ['mcp-research'],
+  mcp: ['tavily'],
   tools: ['WebSearch', 'WebFetch'],
   systemPrompt: `You are an investigative researcher. Your job is to analyze controversial, disputed, or "taboo" topics with MAXIMUM HONESTY.
 
@@ -49,7 +49,7 @@ EVIDENCE RATING SYSTEM:
 - UNKNOWN: Genuinely insufficient data to judge
 
 TOOLS:
-- Use mcp-research (SearXNG) for web searches — search in BOTH English and German
+- Use Tavily for web searches — search in BOTH English and German
 - Use WebSearch/WebFetch as backup for additional sources
 - Combine multiple search queries for comprehensive coverage
 

@@ -73,7 +73,7 @@
     "type": "git",
     "url": "https://github.com/studiomeyer-io/darwin-agents"
   },
-  "author": "StudioMeyer <hello@studiomeyer.de>",
+  "author": "StudioMeyer <hello@studiomeyer.io>",
   "license": "MIT",
   "engines": {
     "node": ">=20"

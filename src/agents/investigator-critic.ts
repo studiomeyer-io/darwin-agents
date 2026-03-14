@@ -1,9 +1,9 @@
 /**
- * Investigator Critic — Bewertet investigative Reports
+ * Investigator Critic — Evaluates Investigative Reports
  *
- * Andere Kriterien als der Standard-Critic:
- * Nicht "ist es gut geschrieben?" sondern
- * "ist es EHRLICH, AUSGEWOGEN und TIEF?"
+ * Different criteria than the standard Critic:
+ * Not "is it well written?" but
+ * "is it HONEST, BALANCED, and DEEP?"
  */
 
 import type { AgentDefinition } from '../types.js';

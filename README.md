@@ -240,6 +240,6 @@ MIT — use freely, commercially or personally.
 
 **Darwin: Your agents don't just run. They evolve.**
 
-Built by [StudioMeyer](https://studiomeyer.de)
+Built by [StudioMeyer](https://studiomeyer.io)
 
 </div>

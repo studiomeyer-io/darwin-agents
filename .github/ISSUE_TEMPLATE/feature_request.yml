@@ -1,0 +1,40 @@
+name: Feature Request
+description: Suggest a new feature for Darwin
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What problem does this feature solve? What are you trying to do?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should this work? Be as specific as possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Have you considered other approaches? What are the trade-offs?
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - New agent
+        - Evolution system
+        - Memory / storage
+        - CLI
+        - New LLM provider
+        - Documentation
+        - Other
+    validations:
+      required: true

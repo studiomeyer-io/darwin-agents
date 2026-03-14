@@ -259,6 +259,7 @@ CALIBRATION: A blog post that informs but doesn't convert is 6/10 max.
 
 ${CRITIC_OUTPUT_FORMAT}`;
 
+
 // ─── Prompt Registry ──────────────────────────────────
 
 const INVESTIGATOR_PROMPTS: CriticPromptDef[] = [
@@ -312,6 +313,8 @@ const AGENT_OUTPUT_LABELS: Record<string, string> = {
   writer: 'written content',
   marketing: 'social media content',
   'blog-writer': 'blog post',
+  researcher: 'research report',
+  analyst: 'code analysis report',
 };
 
 /**

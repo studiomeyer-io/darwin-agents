@@ -215,7 +215,7 @@ describe('PromptOptimizer — meta-prompt contains correct data', () => {
   it('includes tool context preservation when provided', async () => {
     const { optimizer, getCapturedPrompt } = makeCapturingOptimizer('improved');
     const toolContext: AgentToolContext = {
-      mcp: ['mcp-research', 'tavily'],
+      mcp: ['tavily', 'context7'],
       tools: ['Read', 'Grep'],
     };
     await optimizer.generateVariant(
@@ -226,7 +226,7 @@ describe('PromptOptimizer — meta-prompt contains correct data', () => {
     );
     const metaPrompt = getCapturedPrompt();
     assert.ok(metaPrompt.includes('TOOL PRESERVATION'));
-    assert.ok(metaPrompt.includes('mcp-research, tavily'));
+    assert.ok(metaPrompt.includes('tavily, context7'));
     assert.ok(metaPrompt.includes('Read, Grep'));
   });
 

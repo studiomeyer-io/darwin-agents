@@ -1,8 +1,20 @@
+<div align="center">
+
 # darwin
 
 **AI agents that improve themselves.**
 
-Build AI agent teams that learn from every run. Self-evolving prompts. A/B tested. Safety-gated.
+[![npm version](https://img.shields.io/npm/v/darwin-agents?color=blue)](https://www.npmjs.com/package/darwin-agents)
+[![npm downloads](https://img.shields.io/npm/dw/darwin-agents)](https://www.npmjs.com/package/darwin-agents)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue.svg)](tsconfig.json)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
+
+Build AI agent teams that learn from every run.<br>Self-evolving prompts. A/B tested. Safety-gated.
+
+[Quick Start](#quick-start) · [Agents](#built-in-agents) · [How It Works](#how-evolution-works) · [CLI](#cli-reference) · [FAQ](#faq)
+
+</div>
 
 ```bash
 npm install darwin-agents better-sqlite3
@@ -124,7 +136,7 @@ conversion-intent    ████████░░  8/10
 ## Feature Comparison
 
 | Feature | Darwin | EvoAgentX | DSPy | CrewAI | AutoGen |
-|---------|--------|-----------|------|--------|---------|
+|---------|--------|-----------|------|--------|--------|
 | Self-evolving prompts | **Yes** | Yes | Yes (compiler) | No | No |
 | A/B testing | **Yes** | No | No | No | No |
 | Safety gate + rollback | **Yes** | No | No | No | No |
@@ -238,8 +250,10 @@ MIT — use freely, commercially or personally.
 
 <div align="center">
 
-**Darwin: Your agents don't just run. They evolve.**
+**Your agents don't just run. They evolve.**
 
 Built by [StudioMeyer](https://studiomeyer.io)
+
+[AI Shield](https://github.com/studiomeyer-io/ai-shield) · [Agent Fleet](https://github.com/studiomeyer-io/agent-fleet) · [MCP Video](https://github.com/studiomeyer-io/mcp-video)
 
 </div>

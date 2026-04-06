@@ -1,6 +1,6 @@
 {
   "name": "darwin-agents",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "AI agents that improve themselves. Self-evolving prompts via A/B testing, multi-model critics, safety gates, and pattern detection.",
   "type": "module",
   "bin": {
@@ -44,8 +44,12 @@
     "pg": "^8.0.0"
   },
   "peerDependenciesMeta": {
-    "better-sqlite3": { "optional": true },
-    "pg": { "optional": true }
+    "better-sqlite3": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

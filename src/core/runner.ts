@@ -54,6 +54,38 @@ const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_DATA_DIR = '.darwin';
 const DEFAULT_TASK_TYPE = 'general';
 
+// ─── Process-level budget ceiling ────────────────────
+//
+// Self-evolving agent loops (A/B tests, multi-model critics, convergence
+// bugs) can fan out into hundreds of provider calls if nothing stops them,
+// and each call hits the billed API. This isn't a replacement for real
+// per-experiment cost tracking — it's a guard-rail that aborts the whole
+// process when a hard run count or wall-clock budget is blown.
+//
+// Override via DARWIN_MAX_RUNS_PER_PROCESS / DARWIN_MAX_RUN_WALL_MS.
+// Set either to 0 to disable that specific ceiling.
+const RUN_COUNT_CAP = Number(process.env.DARWIN_MAX_RUNS_PER_PROCESS ?? 100);
+const WALL_CLOCK_CAP_MS = Number(process.env.DARWIN_MAX_RUN_WALL_MS ?? 3_600_000); // 1 h
+let processRunCount = 0;
+const processStartedAtMs = Date.now();
+
+function enforceBudgetCaps(): void {
+  processRunCount += 1;
+  if (RUN_COUNT_CAP > 0 && processRunCount > RUN_COUNT_CAP) {
+    throw new Error(
+      `Darwin budget exceeded: ${processRunCount} runs in this process (cap ${RUN_COUNT_CAP}). ` +
+      `Override via DARWIN_MAX_RUNS_PER_PROCESS — set 0 to disable.`,
+    );
+  }
+  const elapsedMs = Date.now() - processStartedAtMs;
+  if (WALL_CLOCK_CAP_MS > 0 && elapsedMs > WALL_CLOCK_CAP_MS) {
+    throw new Error(
+      `Darwin wall-clock budget exceeded: ${Math.round(elapsedMs / 1000)}s (cap ${Math.round(WALL_CLOCK_CAP_MS / 1000)}s). ` +
+      `Override via DARWIN_MAX_RUN_WALL_MS — set 0 to disable.`,
+    );
+  }
+}
+
 // Matches common URL patterns for source counting
 const URL_PATTERN = /https?:\/\/[^\s)>\]"'`]+/g;
 
@@ -225,6 +257,10 @@ export async function runAgent(
       `System agents must be run through their handler, not the CLI runner.`,
     );
   }
+
+  // Hard-stop before paying for the next provider call if the process has
+  // blown through its budget (run count or wall-clock).
+  enforceBudgetCaps();
 
   const startedAt = new Date().toISOString();
   const dataDir = opts.config?.dataDir ?? DEFAULT_DATA_DIR;

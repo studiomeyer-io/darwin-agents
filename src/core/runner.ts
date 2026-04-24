@@ -54,34 +54,64 @@ const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_DATA_DIR = '.darwin';
 const DEFAULT_TASK_TYPE = 'general';
 
-// ─── Process-level budget ceiling ────────────────────
+// ─── Process-lifetime budget caps ────────────────────
 //
 // Self-evolving agent loops (A/B tests, multi-model critics, convergence
 // bugs) can fan out into hundreds of provider calls if nothing stops them,
-// and each call hits the billed API. This isn't a replacement for real
-// per-experiment cost tracking — it's a guard-rail that aborts the whole
-// process when a hard run count or wall-clock budget is blown.
-//
-// Override via DARWIN_MAX_RUNS_PER_PROCESS / DARWIN_MAX_RUN_WALL_MS.
-// Set either to 0 to disable that specific ceiling.
-const RUN_COUNT_CAP = Number(process.env.DARWIN_MAX_RUNS_PER_PROCESS ?? 100);
-const WALL_CLOCK_CAP_MS = Number(process.env.DARWIN_MAX_RUN_WALL_MS ?? 3_600_000); // 1 h
-let processRunCount = 0;
-const processStartedAtMs = Date.now();
+// and each call hits the billed API. These caps short-circuit the runner
+// before the next LLM call so a runaway loop tops out at a known ceiling.
+// Both are opt-out (`0` = disabled), overridable via env or the explicit
+// setters below. Original feature landed in 29c4367; Round-4 added the
+// DarwinBudgetError class + test helpers so regressions can be asserted.
 
-function enforceBudgetCaps(): void {
-  processRunCount += 1;
-  if (RUN_COUNT_CAP > 0 && processRunCount > RUN_COUNT_CAP) {
-    throw new Error(
-      `Darwin budget exceeded: ${processRunCount} runs in this process (cap ${RUN_COUNT_CAP}). ` +
-      `Override via DARWIN_MAX_RUNS_PER_PROCESS — set 0 to disable.`,
+const DEFAULT_MAX_RUNS_PER_PROCESS = 100;
+const DEFAULT_MAX_RUN_WALL_MS = 60 * 60 * 1000; // 1 h
+
+let maxRunsPerProcess = Number(
+  process.env.DARWIN_MAX_RUNS_PER_PROCESS ?? DEFAULT_MAX_RUNS_PER_PROCESS,
+);
+let maxRunWallMs = Number(
+  process.env.DARWIN_MAX_RUN_WALL_MS ?? DEFAULT_MAX_RUN_WALL_MS,
+);
+let runsThisProcess = 0;
+let processStartMs = Date.now();
+
+/** Override the per-process run cap (0 = disabled). Primarily for tests. */
+export function setMaxRunsPerProcess(n: number): void {
+  maxRunsPerProcess = n;
+}
+/** Override the wall-clock cap in ms (0 = disabled). Primarily for tests. */
+export function setMaxRunWallMs(ms: number): void {
+  maxRunWallMs = ms;
+}
+/** Reset the process run counter + wall-clock start. Primarily for tests. */
+export function resetRunCounters(): void {
+  runsThisProcess = 0;
+  processStartMs = Date.now();
+}
+
+/** Error thrown when a process-lifetime budget cap is exceeded. */
+export class DarwinBudgetError extends Error {
+  constructor(message: string, public readonly budget: 'runs' | 'wall') {
+    super(message);
+    this.name = 'DarwinBudgetError';
+  }
+}
+
+function enforceBudget(): void {
+  if (maxRunsPerProcess > 0 && runsThisProcess >= maxRunsPerProcess) {
+    throw new DarwinBudgetError(
+      `Darwin run cap reached: ${String(runsThisProcess)}/${String(maxRunsPerProcess)} runs in this process. ` +
+      `Set DARWIN_MAX_RUNS_PER_PROCESS=0 to disable or raise the limit.`,
+      'runs',
     );
   }
-  const elapsedMs = Date.now() - processStartedAtMs;
-  if (WALL_CLOCK_CAP_MS > 0 && elapsedMs > WALL_CLOCK_CAP_MS) {
-    throw new Error(
-      `Darwin wall-clock budget exceeded: ${Math.round(elapsedMs / 1000)}s (cap ${Math.round(WALL_CLOCK_CAP_MS / 1000)}s). ` +
-      `Override via DARWIN_MAX_RUN_WALL_MS — set 0 to disable.`,
+  const elapsed = Date.now() - processStartMs;
+  if (maxRunWallMs > 0 && elapsed >= maxRunWallMs) {
+    throw new DarwinBudgetError(
+      `Darwin wall-clock cap reached: ${String(Math.round(elapsed / 1000))}s / ${String(Math.round(maxRunWallMs / 1000))}s. ` +
+      `Restart the process, or set DARWIN_MAX_RUN_WALL_MS=0 to disable.`,
+      'wall',
     );
   }
 }
@@ -260,12 +290,14 @@ export async function runAgent(
 
   // Hard-stop before paying for the next provider call if the process has
   // blown through its budget (run count or wall-clock).
-  enforceBudgetCaps();
+  enforceBudget();
 
   const startedAt = new Date().toISOString();
   const dataDir = opts.config?.dataDir ?? DEFAULT_DATA_DIR;
   const model = opts.model ?? agent.model ?? DEFAULT_MODEL;
   const timeout = opts.timeout ?? DEFAULT_TIMEOUT;
+
+  runsThisProcess += 1;
 
   // Resolve provider
   const provider = resolveProvider(agent, opts);

@@ -108,6 +108,17 @@ export class ClaudeCliProvider implements LLMProvider {
       const cleanEnv = { ...process.env };
       delete cleanEnv.CLAUDECODE;
 
+      // CRITICAL: By default, strip Anthropic API credentials so the spawned
+      // Claude CLI uses the user's paid subscription (Claude Pro / Max)
+      // instead of billing against the API key environment variables.
+      // Without this, users with ANTHROPIC_API_KEY in their shell get
+      // surprise-billed for every single Darwin run at full API rates.
+      // Opt back in for CI / server-side usage with DARWIN_USE_API_KEY=1.
+      if (process.env.DARWIN_USE_API_KEY !== '1') {
+        delete cleanEnv.ANTHROPIC_API_KEY;
+        delete cleanEnv.ANTHROPIC_AUTH_TOKEN;
+      }
+
       const child = spawn('claude', args, {
         cwd: opts.cwd ?? process.cwd(),
         stdio: ['pipe', 'pipe', 'inherit'],

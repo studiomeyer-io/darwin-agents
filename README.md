@@ -247,6 +247,10 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## About StudioMeyer
+
+[StudioMeyer](https://studiomeyer.io) is an AI and design studio from Palma de Mallorca, building custom websites and AI infrastructure for small and medium businesses. Production stack on Claude Agent SDK, MCP, n8n and an in-house observability and guard layer.
+
 ## License
 
 MIT — use freely, commercially or personally.

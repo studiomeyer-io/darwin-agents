@@ -6,7 +6,12 @@
 
 # darwin
 
-**AI agents that improve themselves.**
+
+<!-- badges -->
+![License](https://img.shields.io/github/license/studiomeyer-io/darwin-agents?style=flat-square&color=22c55e&label=license)
+![Last commit](https://img.shields.io/github/last-commit/studiomeyer-io/darwin-agents?style=flat-square&color=88c0d0&label=updated)
+![GitHub stars](https://img.shields.io/github/stars/studiomeyer-io/darwin-agents?style=flat-square&color=ffd700&logo=github&label=stars)
+<!-- /badges -->**AI agents that improve themselves.**
 
 [![npm version](https://img.shields.io/npm/v/darwin-agents?color=blue)](https://www.npmjs.com/package/darwin-agents)
 [![npm downloads](https://img.shields.io/npm/dw/darwin-agents)](https://www.npmjs.com/package/darwin-agents)

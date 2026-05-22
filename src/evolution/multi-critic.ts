@@ -259,6 +259,185 @@ CALIBRATION: A blog post that informs but doesn't convert is 6/10 max.
 
 ${CRITIC_OUTPUT_FORMAT}`;
 
+// ─── Research Critic Prompts (v0.4.6) ─────────────────
+//
+// For agents that synthesise external sources into structured research
+// reports. Investigator critics score "investigative journalism" patterns
+// (counter-narrative, both-sides). Research critics score "decision-grade
+// synthesis" patterns: multi-engine source coverage, analytical depth,
+// completeness for downstream decisions.
+//
+// Use these when your agent's output is a research brief, market analysis,
+// competitor scan, paper summary, or technology deep-dive.
+
+const RESEARCH_CRITIC_A = `You evaluate research reports on SOURCE QUALITY and MULTI-ENGINE COVERAGE.
+
+Score 1-10 based on:
+- Are sources concrete (URL + author/site + date), not vague references?
+- Are at least 3 independent sources cited per major claim?
+- Is the source mix diverse (search engines, primary docs, papers, vendor blogs)?
+- Are primary sources prioritized over aggregators (arXiv vs Medium summary)?
+- Are dates fresh enough for the topic? (e.g. AI tooling needs <6 months for "current state")
+
+CRITICAL DEDUCTIONS:
+- Wikipedia-only or single-vendor sourcing: cap at 5/10
+- No URLs in the report: cap at 4/10
+- "Sources say" / "experts believe" without naming: -2 points each
+
+CALIBRATION: Restating top search hits without synthesis is 4/10 max.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const RESEARCH_CRITIC_B = `You evaluate research reports on ANALYTICAL DEPTH and SYNTHESIS.
+
+Score 1-10 based on:
+- Does the report make non-obvious connections across sources?
+- Are contradictions between sources surfaced honestly?
+- Is there a clear synthesis section (not just "list of findings")?
+- Are implications drawn out — what does this MEAN for the reader?
+- Are unknowns and limitations explicitly stated?
+
+CALIBRATION:
+- 9-10: Genuine novel insight, contradictions resolved, decision-ready synthesis.
+- 7-8: Solid synthesis, surfaces tensions, actionable.
+- 5-6: Competent summary but no synthesis — just glorified link aggregation.
+- 3-4: Restates sources without analysis. "Per source X..." pattern dominates.
+
+LOW SCORE: No synthesis section. No contradictions surfaced. Bullet-list of findings without weighting.
+HIGH SCORE: Honest synthesis, contradictions named, weighted recommendation, clear unknowns.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const RESEARCH_CRITIC_C = `You evaluate research reports on COMPLETENESS and DECISION-VALUE.
+
+Score 1-10 based on:
+- Does the report answer the ORIGINAL question (not drift to adjacent topics)?
+- Are sections complete (background, current state, options, recommendation, sources)?
+- Is the length appropriate for the topic complexity (not bloated, not anemic)?
+- Could a reader make a concrete decision based on this report?
+- Is the "what to do next" section concrete (not "more research needed")?
+
+CRITICAL DEDUCTIONS:
+- Topic drift: -3 points
+- "More research needed" without specifying what: -2 points
+- Missing recommendation/decision section: cap at 5/10
+- Report under 2000 chars for complex topic: cap at 5/10
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+// ─── Critic Critic Prompts (v0.4.6) ───────────────────
+//
+// For agents whose JOB is critiquing other work — devil's advocate,
+// design-review, RFC-feedback, peer-review. Scores the QUALITY of the
+// critique, not the subject it critiques. Hot pattern in 2026 agent
+// fleets: a "Critic" role that pressure-tests proposals before commit.
+
+const CRITIC_AGENT_CRITIC_A = `You evaluate critiques on FAIRNESS and STEELMANNING.
+
+Score 1-10 based on:
+- Does the critic present the strongest version of the subject's argument BEFORE attacking?
+- Are weaknesses evidence-based (not "I don't like this") or vibes-based?
+- Does it acknowledge what the subject does WELL, not only what it does poorly?
+- Does it distinguish between fixable issues and fundamental flaws?
+- Is the tone constructive (helps fix) vs destructive (just tears down)?
+
+LOW SCORE: Strawman attacks. Cherry-picks weaknesses. No acknowledgment of strengths. Vibes over evidence.
+HIGH SCORE: Steelmans first, then critiques. Evidence per claim. Balanced strengths+weaknesses. Constructive tone.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const CRITIC_AGENT_CRITIC_B = `You evaluate critiques on COUNTER-ARGUMENT DEPTH and BLIND-SPOT DETECTION.
+
+Score 1-10 based on text-observable evidence:
+- Does the critic surface non-obvious blind spots (things the subject didn't think of)?
+- Are competitor/alternative angles considered?
+- Does it cite external evidence (papers, benchmarks, industry data)?
+- Does it identify failure modes the subject would not have considered?
+- Does it distinguish symptoms (what fails) from root cause (why)?
+
+LOW SCORE: Only reacts to what's written. No external evidence. Surfaces only obvious issues. No failure-mode analysis.
+HIGH SCORE: External evidence cited. Alternatives considered. Concrete failure modes named. Root causes inferred.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const CRITIC_AGENT_CRITIC_C = `You evaluate critiques on ACTIONABILITY and CLEAR VERDICT.
+
+Score 1-10 based on:
+- Is there a clear verdict (GO / AMBER / NO-GO or equivalent)?
+- Are recommendations CONCRETE (specific actions, not "improve quality")?
+- Is each recommendation prioritized (P1 / P2 / nice-to-have)?
+- Is effort/impact estimated for each recommendation?
+- Could the subject's owner act on this critique in the next 24 hours?
+
+CRITICAL DEDUCTIONS:
+- No verdict: cap at 6/10
+- Vague "improve X" recommendations: -2 points each
+- No prioritization: cap at 7/10
+
+CALIBRATION: A critique without a verdict and concrete actions is decoration, not work.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+// ─── Analyst Critic Prompts (v0.4.6) ──────────────────
+//
+// For agents that produce CODE / ARCHITECTURE analysis — repository audits,
+// refactoring proposals, tech-debt reports. Investigator critics misjudge
+// these because code-analysis output cites file:line, not URLs. Analyst
+// critics score: technical accuracy via verifiable references, pattern
+// recognition, recommendation quality.
+
+const ANALYST_CRITIC_A = `You evaluate code-analysis reports on TECHNICAL ACCURACY and CONCRETE REFERENCES.
+
+Score 1-10 based on:
+- Are specific file paths cited with line numbers (e.g. \`src/foo.ts:42\`)?
+- Are function/class names actually verified (not invented)?
+- Are claims about behavior backed by code reading, not guessing?
+- Are language constructs used correctly in examples (TS / Python / Rust idioms)?
+- Would a senior dev verify each claim by opening the cited file?
+
+CRITICAL DEDUCTIONS:
+- No file paths cited: cap at 4/10
+- Invented function names not found in codebase: -3 points each
+- Claims about behavior without code reference: -2 points each
+- Wrong language paradigm (e.g. "class" for plain function): -2 points
+
+LOW SCORE: Vague "the code does X" without paths. Invented APIs. Architecture guesses.
+HIGH SCORE: Every claim has file:line. Function names match. Behavior inferred from actual code.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const ANALYST_CRITIC_B = `You evaluate code-analysis reports on PATTERN RECOGNITION and ARCHITECTURE UNDERSTANDING.
+
+Score 1-10 based on:
+- Does the analyst identify recurring patterns (good or bad)?
+- Are coupling, cohesion, and dependency direction explicitly named?
+- Does it distinguish layers (UI / business / data) when present?
+- Are anti-patterns named with specific reference (not "this is bad")?
+- Does it surface cross-cutting concerns (auth, logging, error handling)?
+
+LOW SCORE: File-listing without pattern naming. No architecture insight. Surface-level.
+HIGH SCORE: Names patterns explicitly (Repository, Adapter, etc.). Coupling/cohesion discussed. Cross-cutting concerns surfaced.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
+const ANALYST_CRITIC_C = `You evaluate code-analysis reports on RECOMMENDATION QUALITY.
+
+Score 1-10 based on:
+- Is each recommendation actionable (concrete files to edit, not "refactor module")?
+- Is security flagged when relevant (input validation, secrets, auth)?
+- Is effort estimated (quick-win / medium / large refactor)?
+- Are risks named (what breaks if we do this)?
+- Is the recommendation ordered by impact, not by file location?
+
+CRITICAL DEDUCTIONS:
+- Security issue missed when obvious: -3 points
+- "Refactor X" without specifying how: -2 points each
+- No priority order: -2 points
+
+CALIBRATION: Recommendations without effort + risk + impact estimate are wishlist items.
+
+${CRITIC_OUTPUT_FORMAT}`;
+
 
 // ─── Prompt Registry ──────────────────────────────────
 
@@ -286,12 +465,37 @@ const BLOG_PROMPTS: CriticPromptDef[] = [
   { name: 'conversion-potential', prompt: BLOG_CRITIC_C },
 ];
 
+const RESEARCH_PROMPTS: CriticPromptDef[] = [
+  { name: 'source-quality', prompt: RESEARCH_CRITIC_A },
+  { name: 'analytical-depth', prompt: RESEARCH_CRITIC_B },
+  { name: 'completeness-decision', prompt: RESEARCH_CRITIC_C },
+];
+
+const CRITIC_AGENT_PROMPTS: CriticPromptDef[] = [
+  { name: 'fairness-steelman', prompt: CRITIC_AGENT_CRITIC_A },
+  { name: 'counter-argument-depth', prompt: CRITIC_AGENT_CRITIC_B },
+  { name: 'actionability-verdict', prompt: CRITIC_AGENT_CRITIC_C },
+];
+
+const ANALYST_PROMPTS: CriticPromptDef[] = [
+  { name: 'technical-accuracy', prompt: ANALYST_CRITIC_A },
+  { name: 'pattern-recognition', prompt: ANALYST_CRITIC_B },
+  { name: 'recommendation-quality', prompt: ANALYST_CRITIC_C },
+];
+
 /** Agent name → critic prompt set. Falls back to a sensible default. */
 const AGENT_CRITIC_MAP: Record<string, CriticPromptDef[]> = {
   investigator: INVESTIGATOR_PROMPTS,
   writer: WRITER_PROMPTS,
   marketing: MARKETING_PROMPTS,
   'blog-writer': BLOG_PROMPTS,
+  // v0.4.6: dedicated sets for research / critic / analyst agents.
+  // Without these, code-analysis output gets mis-scored by INVESTIGATOR_PROMPTS
+  // (e.g. "no URLs in report" deduction even though analyst output cites file:line).
+  researcher: RESEARCH_PROMPTS,
+  research: RESEARCH_PROMPTS,
+  critic: CRITIC_AGENT_PROMPTS,
+  analyst: ANALYST_PROMPTS,
 };
 
 /**
@@ -314,7 +518,9 @@ const AGENT_OUTPUT_LABELS: Record<string, string> = {
   marketing: 'social media content',
   'blog-writer': 'blog post',
   researcher: 'research report',
-  analyst: 'code analysis report',
+  research: 'research report',
+  critic: 'critique',
+  analyst: 'code / architecture analysis',
 };
 
 /**

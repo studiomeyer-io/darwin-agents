@@ -125,6 +125,15 @@ Be concise. No fluff. Capture the essence.`,
 | **critic** | Evaluates other agents' output (1-10) | Nothing |
 | **analyst** | Code quality analysis | Filesystem access |
 
+Each agent ships with a dedicated **multi-critic set** that scores the output by the right criteria for that agent type (research = source quality + analytical depth + completeness, analyst = technical accuracy with file:line refs + pattern recognition + recommendation quality, etc.). Custom agents can register their own critic sets — see `examples/custom-agent.ts` and `src/evolution/multi-critic.ts`.
+
+## Closed-Loop & Observability (v0.4.6)
+
+Two production patterns Darwin users commonly need but had to build themselves:
+
+- [`examples/closed-loop-feedback.ts`](examples/closed-loop-feedback.ts) — pipe critic findings into your own memory store so the next run sees them. Symmetric (writes both successes and failures), backend-agnostic. Matches the Hermes Agent v0.8.0 self-evolution pattern.
+- [`examples/staleness-monitor.ts`](examples/staleness-monitor.ts) — detect agents that stopped firing, or were configured but never fired. Pure classifier + format helpers + ready-made SQL. Wire to your own cron + alert webhook.
+
 ## How Evolution Works
 
 <!-- REAL_METRICS_START -->

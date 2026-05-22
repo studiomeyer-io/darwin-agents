@@ -1,6 +1,6 @@
 {
   "name": "darwin-agents",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "AI agents that improve themselves. Self-evolving prompts via A/B testing, multi-model critics, safety gates, and pattern detection.",
   "type": "module",
   "bin": {

@@ -47,6 +47,21 @@ export interface FetchRelevantOptions {
   limit?: number;
   /** Optional tag filter — passed through to the read tool if it honours it. */
   tags?: string[];
+  /**
+   * Per-call timeout override in ms. Falls back to `requestTimeoutMs` from
+   * the bridge config (default 10 000 ms). Useful for slow embedding-backed
+   * stores or when a particular query is known to be expensive.
+   */
+  timeoutMs?: number;
+}
+
+/** Options bag for `save()`. Mirrors the per-call timeout knob on read. */
+export interface SaveOptions {
+  /**
+   * Per-call timeout override in ms. Falls back to `requestTimeoutMs` from
+   * the bridge config (default 10 000 ms).
+   */
+  timeoutMs?: number;
 }
 
 /** Darwin-side store contract extended with retrieval + lifecycle. */
@@ -102,6 +117,77 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RESPAWN = 1;
 const DEFAULT_HTTP_MAX_RETRIES = 2;
 const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
+
+// ─── Errors ──────────────────────────────────────────
+
+/**
+ * Base class for bridge errors. Discriminates protocol-level (server-side
+ * JSON-RPC error responses) from transport-level (local timeouts, network
+ * resets, EPIPE, child process exits). Callers can branch on `kind` to
+ * decide retry-vs-fail-loud without parsing the message text.
+ *
+ * Mirrors the split MCP TypeScript SDK v2 uses internally (`ProtocolError`
+ * vs `SdkError`). We keep our own classes to preserve the bridge's
+ * zero-hard-dep policy.
+ */
+export class McpBridgeError extends Error {
+  /** 'protocol' = JSON-RPC error from the server, 'transport' = local. */
+  readonly kind: 'protocol' | 'transport';
+  /** JSON-RPC error code for protocol errors, or a stable string for transport errors. */
+  readonly code: number | string;
+  /** Which transport produced the error. */
+  readonly transport: 'stdio' | 'http';
+  constructor(opts: {
+    message: string;
+    kind: 'protocol' | 'transport';
+    code: number | string;
+    transport: 'stdio' | 'http';
+    cause?: unknown;
+  }) {
+    super(opts.message);
+    this.name = 'McpBridgeError';
+    this.kind = opts.kind;
+    this.code = opts.code;
+    this.transport = opts.transport;
+    if (opts.cause !== undefined) (this as { cause?: unknown }).cause = opts.cause;
+  }
+}
+
+/** JSON-RPC error from the server. `code` is the numeric JSON-RPC code. */
+export class McpBridgeProtocolError extends McpBridgeError {
+  constructor(opts: { code: number; serverMessage: string; transport: 'stdio' | 'http' }) {
+    super({
+      message: `mcp error ${opts.code}: ${opts.serverMessage}`,
+      kind: 'protocol',
+      code: opts.code,
+      transport: opts.transport,
+    });
+    this.name = 'McpBridgeProtocolError';
+  }
+}
+
+/**
+ * Local transport-layer error (timeout, EPIPE, network reset, child exit,
+ * abort, DNS). `code` is a short stable string for branching:
+ *   'timeout' | 'closed' | 'transient' | 'child_exit' | 'spawn_failed' | 'http_status'
+ */
+export class McpBridgeTransportError extends McpBridgeError {
+  constructor(opts: {
+    message: string;
+    code: 'timeout' | 'closed' | 'transient' | 'child_exit' | 'spawn_failed' | 'http_status';
+    transport: 'stdio' | 'http';
+    cause?: unknown;
+  }) {
+    super({
+      message: opts.message,
+      kind: 'transport',
+      code: opts.code,
+      transport: opts.transport,
+      cause: opts.cause,
+    });
+    this.name = 'McpBridgeTransportError';
+  }
+}
 
 /** Default mapping for `memory_learn` shape (local-memory-mcp, mcp-nex). */
 export function defaultMapWriteArgs(rec: FeedbackRecord): Record<string, unknown> {
@@ -233,8 +319,16 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
   }
 
   // ── FeedbackStore.save ─────────────────────────────
-  async save(record: FeedbackRecord): Promise<void> {
-    await this.callTool(this.config.writeTool, this.config.mapWriteArgs(record));
+  /**
+   * Persist a feedback record. Accepts an optional second arg for per-call
+   * overrides (currently `timeoutMs`). The signature stays a structural
+   * super-type of `FeedbackStore.save(record)`, so callers using the base
+   * interface keep working unchanged.
+   */
+  async save(record: FeedbackRecord, opts: SaveOptions = {}): Promise<void> {
+    await this.callTool(this.config.writeTool, this.config.mapWriteArgs(record), {
+      timeoutMs: opts.timeoutMs,
+    });
   }
 
   // ── RetrievableFeedbackStore.fetchRelevant ─────────
@@ -248,7 +342,9 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
         : queryOrOpts;
     const args: Record<string, unknown> = { query: opts.query, limit: opts.limit ?? 5 };
     if (opts.tags && opts.tags.length > 0) args.tags = opts.tags;
-    const result = await this.callTool(this.config.readTool, args);
+    const result = await this.callTool(this.config.readTool, args, {
+      timeoutMs: opts.timeoutMs,
+    });
     return this.config.mapReadResult(result);
   }
 
@@ -268,14 +364,26 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
     }
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error('bridge closed'));
+      p.reject(
+        new McpBridgeTransportError({
+          message: 'bridge closed',
+          code: 'closed',
+          transport: this.config.transport,
+        }),
+      );
     }
     this.pending.clear();
   }
 
   // ── Internals ──────────────────────────────────────
   private async ensureReady(): Promise<void> {
-    if (this.closed) throw new Error('bridge is closed');
+    if (this.closed) {
+      throw new McpBridgeTransportError({
+        message: 'bridge is closed',
+        code: 'closed',
+        transport: this.config.transport,
+      });
+    }
     if (this.initialized) return;
     if (!this.initInFlight) {
       // F4: do NOT auto-clear initInFlight in .catch. Leave the rejected
@@ -359,7 +467,13 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
     const reason = `child exited (code=${code}, signal=${signal})`;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error(reason));
+      p.reject(
+        new McpBridgeTransportError({
+          message: reason,
+          code: 'child_exit',
+          transport: 'stdio',
+        }),
+      );
     }
     this.pending.clear();
     if (this.closed) return;
@@ -401,7 +515,13 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
     clearTimeout(pending.timer);
     if (msg.error) {
       const err = msg.error as { message?: string; code?: number };
-      pending.reject(new Error(`mcp error ${err.code ?? '?'}: ${err.message ?? 'unknown'}`));
+      pending.reject(
+        new McpBridgeProtocolError({
+          code: typeof err.code === 'number' ? err.code : -32603,
+          serverMessage: err.message ?? 'unknown',
+          transport: this.config.transport,
+        }),
+      );
       return;
     }
     pending.resolve(msg.result);
@@ -424,28 +544,53 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
    * F1: no inline respawn — ensureReady/initialize is the only path that
    * spawns. This avoids the double-spawn race where rpc() and ensureReady()
    * both spawn children competing for `this.child`.
+   *
+   * `timeoutMs` overrides the bridge-level `requestTimeoutMs` for this call.
    */
-  private async rpc(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async rpc(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
     if (this.config.transport === 'http') {
-      return this.rpcHttp(method, params);
+      return this.rpcHttp(method, params, timeoutMs);
     }
-    return this.rpcStdio(method, params);
+    return this.rpcStdio(method, params, timeoutMs);
   }
 
-  private rpcStdio(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private rpcStdio(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
+    const effectiveTimeout = timeoutMs ?? this.config.requestTimeoutMs;
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`rpc ${method} timed out after ${this.config.requestTimeoutMs}ms`));
-      }, this.config.requestTimeoutMs);
+        reject(
+          new McpBridgeTransportError({
+            message: `rpc ${method} timed out after ${effectiveTimeout}ms`,
+            code: 'timeout',
+            transport: 'stdio',
+          }),
+        );
+      }, effectiveTimeout);
       this.pending.set(id, { resolve, reject, timer });
       try {
         this.sendStdio({ jsonrpc: '2.0', id, method, params });
       } catch (err) {
         this.pending.delete(id);
         clearTimeout(timer);
-        reject(err as Error);
+        // EPIPE / ERR_STREAM_DESTROYED on a dying child.
+        reject(
+          new McpBridgeTransportError({
+            message: `stdio write failed: ${(err as Error).message}`,
+            code: 'child_exit',
+            transport: 'stdio',
+            cause: err,
+          }),
+        );
       }
     });
   }
@@ -453,27 +598,41 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
   /**
    * HTTP transport with bounded retries on 5xx + transient network errors.
    * Per-attempt timeout via AbortController. Honors `httpMaxRetries`.
+   *
+   * Sends the `MCP-Protocol-Version` HTTP header per MCP spec 2025-11-25
+   * §"HTTP Protocol Versioning". Strict servers MAY return 400 if it is
+   * missing or unsupported.
    */
-  private async rpcHttp(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async rpcHttp(
+    method: string,
+    params: Record<string, unknown>,
+    timeoutMs?: number,
+  ): Promise<unknown> {
     const url = typeof this.config.endpoint === 'string'
       ? this.config.endpoint
       : this.config.endpoint.join('');
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
+      // MCP spec 2025-11-25: clients MUST include MCP-Protocol-Version on
+      // every request so the server can negotiate. Without it some servers
+      // respond 400. We use lowercase per fetch spec recommendation;
+      // header matching is case-insensitive per RFC 9110 §5.1.
+      'mcp-protocol-version': this.config.protocolVersion,
     };
     if (this.config.authHeader) headers.authorization = this.config.authHeader;
     const id = this.nextId++;
     const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params });
     const maxAttempts = this.config.httpMaxRetries + 1;
-    let lastErr: Error | null = null;
+    const effectiveTimeout = timeoutMs ?? this.config.requestTimeoutMs;
+    let lastErr: McpBridgeError | null = null;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         const backoffMs = 250 * Math.pow(2, attempt - 1);
         await delay(backoffMs);
       }
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.config.requestTimeoutMs);
+      const timer = setTimeout(() => controller.abort(), effectiveTimeout);
       try {
         const res = await fetch(url, {
           method: 'POST',
@@ -484,11 +643,19 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
         // 4xx is the server saying "your request is bad" — do not retry.
         if (res.status >= 400 && res.status < 500) {
           const text = await res.text().catch(() => '');
-          throw new Error(`http ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+          throw new McpBridgeTransportError({
+            message: `http ${res.status} ${res.statusText}: ${text.slice(0, 200)}`,
+            code: 'http_status',
+            transport: 'http',
+          });
         }
         // 5xx → retry
         if (res.status >= 500) {
-          lastErr = new Error(`http ${res.status} ${res.statusText}`);
+          lastErr = new McpBridgeTransportError({
+            message: `http ${res.status} ${res.statusText}`,
+            code: 'http_status',
+            transport: 'http',
+          });
           this.config.logger.warn(
             `${lastErr.message} (attempt ${attempt + 1}/${maxAttempts})`,
           );
@@ -508,33 +675,77 @@ export class McpMemoryBridge implements RetrievableFeedbackStore {
         }
         if (body.error) {
           const err = body.error as { message?: string; code?: number };
-          throw new Error(`mcp error ${err.code ?? '?'}: ${err.message ?? 'unknown'}`);
+          throw new McpBridgeProtocolError({
+            code: typeof err.code === 'number' ? err.code : -32603,
+            serverMessage: err.message ?? 'unknown',
+            transport: 'http',
+          });
         }
         return body.result;
       } catch (err) {
+        // Protocol errors are non-retryable — bubble immediately.
+        if (err instanceof McpBridgeProtocolError) throw err;
+
         const e = err as Error & { name?: string };
         // Abort due to timeout, network reset, or DNS failure → retry
-        const isTransient =
-          e.name === 'AbortError' ||
-          /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(e.message ?? '');
+        const isTimeout = e.name === 'AbortError';
+        const isTransientNet = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|fetch failed/i.test(e.message ?? '');
+        const isTransient = isTimeout || isTransientNet;
+
         if (isTransient && attempt < maxAttempts - 1) {
-          lastErr = e;
+          lastErr = new McpBridgeTransportError({
+            message: `transient http error: ${e.message}`,
+            code: isTimeout ? 'timeout' : 'transient',
+            transport: 'http',
+            cause: err,
+          });
           this.config.logger.warn(
-            `transient http error: ${e.message} (attempt ${attempt + 1}/${maxAttempts})`,
+            `${lastErr.message} (attempt ${attempt + 1}/${maxAttempts})`,
           );
           continue;
         }
-        throw err;
+
+        // Re-wrap raw errors so callers always see a McpBridge* instance.
+        if (err instanceof McpBridgeError) throw err;
+        if (isTimeout) {
+          throw new McpBridgeTransportError({
+            message: `rpc ${method} timed out after ${effectiveTimeout}ms`,
+            code: 'timeout',
+            transport: 'http',
+            cause: err,
+          });
+        }
+        throw new McpBridgeTransportError({
+          message: e.message,
+          code: 'transient',
+          transport: 'http',
+          cause: err,
+        });
       } finally {
         clearTimeout(timer);
       }
     }
-    throw lastErr ?? new Error('rpcHttp exhausted retries');
+    throw (
+      lastErr ??
+      new McpBridgeTransportError({
+        message: 'rpcHttp exhausted retries',
+        code: 'transient',
+        transport: 'http',
+      })
+    );
   }
 
-  private async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Invoke a tool. Accepts a per-call `opts.timeoutMs` override that takes
+   * precedence over the bridge-level `requestTimeoutMs` config.
+   */
+  private async callTool(
+    name: string,
+    args: Record<string, unknown>,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<unknown> {
     await this.ensureReady();
-    return this.rpc('tools/call', { name, arguments: args });
+    return this.rpc('tools/call', { name, arguments: args }, opts.timeoutMs);
   }
 }
 
@@ -596,13 +807,8 @@ export function localMemory(overrides: Partial<McpMemoryConfig> = {}): McpMemory
  * Example: connect to your hosted memory.studiomeyer.io endpoint
  *   remoteMemory('https://memory.studiomeyer.io/mcp', { authHeader: `Bearer ${KEY}` })
  *
- * Example: Mem0 with tool-name + arg aliasing
- *   remoteMemory('https://api.mem0.ai/mcp', {
- *     authHeader: `Bearer ${process.env.MEM0_KEY}`,
- *     writeTool: 'mem0_add',
- *     readTool: 'mem0_search',
- *     mapWriteArgs: (rec) => ({ content: rec.content, metadata: { tags: rec.tags } }),
- *   })
+ * Example: Mem0 with tool-name + arg aliasing — see `mem0Preset()` below
+ * for a one-line spread that handles all of this for you.
  */
 export function remoteMemory(url: string, overrides: Partial<McpMemoryConfig> = {}): McpMemoryBridge {
   return new McpMemoryBridge({
@@ -610,6 +816,131 @@ export function remoteMemory(url: string, overrides: Partial<McpMemoryConfig> = 
     endpoint: url,
     ...overrides,
   });
+}
+
+// ─── Provider presets ────────────────────────────────
+
+/**
+ * Mem0 MCP server preset — drop-in overrides that match the exact tool
+ * names + arg shapes the `mem0ai/mem0-mcp` server expects.
+ *
+ * Reference: github.com/mem0ai/mem0-mcp — tools are `add_memory` (NOT
+ * `mem0_add` or `add_memories`) and `search_memories` (NOT `search_memory`).
+ * Add-args require one of `text`/`messages` + at least one of
+ * `user_id`/`agent_id`/`run_id`. Search-result rows expose the lesson
+ * text under `memory` (not `content`/`body`/`text`).
+ *
+ * Usage with the hosted Mem0 platform:
+ * \`\`\`ts
+ * const memory = remoteMemory('https://api.mem0.ai/mcp', {
+ *   authHeader: `Bearer ${process.env.MEM0_KEY}`,
+ *   ...mem0Preset({ userId: 'darwin-agent' }),
+ * });
+ * \`\`\`
+ *
+ * Usage with a locally spawned mem0-mcp server (stdio):
+ * \`\`\`ts
+ * const memory = new McpMemoryBridge({
+ *   transport: 'stdio',
+ *   endpoint: ['uvx', 'mem0-mcp'],
+ *   ...mem0Preset({ userId: 'darwin-agent' }),
+ * });
+ * \`\`\`
+ *
+ * Spread order matters: put `...mem0Preset(...)` AFTER other overrides if
+ * you want the preset to win, or BEFORE if you want to override the
+ * preset's defaults yourself.
+ */
+export function mem0Preset(opts: {
+  /**
+   * Mem0 scope identifier. Required because `add_memory` rejects writes
+   * without at least one of user_id / agent_id / run_id.
+   */
+  userId?: string;
+  agentId?: string;
+  runId?: string;
+  /** Extra metadata merged into every write under the `metadata` key. */
+  defaultMetadata?: Record<string, unknown>;
+} = {}): Partial<McpMemoryConfig> {
+  const scope: Record<string, unknown> = {};
+  if (opts.userId) scope.user_id = opts.userId;
+  if (opts.agentId) scope.agent_id = opts.agentId;
+  if (opts.runId) scope.run_id = opts.runId;
+
+  return {
+    writeTool: 'add_memory',
+    readTool: 'search_memories',
+    mapWriteArgs: (rec) => ({
+      text: rec.content,
+      metadata: {
+        polarity: rec.polarity,
+        confidence: rec.confidence,
+        tags: rec.tags,
+        ...(opts.defaultMetadata ?? {}),
+      },
+      ...scope,
+    }),
+    mapReadResult: (raw): Lesson[] => {
+      // Mem0 responses come back as a JSON string inside content[0].text.
+      // Pull it via the same extractor used by the default mapper.
+      const parsed = mem0ExtractStructured(raw);
+      if (!parsed || typeof parsed !== 'object') return [];
+
+      // Mem0 search returns `{ results: [{ id, memory, metadata, score? }] }`
+      // (sometimes wrapped in another envelope when the platform queues async).
+      const envelope = parsed as Record<string, unknown>;
+      const results = (envelope.results ?? envelope.data ?? envelope) as unknown;
+      if (!Array.isArray(results)) return [];
+
+      const out: Lesson[] = [];
+      for (const item of results) {
+        if (!item || typeof item !== 'object') continue;
+        const row = item as Record<string, unknown>;
+        // The lesson text lives under `memory` in Mem0 (vs `content`/`body`
+        // in mcp-nex / local-memory-mcp). Fall back to `content` for safety
+        // in case a custom Mem0 build returns the older shape.
+        const content =
+          typeof row.memory === 'string'
+            ? row.memory
+            : typeof row.content === 'string'
+            ? row.content
+            : null;
+        if (!content) continue;
+
+        // Mem0 stores tags inside `metadata.tags` rather than top-level.
+        const meta = row.metadata as Record<string, unknown> | undefined;
+        const tagsFromMeta = meta && Array.isArray(meta.tags) ? meta.tags : [];
+        const tagsFromTop = Array.isArray(row.tags) ? row.tags : [];
+        const tags = [...tagsFromMeta, ...tagsFromTop].filter(
+          (t): t is string => typeof t === 'string',
+        );
+
+        const scoreRaw = row.score ?? row.rank;
+        const score = typeof scoreRaw === 'number' && Number.isFinite(scoreRaw) ? scoreRaw : undefined;
+        out.push({ content, tags, score });
+      }
+      return out;
+    },
+  };
+}
+
+/** Local copy of extractStructured for the preset's own mapper. */
+function mem0ExtractStructured(raw: unknown): unknown {
+  if (raw == null || typeof raw !== 'object') return raw;
+  const r = raw as Record<string, unknown>;
+  if (Array.isArray(r.content)) {
+    for (const block of r.content as Array<Record<string, unknown>>) {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        try {
+          return JSON.parse(block.text);
+        } catch {
+          return block.text;
+        }
+      }
+    }
+  }
+  if ('structuredContent' in r && r.structuredContent != null) return r.structuredContent;
+  return raw;
 }
 
 // ─── Demo ────────────────────────────────────────────

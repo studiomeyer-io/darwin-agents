@@ -161,12 +161,11 @@ const memory = localMemory();
 // Or any remote MCP-Memory server
 // const memory = remoteMemory('https://your-mcp.example.com/mcp', { authHeader: `Bearer ${KEY}` });
 
-// Or Mem0 with tool-name + arg aliasing
+// Or Mem0 with the built-in preset — handles tool names + arg shape for you
+// import { mem0Preset } from 'darwin-agents/memory/bridge';
 // const memory = remoteMemory('https://api.mem0.ai/mcp', {
 //   authHeader: `Bearer ${process.env.MEM0_KEY}`,
-//   writeTool: 'mem0_add',
-//   readTool: 'mem0_search',
-//   mapWriteArgs: (rec) => ({ messages: [{ role: 'user', content: rec.content }], metadata: { tags: rec.tags } }),
+//   ...mem0Preset({ userId: 'darwin-agent', defaultMetadata: { project: 'darwin' } }),
 // });
 
 const result = await runClosedLoopTurn(
@@ -182,7 +181,7 @@ const result = await runClosedLoopTurn(
 |---|---|---|---|
 | **`@studiomeyer/local-memory-mcp`** (default) | `memory_learn` | `memory_search` | zero-config, single SQLite file, no cloud |
 | Any self-hosted MCP-Memory server | `memory_learn` | `memory_search` | same wire, remote endpoint |
-| Mem0 MCP | `mem0_add` | `mem0_search` | needs `mapWriteArgs` for the `messages` shape |
+| **Mem0 MCP** (`mem0ai/mem0-mcp`) | `add_memory` | `search_memories` | use `...mem0Preset({ userId })` — handles tool names + arg shape + the `memory` field in result rows |
 | Zep MCP | `zep_add` | `zep_search` | optional `mapWriteArgs` for `group_id` |
 | Letta MCP | `archival_insert` | `archival_search` | optional `mapReadResult` for their envelope |
 | Cognee MCP | `cognee_add` | `cognee_search` | optional mappers |
@@ -191,6 +190,50 @@ Why an MCP-shaped bridge? Because the wire is the same — only tool names
 and arg shapes vary. One bridge, one reconnect path, one timeout policy.
 The pattern matches the [MCP Bridge proxy paper (arXiv 2504.08999)](https://arxiv.org/html/2504.08999v2)
 but stays inside the Darwin process — no extra service to deploy.
+
+### v0.4.9 polish (2026-05-22)
+
+- **Spec-compliant transport.** Every HTTP request now carries the
+  `MCP-Protocol-Version: 2025-11-25` header, per MCP spec 2025-11-25
+  §"HTTP Protocol Versioning". Strict servers MAY return `400` without
+  it; pre-v0.4.9 only sent the version inside the `initialize` payload.
+
+- **Typed errors.** Bridge errors are now instances of
+  `McpBridgeProtocolError` (JSON-RPC errors from the server, numeric
+  `code`) or `McpBridgeTransportError` (local timeouts, EPIPE, network
+  resets, child exits — stable string `code`). Branch on `instanceof`
+  to decide retry vs fail-loud without parsing message text.
+
+  ```typescript
+  import {
+    McpBridgeProtocolError,
+    McpBridgeTransportError,
+  } from 'darwin-agents/memory/bridge';
+
+  try {
+    await memory.save(record);
+  } catch (err) {
+    if (err instanceof McpBridgeTransportError && err.code === 'timeout') {
+      // local timeout — safe to retry
+    } else if (err instanceof McpBridgeProtocolError && err.code === -32602) {
+      // server said our args are invalid — fail loud, don't retry
+    }
+  }
+  ```
+
+- **Per-call timeouts.** `save()` and `fetchRelevant()` accept a
+  `timeoutMs` override that beats the bridge-level default, mirroring
+  the MCP SDK's `client.callTool(..., { timeout })`. Useful for one-off
+  slow embedding searches without raising `requestTimeoutMs` globally.
+
+  ```typescript
+  await memory.fetchRelevant({ query: 'audit', limit: 5, timeoutMs: 30_000 });
+  await memory.save(record, { timeoutMs: 5_000 });
+  ```
+
+- **Mem0 preset.** `...mem0Preset({ userId })` wires the right tool
+  names (`add_memory` + `search_memories`) and arg shapes for the
+  official `mem0ai/mem0-mcp` server. See the example above.
 
 See [`examples/memory-darwin-integration.ts`](examples/memory-darwin-integration.ts)
 for the full closed-loop pattern: fetch relevant lessons → render them as

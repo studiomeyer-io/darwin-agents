@@ -16,8 +16,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   McpMemoryBridge,
+  McpBridgeError,
+  McpBridgeProtocolError,
+  McpBridgeTransportError,
   defaultMapWriteArgs,
   defaultMapReadResult,
+  mem0Preset,
   remoteMemory,
   type McpMemoryConfig,
   type Lesson,
@@ -675,6 +679,464 @@ describe('Concurrent calls (single-flight initialize)', () => {
       ]);
       assert.equal(inits, 1, `expected single initialize, got ${inits}`);
       await bridge.close();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ─── v0.4.9 — MCP-Protocol-Version header ────────────
+
+describe('MCP-Protocol-Version HTTP header (v0.4.9)', () => {
+  it('sends mcp-protocol-version on every HTTP request (MCP spec 2025-11-25)', async () => {
+    const receivedHeaders: string[] = [];
+    const server = createServer((req, res) => {
+      // Header names are normalized to lowercase by Node's http parser.
+      const v = req.headers['mcp-protocol-version'];
+      if (typeof v === 'string') receivedHeaders.push(v);
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number; method: string };
+        res.setHeader('content-type', 'application/json');
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result:
+              parsed.method === 'initialize'
+                ? { protocolVersion: '2025-11-25', capabilities: {} }
+                : { content: [{ type: 'text', text: '{}' }] },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const bridge = remoteMemory(`http://127.0.0.1:${port}`);
+      await bridge.save({ polarity: 'pattern', content: 'a', tags: [], confidence: 0.5 });
+      await bridge.fetchRelevant({ query: 'x', limit: 1 });
+      await bridge.close();
+      // initialize + tools/call save + tools/call fetch = 3 requests, all with header.
+      assert.equal(receivedHeaders.length, 3, `expected 3 requests with header, got ${receivedHeaders.length}`);
+      for (const v of receivedHeaders) {
+        assert.equal(v, '2025-11-25');
+      }
+    } finally {
+      server.close();
+    }
+  });
+
+  it('honors custom protocolVersion override in config', async () => {
+    const receivedHeaders: string[] = [];
+    const server = createServer((req, res) => {
+      const v = req.headers['mcp-protocol-version'];
+      if (typeof v === 'string') receivedHeaders.push(v);
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number };
+        res.setHeader('content-type', 'application/json');
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: parsed.id,
+            result: { content: [{ type: 'text', text: '{}' }] },
+          }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const bridge = remoteMemory(`http://127.0.0.1:${port}`, { protocolVersion: '2025-06-18' });
+      await bridge.save({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.5 });
+      await bridge.close();
+      assert.ok(receivedHeaders.every((v) => v === '2025-06-18'));
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ─── v0.4.9 — Custom error classes ───────────────────
+
+describe('McpBridge error classes (v0.4.9)', () => {
+  it('protocol errors throw McpBridgeProtocolError with numeric code', async () => {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number; method: string };
+        res.setHeader('content-type', 'application/json');
+        if (parsed.method === 'initialize') {
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: { protocolVersion: '2025-11-25', capabilities: {} } }));
+          return;
+        }
+        res.end(
+          JSON.stringify({ jsonrpc: '2.0', id: parsed.id, error: { code: -32602, message: 'invalid params' } }),
+        );
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const bridge = remoteMemory(`http://127.0.0.1:${port}`);
+      let caught: unknown;
+      try {
+        await bridge.save({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.5 });
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof McpBridgeError);
+      assert.ok(caught instanceof McpBridgeProtocolError);
+      const e = caught as McpBridgeProtocolError;
+      assert.equal(e.kind, 'protocol');
+      assert.equal(e.code, -32602);
+      assert.equal(e.transport, 'http');
+      assert.match(e.message, /-32602/);
+      await bridge.close();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('local 4xx throws McpBridgeTransportError(code="http_status")', async () => {
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number; method: string };
+        if (parsed.method === 'initialize') {
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: { protocolVersion: '2025-11-25', capabilities: {} } }));
+          return;
+        }
+        res.statusCode = 400;
+        res.end('bad request');
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const bridge = remoteMemory(`http://127.0.0.1:${port}`, { logger: { warn: () => {} } });
+      let caught: unknown;
+      try {
+        await bridge.save({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.5 });
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof McpBridgeTransportError);
+      const e = caught as McpBridgeTransportError;
+      assert.equal(e.kind, 'transport');
+      assert.equal(e.code, 'http_status');
+      assert.equal(e.transport, 'http');
+      await bridge.close();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('close() rejects pending RPCs with McpBridgeTransportError(code="closed")', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-bridge-err-close-'));
+    const fakePath = join(dir, 'fake-mcp-slow.mjs');
+    writeFileSync(
+      fakePath,
+      `
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n');
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: {} } });
+    }
+  }
+});
+      `.trim(),
+    );
+    try {
+      const bridge = new McpMemoryBridge({
+        transport: 'stdio',
+        endpoint: ['node', fakePath],
+        requestTimeoutMs: 10_000,
+        logger: { warn: () => {} },
+      });
+      const pending = bridge.save({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.5 });
+      await new Promise((r) => setTimeout(r, 100));
+      await bridge.close();
+      let caught: unknown;
+      try {
+        await pending;
+      } catch (err) {
+        caught = err;
+      }
+      assert.ok(caught instanceof McpBridgeTransportError);
+      assert.equal((caught as McpBridgeTransportError).code, 'closed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─── v0.4.9 — Per-call timeout ───────────────────────
+
+describe('per-call timeoutMs override (v0.4.9)', () => {
+  it('fetchRelevant({ timeoutMs }) preempts the slower bridge-level timeout', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-bridge-timeout-'));
+    const fakePath = join(dir, 'fake-mcp-never.mjs');
+    writeFileSync(
+      fakePath,
+      `
+const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\\n');
+let buf = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    let msg;
+    try { msg = JSON.parse(line); } catch { continue; }
+    if (msg.method === 'initialize') {
+      send({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-11-25', capabilities: {} } });
+    }
+    // tools/call: never reply
+  }
+});
+      `.trim(),
+    );
+    try {
+      // Bridge-level timeout is 10s — per-call should win at 150 ms.
+      const bridge = new McpMemoryBridge({
+        transport: 'stdio',
+        endpoint: ['node', fakePath],
+        requestTimeoutMs: 10_000,
+        logger: { warn: () => {} },
+      });
+      const start = Date.now();
+      let caught: unknown;
+      try {
+        await bridge.fetchRelevant({ query: 'never-replies', limit: 1, timeoutMs: 150 });
+      } catch (err) {
+        caught = err;
+      }
+      const elapsed = Date.now() - start;
+      assert.ok(caught instanceof McpBridgeTransportError, `expected transport error, got ${(caught as Error)?.constructor.name}`);
+      assert.equal((caught as McpBridgeTransportError).code, 'timeout');
+      // Should have fired around 150 ms, definitely well under the 10s bridge default.
+      assert.ok(elapsed < 3000, `expected per-call timeout to win, took ${elapsed}ms`);
+      await bridge.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('save({}, { timeoutMs }) routes through to the rpc layer (http)', async () => {
+    // Hang the second tools/call long enough that the per-call timeout fires.
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number; method: string };
+        if (parsed.method === 'initialize') {
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: { protocolVersion: '2025-11-25', capabilities: {} } }));
+          return;
+        }
+        // tools/call — never respond
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const bridge = remoteMemory(`http://127.0.0.1:${port}`, {
+        requestTimeoutMs: 60_000,
+        httpMaxRetries: 0, // disable retries so we measure the timeout once
+        logger: { warn: () => {} },
+      });
+      const start = Date.now();
+      let caught: unknown;
+      try {
+        await bridge.save(
+          { polarity: 'pattern', content: 'x', tags: [], confidence: 0.5 },
+          { timeoutMs: 200 },
+        );
+      } catch (err) {
+        caught = err;
+      }
+      const elapsed = Date.now() - start;
+      assert.ok(caught instanceof McpBridgeTransportError);
+      assert.equal((caught as McpBridgeTransportError).code, 'timeout');
+      assert.ok(elapsed < 3000, `expected per-call timeout to win, took ${elapsed}ms`);
+      await bridge.close();
+    } finally {
+      server.close();
+    }
+  });
+});
+
+// ─── v0.4.9 — mem0Preset() ───────────────────────────
+
+describe('mem0Preset() (v0.4.9)', () => {
+  it('returns the correct tool names from the mem0ai/mem0-mcp server', () => {
+    const preset = mem0Preset({ userId: 'darwin-agent' });
+    // Mem0 docs verified 2026-05-22: add_memory (NOT add_memories / mem0_add),
+    // search_memories (NOT search_memory).
+    assert.equal(preset.writeTool, 'add_memory');
+    assert.equal(preset.readTool, 'search_memories');
+  });
+
+  it('mapWriteArgs builds Mem0-shaped payload with user_id + metadata', () => {
+    const preset = mem0Preset({ userId: 'alice', defaultMetadata: { project: 'darwin' } });
+    const rec: FeedbackRecord = {
+      polarity: 'mistake',
+      content: 'Critic flagged missing source citation.',
+      tags: ['darwin-feedback', 'low-quality', 'agent:researcher'],
+      confidence: 0.78,
+    };
+    const args = preset.mapWriteArgs!(rec);
+    assert.equal(args.text, rec.content);
+    assert.equal(args.user_id, 'alice');
+    const meta = args.metadata as Record<string, unknown>;
+    assert.equal(meta.polarity, 'mistake');
+    assert.equal(meta.confidence, 0.78);
+    assert.deepEqual(meta.tags, rec.tags);
+    assert.equal(meta.project, 'darwin');
+  });
+
+  it('mapWriteArgs accepts agentId / runId scope alternatives', () => {
+    const presetA = mem0Preset({ agentId: 'researcher' });
+    const argsA = presetA.mapWriteArgs!({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.6 });
+    assert.equal(argsA.agent_id, 'researcher');
+    assert.equal(argsA.user_id, undefined);
+
+    const presetR = mem0Preset({ runId: 'run_42' });
+    const argsR = presetR.mapWriteArgs!({ polarity: 'pattern', content: 'x', tags: [], confidence: 0.6 });
+    assert.equal(argsR.run_id, 'run_42');
+  });
+
+  it('mapReadResult extracts lessons from Mem0 shape ({results:[{memory,metadata}]})', () => {
+    const preset = mem0Preset({ userId: 'alice' });
+    const raw = {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            results: [
+              {
+                id: 'mem_001',
+                memory: 'User is allergic to peanuts.',
+                metadata: { polarity: 'pattern', tags: ['food', 'health'] },
+                score: 0.91,
+              },
+              {
+                id: 'mem_002',
+                memory: 'User prefers dark mode.',
+                metadata: { tags: ['ui'] },
+              },
+            ],
+          }),
+        },
+      ],
+    };
+    const lessons = preset.mapReadResult!(raw);
+    assert.equal(lessons.length, 2);
+    assert.equal(lessons[0].content, 'User is allergic to peanuts.');
+    assert.equal(lessons[0].score, 0.91);
+    assert.deepEqual(lessons[0].tags, ['food', 'health']);
+    assert.equal(lessons[1].content, 'User prefers dark mode.');
+    assert.equal(lessons[1].score, undefined);
+  });
+
+  it('mapReadResult tolerates structuredContent shortcut', () => {
+    const preset = mem0Preset({ userId: 'alice' });
+    const raw = {
+      structuredContent: { results: [{ memory: 'direct payload', metadata: {} }] },
+    };
+    const lessons = preset.mapReadResult!(raw);
+    assert.equal(lessons.length, 1);
+    assert.equal(lessons[0].content, 'direct payload');
+  });
+
+  it('mapReadResult returns [] for unknown shapes', () => {
+    const preset = mem0Preset({ userId: 'alice' });
+    assert.deepEqual(preset.mapReadResult!(null), []);
+    assert.deepEqual(preset.mapReadResult!({ content: [] }), []);
+    assert.deepEqual(preset.mapReadResult!({ content: [{ type: 'text', text: 'not-json' }] }), []);
+    assert.deepEqual(preset.mapReadResult!({ structuredContent: { results: 'not-an-array' } }), []);
+  });
+
+  it('integrates as a one-line spread into remoteMemory()', async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const server = createServer((req, res) => {
+      let body = '';
+      req.on('data', (chunk) => (body += chunk));
+      req.on('end', () => {
+        const parsed = JSON.parse(body) as { id: number; method: string; params: { name?: string; arguments?: unknown } };
+        res.setHeader('content-type', 'application/json');
+        if (parsed.method === 'initialize') {
+          res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: { protocolVersion: '2025-11-25', capabilities: {} } }));
+          return;
+        }
+        if (parsed.method === 'tools/call') {
+          calls.push({
+            name: parsed.params.name as string,
+            args: parsed.params.arguments as Record<string, unknown>,
+          });
+          // Mem0-shaped response for searches
+          const isSearch = parsed.params.name === 'search_memories';
+          const payload = isSearch
+            ? { results: [{ id: 'mem_x', memory: 'recalled lesson', metadata: { tags: ['t'] } }] }
+            : { id: 'mem_new', event: 'ADD' };
+          res.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: parsed.id,
+              result: { content: [{ type: 'text', text: JSON.stringify(payload) }] },
+            }),
+          );
+        }
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+    try {
+      const memory = remoteMemory(`http://127.0.0.1:${port}`, {
+        authHeader: 'Bearer fake-mem0-key',
+        ...mem0Preset({ userId: 'darwin-agent' }),
+      });
+      await memory.save({
+        polarity: 'pattern',
+        content: 'Darwin learned X.',
+        tags: ['t'],
+        confidence: 0.8,
+      });
+      const lessons = await memory.fetchRelevant({ query: 'X', limit: 3 });
+      await memory.close();
+      assert.equal(calls.length, 2);
+      assert.equal(calls[0].name, 'add_memory');
+      assert.equal(calls[0].args.user_id, 'darwin-agent');
+      assert.equal(calls[1].name, 'search_memories');
+      assert.equal(lessons.length, 1);
+      assert.equal(lessons[0].content, 'recalled lesson');
+      assert.deepEqual(lessons[0].tags, ['t']);
     } finally {
       server.close();
     }

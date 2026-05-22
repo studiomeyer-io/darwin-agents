@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.4.9] — 2026-05-22
+
+Polish on top of v0.4.8. Adds spec-compliance, error classification,
+per-call timeouts, and a Mem0 preset — all derived from a deep read of
+the MCP TypeScript SDK + MCP spec 2025-11-25 + Mem0 MCP server source
+(`mem0ai/mem0-mcp`).
+
+### Added
+
+- **`McpBridgeError` / `McpBridgeProtocolError` / `McpBridgeTransportError`** —
+  exported error classes that discriminate JSON-RPC server errors
+  (`kind: 'protocol'`, numeric `code`) from local transport errors
+  (`kind: 'transport'`, stable string `code` ∈ `timeout` / `closed` /
+  `transient` / `child_exit` / `spawn_failed` / `http_status`). Callers
+  can `instanceof`-check to decide retry vs fail-loud without parsing
+  message text. Mirrors the `ProtocolError` vs `SdkError` split that
+  the MCP TypeScript SDK v2 uses internally; we keep our own classes to
+  preserve the zero-hard-deps policy.
+
+- **Per-call `timeoutMs` override** on `save()` and `fetchRelevant()`.
+  Mirrors `client.callTool(..., { timeout })` from the MCP SDK. Useful
+  for one-off slow operations (large embedding searches) without
+  cranking the bridge-wide `requestTimeoutMs`.
+
+  ```ts
+  await memory.fetchRelevant({ query: 'X', limit: 5, timeoutMs: 30_000 });
+  await memory.save(record, { timeoutMs: 5_000 });
+  ```
+
+- **`mem0Preset()`** — drop-in `Partial<McpMemoryConfig>` that wires
+  Darwin to the official `mem0ai/mem0-mcp` server with the right tool
+  names (`add_memory` + `search_memories` — NOT the `mem0_add` /
+  `mem0_search` guess from earlier docs) and arg shapes. Handles
+  user/agent/run scoping, default metadata, and the `memory` field in
+  result rows.
+
+  ```ts
+  const memory = remoteMemory('https://api.mem0.ai/mcp', {
+    authHeader: `Bearer ${process.env.MEM0_KEY}`,
+    ...mem0Preset({ userId: 'darwin-agent', defaultMetadata: { project: 'darwin' } }),
+  });
+  ```
+
+### Fixed
+
+- **MCP-Protocol-Version HTTP header** is now sent on every HTTP request,
+  per MCP spec 2025-11-25 §"HTTP Protocol Versioning". Without it,
+  strict servers MAY respond `400 Bad Request`. Previously the bridge
+  only carried the version inside the `initialize` payload, which left
+  every subsequent `tools/call` un-versioned at the transport layer.
+  The version defaults to `2025-11-25` and is honored when overridden
+  via `protocolVersion` in the bridge config.
+
+- Internal raw `Error` throws in `rpcStdio` / `rpcHttp` / `onChildExit`
+  / `ensureReady` / `close()` are now wrapped in the typed bridge error
+  classes above. Existing message-substring regex tests still pass.
+
+### Changed
+
+- `McpMemoryBridge.save(record, opts?)` accepts an optional second
+  argument with `{ timeoutMs }`. This is a structural super-type of
+  `FeedbackStore.save(record)` — callers using the base interface keep
+  working unchanged; the typed Darwin path now gets the extra knob.
+
+### Tests
+
+225/225 pass (was 211, +14). New coverage:
+- HTTP header presence on initialize + tools/call (2 tests).
+- Error-class discrimination — protocol vs http-status vs closed-bridge (3 tests).
+- Per-call timeout precedence over bridge-level timeout, on both stdio
+  and http transports (2 tests).
+- `mem0Preset()` — tool names, write-arg shape, scope alternatives,
+  read-result parsing (Mem0 `memory` field), structuredContent
+  shortcut, unknown-shape tolerance, end-to-end spread integration with
+  a mock Mem0 server (7 tests).
+
+### Recommendation
+
+Upgrade from v0.4.8 to v0.4.9 (`npm install darwin-agents@latest`). No
+breaking changes to existing callers — all additions are opt-in.
+
 ## [0.4.8] — 2026-05-22
 
 Hotfix on top of v0.4.7. Path resolution in the `exports` map pointed at

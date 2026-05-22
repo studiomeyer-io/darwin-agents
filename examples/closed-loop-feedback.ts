@@ -3,9 +3,12 @@
  *
  * After Darwin's multi-critic evaluates an agent run, this example shows
  * how to persist critic findings as external lessons that the NEXT agent
- * run can consult. Matches the Hermes Agent v0.8.0 (NousResearch, MIT)
- * "symmetric self-evolution" pattern: write skills on SUCCESS, anti-patterns
- * on FAILURE, not only one side.
+ * run can consult. We call the polarity rule "symmetric self-evolution"
+ * because it writes BOTH success patterns and failure modes — not only
+ * one side. This is structurally aligned with reflective self-improvement
+ * approaches like GEPA (Genetic-Pareto, ICLR 2026 Oral, arXiv 2507.19457)
+ * and the closed-loop pattern used by NousResearch's hermes-agent-self-
+ * evolution repo.
  *
  * Why a separate persistence layer?
  *  - darwin_db.darwin_experiments.feedback_report is great for analytics

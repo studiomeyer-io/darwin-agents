@@ -131,8 +131,71 @@ Each agent ships with a dedicated **multi-critic set** that scores the output by
 
 Two production patterns Darwin users commonly need but had to build themselves:
 
-- [`examples/closed-loop-feedback.ts`](examples/closed-loop-feedback.ts) — pipe critic findings into your own memory store so the next run sees them. Symmetric (writes both successes and failures), backend-agnostic. Matches the Hermes Agent v0.8.0 self-evolution pattern.
+- [`examples/closed-loop-feedback.ts`](examples/closed-loop-feedback.ts) — pipe critic findings into your own memory store so the next run sees them. Symmetric (writes both successes and failures), backend-agnostic. Aligned with reflective self-improvement patterns like [GEPA (ICLR 2026 Oral)](https://arxiv.org/abs/2507.19457) and NousResearch's `hermes-agent-self-evolution` loop.
 - [`examples/staleness-monitor.ts`](examples/staleness-monitor.ts) — detect agents that stopped firing, or were configured but never fired. Pure classifier + format helpers + ready-made SQL. Wire to your own cron + alert webhook.
+
+## Memory Integration (v0.4.7 — works with any MCP-compliant memory server)
+
+Closes the loop in three lines. Defaults to zero-config local memory; one
+config switch points at Mem0 / Zep / Letta / Cognee / a self-hosted MCP
+server / your own.
+
+### Why this is different
+
+Existing self-evolving agent frameworks pick one memory backend and stay
+there. Existing MCP-memory servers (Mem0, Zep, Letta, MemPalace,
+agentmemory, brainctl) optimize for storage, not for closed-loop critic
+feedback. Darwin v0.4.7 is the first MIT-licensed, TypeScript-native,
+MCP-native combination of **pluggable memory** + **symmetric self-evolution**
+(score &lt; 5 → `mistake`, score ≥ 8 → `pattern`, mediocre middle band → not
+persisted). No vendor lock-in, no cloud required by default, swap-able to
+Mem0/Zep/Letta with two config lines.
+
+```typescript
+import { localMemory, remoteMemory } from 'darwin-agents/memory/bridge';
+import { runClosedLoopTurn } from 'darwin-agents/memory/closed-loop';
+
+// Default: spawn @studiomeyer/local-memory-mcp via npx — zero cloud, zero keys
+const memory = localMemory();
+
+// Or any remote MCP-Memory server
+// const memory = remoteMemory('https://your-mcp.example.com/mcp', { authHeader: `Bearer ${KEY}` });
+
+// Or Mem0 with tool-name + arg aliasing
+// const memory = remoteMemory('https://api.mem0.ai/mcp', {
+//   authHeader: `Bearer ${process.env.MEM0_KEY}`,
+//   writeTool: 'mem0_add',
+//   readTool: 'mem0_search',
+//   mapWriteArgs: (rec) => ({ messages: [{ role: 'user', content: rec.content }], metadata: { tags: rec.tags } }),
+// });
+
+const result = await runClosedLoopTurn(
+  { agentName: 'analyst', topic: 'Audit module X' },
+  { runner: yourAgentRunner, store: memory },
+);
+// Run 1 sees zero lessons. Run 2 sees Run 1's findings as context.
+```
+
+### Provider matrix
+
+| Provider | `writeTool` | `readTool` | Notes |
+|---|---|---|---|
+| **`@studiomeyer/local-memory-mcp`** (default) | `memory_learn` | `memory_search` | zero-config, single SQLite file, no cloud |
+| Any self-hosted MCP-Memory server | `memory_learn` | `memory_search` | same wire, remote endpoint |
+| Mem0 MCP | `mem0_add` | `mem0_search` | needs `mapWriteArgs` for the `messages` shape |
+| Zep MCP | `zep_add` | `zep_search` | optional `mapWriteArgs` for `group_id` |
+| Letta MCP | `archival_insert` | `archival_search` | optional `mapReadResult` for their envelope |
+| Cognee MCP | `cognee_add` | `cognee_search` | optional mappers |
+
+Why an MCP-shaped bridge? Because the wire is the same — only tool names
+and arg shapes vary. One bridge, one reconnect path, one timeout policy.
+The pattern matches the [MCP Bridge proxy paper (arXiv 2504.08999)](https://arxiv.org/html/2504.08999v2)
+but stays inside the Darwin process — no extra service to deploy.
+
+See [`examples/memory-darwin-integration.ts`](examples/memory-darwin-integration.ts)
+for the full closed-loop pattern: fetch relevant lessons → render them as
+prompt context → run the agent → persist critic findings → next run sees
+last run's lessons.
 
 ## How Evolution Works
 

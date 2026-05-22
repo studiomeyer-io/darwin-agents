@@ -39,6 +39,50 @@ What to learn:
 - Polarity-aware confidence scoring (lower mistake-score = higher confidence; higher pattern-score = higher confidence)
 - Tag conventions that downstream learning-injection can filter on (`darwin-feedback`, `low-quality`/`high-quality`, `agent:<name>`, `critic:<failing-one>`)
 
+## mcp-memory-bridge.ts (new in v0.4.7)
+
+Generic JSON-RPC 2.0 bridge to **any MCP-compliant memory server**. Defaults to `@studiomeyer/local-memory-mcp` (zero-config, single SQLite file). Override `writeTool` / `readTool` and pass `mapWriteArgs` / `mapReadResult` to point at Mem0, Zep, Letta, Cognee, or your own self-hosted MCP server.
+
+Importable as `darwin-agents/memory/bridge` (subpath export) — the orchestration shim is `darwin-agents/memory/closed-loop`.
+
+```bash
+# Install the default local backend (one-time)
+npm install -g @studiomeyer/local-memory-mcp
+
+# Run the bridge demo
+npx tsx examples/mcp-memory-bridge.ts
+```
+
+Two transports:
+
+- `stdio` — spawn the MCP server as a child process (default for `localMemory()`)
+- `http` — POST JSON-RPC against any MCP HTTP endpoint (also accepts SSE-framed replies)
+
+The bridge implements the `FeedbackStore` interface from `closed-loop-feedback.ts` plus `fetchRelevant()` for retrieval and `close()` for lifecycle. Zero hard dependencies — pure raw JSON-RPC, no MCP SDK pulled in.
+
+What to learn:
+
+- How to keep transport (stdio vs http) and provider mapping (tool names + arg shapes) orthogonal
+- Per-RPC timeout + bounded respawn policy for stdio children
+- Tolerant response parsing (works with raw `content[].text` envelopes, `structuredContent`, plain arrays)
+- Why **zero hard deps** matters: Darwin keeps `peerDependencies` only, the bridge follows the same rule
+
+## memory-darwin-integration.ts (new in v0.4.7)
+
+End-to-end demo: closed-loop persistence + lesson injection in three lines.
+
+```bash
+npx tsx examples/memory-darwin-integration.ts
+```
+
+The demo runs three turns of a stub agent against the local memory bridge. Run 1 is cold (no lessons). Run 2 + 3 see lessons from earlier runs as injected context. Replace the stub runner with your real `runAgent()` call to wire it in.
+
+What to learn:
+
+- `runClosedLoopTurn()` — orchestration shape (fetch → run → persist)
+- `renderLessonContext()` — token-budgeted lesson rendering for prompt injection
+- How to swap memory backends without changing the orchestration code
+
 ## staleness-monitor.ts (new in v0.4.6)
 
 Detect agents that stopped running — or were configured but never fired.

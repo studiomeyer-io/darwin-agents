@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.4.8] — 2026-05-22
+
+Hotfix on top of v0.4.7. Path resolution in the `exports` map pointed at
+`./dist/*` but the v0.4.7 build emitted into `./dist/src/*` (because
+`tsconfig` `rootDir` was widened to `./` so examples could compile into
+`./dist/examples/`). The pre-existing entrypoints (`darwin-agents`,
+`darwin-agents/providers`, `darwin-agents/memory`, `darwin-agents/agents`)
+were therefore unreachable from v0.4.7 — only the new `./memory/bridge`
+and `./memory/closed-loop` subpaths resolved correctly.
+
+### Fixed
+
+- `main`, `types`, `bin`, and every `./dist/*` entry in `exports` now
+  point at `./dist/src/*` to match the actual build output layout.
+- `./memory/bridge` and `./memory/closed-loop` continue to resolve to
+  `./dist/examples/mcp-memory-bridge.js` / `memory-darwin-integration.js`
+  unchanged — those paths were already correct.
+
+### Recommendation
+
+Upgrade from v0.4.7 to v0.4.8 (`npm install darwin-agents@latest`).
+v0.4.7 is functional only via the two new `./memory/*` subpaths; the
+core API and CLI are unreachable in that release.
+
 ## [0.4.7] — 2026-05-22
 
 Generic MCP-Memory bridge — Darwin's closed loop now plugs into any

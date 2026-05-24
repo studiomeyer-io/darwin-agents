@@ -19,6 +19,8 @@
 // Core API
 export { defineAgent, defineConfig, loadConfig, loadConfigSync } from './core/agent.js';
 export { runAgent } from './core/runner.js';
+export { createTraceCapture } from './core/trace-capture.js';
+export type { TraceCapture, TraceCaptureOptions } from './core/trace-capture.js';
 
 // Types
 export type {
@@ -28,6 +30,7 @@ export type {
   DarwinMetrics,
   DarwinPattern,
   DarwinState,
+  ExecutionTrace,
   ExperimentFeedback,
   EvolutionConfig,
   Learning,
@@ -38,6 +41,9 @@ export type {
   PromptVersionStats,
   RunResult,
   SafetyThresholds,
+  TraceToolCall,
+  TraceTokenUsage,
+  TraceTurnError,
 } from './types.js';
 
 // Constants

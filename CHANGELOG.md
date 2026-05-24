@@ -1,5 +1,137 @@
 # Changelog
 
+## [0.5.0-alpha.1] — 2026-05-24
+
+**Phase 2 A1: Execution-Trace-Capture.** First pre-release of Darwin's
+Phase 2 tech roadmap. Unblocks GEPA-style reflective optimizers (A2)
+and validate-by-reproduce drift-detection (A5) by giving them a
+structured trajectory to consume.
+
+Industry-aligned with the 2026 agent-observability consensus (Braintrust,
+Langfuse, Strands SDK, Microsoft Foundry, OTEL GenAI semantic conventions):
+three span types — Tool / Reasoning / Turn-level errors — captured into a
+single `ExecutionTrace` object, persisted as JSONB (Postgres) or TEXT
+(SQLite), and tagged with a forward-compatible `version: 1` discriminator.
+
+### Added
+
+- **`ExecutionTrace` schema** (`src/types.ts`) — versioned trajectory shape:
+  `toolCalls[]` (with OTEL-mappable `id` / `tool` / `args` / `resultSummary`
+  (2000-char cap) / `outcome` / `durationMs` / `retryCount?` / `errorClass?` /
+  `errorMessage?` / `turn`), `textBlockCount` (honest name — NOT a thinking-
+  block counter, V2 will add typed `reasoningBlocks`), `turnCount`,
+  `mcpInvocations`, `errors[]` (turn-level), `tokenUsage?` (OTEL `gen_ai.usage.*`
+  fields: input/output/cache_read/cache_creation tokens), `capturedAt`. Plus
+  optional `trajectory?: ExecutionTrace` on `DarwinExperiment` (additive —
+  pre-A1 callers unaffected).
+
+- **`createTraceCapture()` factory** (`src/core/trace-capture.ts`) — pure,
+  transport-agnostic capturer. The runtime feeds tool events; the capturer
+  aggregates into a typed trajectory. API:
+
+  ```ts
+  const trace = createTraceCapture();
+  trace.startTurn();
+  trace.recordToolUse('toolu_01AB', 'mcp__nex__search', { query: 'x' });
+  trace.recordToolResult('toolu_01AB', 'success', { resultSummary: '3 hits' });
+  trace.recordTextBlock();
+  trace.addTokens({ inputTokens: 1200, outputTokens: 340 });
+  trace.recordError('parse_error', 'invalid JSON');
+  const trajectory = trace.finalize();
+  ```
+
+  Unpaired `recordToolUse` calls (no matching `recordToolResult` before
+  `finalize`) surface as `outcome: 'error', errorClass: 'unpaired_call'`
+  so silent SDK hangs remain visible in the trace. Customizable via
+  `TraceCaptureOptions`: `now?` (clock injection for tests),
+  `isMcpTool?` (predicate override for non-`mcp__`-prefixed servers).
+
+- **`addTokens()` aggregator** — lossy-merge of per-turn LLM usage. Missing
+  fields (`NaN` / `Infinity` / `undefined`) skip silently rather than
+  defaulting to zero — preserves the distinction between "provider didn't
+  report" and "actually zero tokens".
+
+- **JSONB persistence** in `darwin_experiments.trajectory` column +
+  `idx_darwin_exp_trajectory_gin` GIN index (Postgres) for `@>`
+  containment queries from A2 / A5 consumers. SQLite stores the same
+  shape as JSON-stringified TEXT.
+
+- **`scripts/migrate-add-trajectory.ts`** — idempotent migration script.
+  Pre-checks column + index existence (filtered by `current_schema()`
+  for multi-schema-safe operation), runs `ALTER TABLE … ADD COLUMN IF
+  NOT EXISTS trajectory JSONB` + `CREATE INDEX IF NOT EXISTS`, then
+  verifies. Rollback path documented inline.
+
+  ```bash
+  DARWIN_POSTGRES_URL=postgresql://… npx tsx scripts/migrate-add-trajectory.ts
+  ```
+
+- **Defensive parsing** in both memory backends — `parseTrajectory` /
+  `parseTrajectoryColumn` drop malformed values (wrong `version`,
+  non-object, invalid JSON) to `undefined` instead of crashing the
+  load. Future schema versions (`version !== 1`) are silently ignored
+  so v0.5 consumers don't break on v0.6 trajectories.
+
+- **39 new tests** across two suites (all green):
+  - `tests/trace-capture.test.ts` (32 unit tests): basic flow,
+    defensive behaviour, truncation (2000-char `resultSummary`),
+    MCP-heuristic, schema invariants, tool_call_id passthrough,
+    `addTokens` aggregate semantics
+  - `tests/memory-trajectory.test.ts` (7 tests): SQLite roundtrip,
+    backward-compat with pre-A1 rows, defensive parsing, idempotent
+    migration, Postgres-gated JSONB roundtrip
+
+### Changed
+
+- **DDL single-source-of-truth** — the trajectory column is defined
+  ONLY in the additive `ALTER TABLE … ADD COLUMN IF NOT EXISTS` path
+  (Postgres) / PRAGMA-guarded ALTER (SQLite), never inline in the
+  `CREATE TABLE`. Schema-evolution lives in one place; fresh installs
+  reach the same end-state as legacy installs.
+
+- **Postgres `ON CONFLICT` preserves trajectory** on feedback-only
+  re-saves via `COALESCE(EXCLUDED.trajectory, darwin_experiments.trajectory)`.
+  This means a second `saveExperiment(exp)` call that omits trajectory
+  doesn't zero out the previously-stored trace.
+
+  **NOTE — SQLite asymmetry:** SQLite uses `INSERT OR REPLACE` which
+  drops + re-inserts the row, so callers wanting to preserve a prior
+  trajectory across re-saves MUST include it in the new payload. This
+  asymmetry is documented on `MemoryProvider.saveExperiment` in the
+  interface JSDoc.
+
+### Backwards compatibility
+
+100% backwards-compatible. The new `trajectory` field is optional, the
+new column is nullable, the new methods on `MemoryProvider` are
+additive. Existing v0.4.x consumers see no behavioural changes.
+
+Verified on a live `darwin_db` with 341 experiments, 339 of which
+pre-date A1 — all loaded cleanly with `trajectory: undefined`.
+
+### Why "alpha.1"
+
+`textBlockCount` is honest but limited — V2 will replace it with a
+typed `reasoningBlocks: ReasoningBlock[]` sequence carrying the actual
+text content per reasoning step, which is what GEPA reflectors need
+for per-decision blame attribution. Existing `textBlockCount` will stay
+as a fast aggregate. The `alpha.1` tag signals the schema is subject to
+this kind of additive evolution before `0.5.0` final.
+
+Three known minor gaps (deferred to follow-up patches):
+
+- Per-call cost attribution (token usage per tool invocation, not just
+  per-run aggregate)
+- Trace-capture lazy-load flag stays permanent on transient import
+  failure (low impact: Darwin is either built or not)
+- Token extraction in the SDK adapter is Anthropic-shaped (`message.usage`)
+  and may silently miss tokens for non-Anthropic providers — by design
+  (token usage is documented optional), but a debug-level log line in a
+  follow-up patch will make this easier to spot.
+
+Install: `npm install darwin-agents@alpha`. The default `latest` tag
+remains on `0.4.9` until `0.5.0` final ships.
+
 ## [0.4.9] — 2026-05-22
 
 Polish on top of v0.4.8. Adds spec-compliance, error classification,

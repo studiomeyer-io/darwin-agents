@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import type {
   DarwinExperiment,
   DarwinState,
+  ExecutionTrace,
   Learning,
   MemoryProvider,
   PromptVersion,
@@ -108,14 +109,15 @@ export class PostgresMemoryProvider implements MemoryProvider {
         id, agent_name, prompt_version, task, task_type,
         started_at, completed_at, success,
         quality_score, source_count, output_length, error_count, duration_ms,
-        feedback_score, feedback_report, feedback_evaluator, output
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        feedback_score, feedback_report, feedback_evaluator, output, trajectory
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
       ON CONFLICT (id) DO UPDATE SET
         quality_score = EXCLUDED.quality_score,
         feedback_score = EXCLUDED.feedback_score,
         feedback_report = EXCLUDED.feedback_report,
         feedback_evaluator = EXCLUDED.feedback_evaluator,
-        output = EXCLUDED.output`,
+        output = EXCLUDED.output,
+        trajectory = COALESCE(EXCLUDED.trajectory, darwin_experiments.trajectory)`,
       [
         exp.id,
         exp.agentName,
@@ -134,6 +136,8 @@ export class PostgresMemoryProvider implements MemoryProvider {
         exp.feedback?.report ?? null,
         exp.feedback?.evaluator ?? null,
         exp.output ?? null,
+        // pg driver serializes JS objects to JSONB automatically; null = SQL NULL
+        exp.trajectory ?? null,
       ],
     );
   }
@@ -380,6 +384,13 @@ export class PostgresMemoryProvider implements MemoryProvider {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      -- A1 (v0.5): trajectory column lives ONLY in the additive ALTER below.
+      -- Single source of truth: pre-A1 installs and fresh installs both reach
+      -- the same end-state (CREATE TABLE creates pre-A1 shape, ALTER adds the
+      -- A1 column). Keeps schema-evolution self-documenting and avoids the
+      -- "drift-in-waiting" of having the column defined twice (R1 Analyst).
+      ALTER TABLE darwin_experiments ADD COLUMN IF NOT EXISTS trajectory JSONB;
+
       CREATE TABLE IF NOT EXISTS darwin_prompt_versions (
         version TEXT NOT NULL,
         agent_name TEXT NOT NULL,
@@ -427,6 +438,10 @@ export class PostgresMemoryProvider implements MemoryProvider {
         ON darwin_learnings USING GIN(search_vector);
       CREATE INDEX IF NOT EXISTS idx_darwin_learnings_agent
         ON darwin_learnings(agent_name);
+      -- A1 (v0.5): GIN index for JSONB containment queries on trajectory
+      -- (e.g. find runs that called a specific MCP tool, runs with errors, etc.)
+      CREATE INDEX IF NOT EXISTS idx_darwin_exp_trajectory_gin
+        ON darwin_experiments USING gin(trajectory);
     `);
   }
 
@@ -647,6 +662,12 @@ interface PgExperimentRow {
   feedback_report: string | null;
   feedback_evaluator: string | null;
   output: string | null;
+  /**
+   * pg driver returns JSONB columns as parsed JS objects (not strings).
+   * Legacy rows from pre-A1 schema have `trajectory: null` or `undefined`
+   * (when SELECT was issued before the column existed in older clients).
+   */
+  trajectory?: unknown;
 }
 
 interface PgPromptVersionRow {
@@ -710,7 +731,27 @@ function rowToExperiment(row: PgExperimentRow): DarwinExperiment {
     experiment.output = row.output;
   }
 
+  const trace = parseTrajectory(row.trajectory);
+  if (trace) {
+    experiment.trajectory = trace;
+  }
+
   return experiment;
+}
+
+/**
+ * Parse a trajectory column value from Postgres into a typed ExecutionTrace.
+ *
+ * Defensive: only accept objects with `version === 1`. Future schema versions
+ * will be ignored silently rather than crashing existing consumers — they can
+ * still query the column via raw SQL if they need to handle newer versions.
+ */
+function parseTrajectory(raw: unknown): ExecutionTrace | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== 'object') return undefined;
+  const obj = raw as Record<string, unknown>;
+  if (obj.version !== 1) return undefined;
+  return obj as unknown as ExecutionTrace;
 }
 
 function rowToPromptVersion(row: PgPromptVersionRow): PromptVersion {

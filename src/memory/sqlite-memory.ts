@@ -15,6 +15,7 @@ import type {
   DarwinConfig,
   DarwinExperiment,
   DarwinState,
+  ExecutionTrace,
   Learning,
   MemoryProvider,
   PromptVersion,
@@ -43,6 +44,11 @@ interface ExperimentRow {
   feedback_report: string | null;
   feedback_evaluator: string | null;
   output: string | null;
+  /**
+   * Trajectory stored as JSON-stringified TEXT (no JSONB in SQLite).
+   * Legacy rows pre-A1 have NULL. Empty/malformed values are ignored at parse-time.
+   */
+  trajectory: string | null;
 }
 
 interface PromptVersionRow {
@@ -140,17 +146,21 @@ export class SqliteMemoryProvider implements MemoryProvider {
   async saveExperiment(exp: DarwinExperiment): Promise<void> {
     const db = this.getDb();
 
+    // INSERT OR REPLACE drops the row and re-inserts — so we must explicitly
+    // write the trajectory column on every save (no Postgres-style ON CONFLICT
+    // preservation needed here). Callers who want to preserve a prior trajectory
+    // must include it on the update payload.
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO experiments (
         id, agent_name, prompt_version, task, task_type,
         started_at, completed_at, success,
         quality_score, source_count, output_length, error_count, duration_ms,
-        feedback_score, feedback_report, feedback_evaluator, output
+        feedback_score, feedback_report, feedback_evaluator, output, trajectory
       ) VALUES (
         @id, @agent_name, @prompt_version, @task, @task_type,
         @started_at, @completed_at, @success,
         @quality_score, @source_count, @output_length, @error_count, @duration_ms,
-        @feedback_score, @feedback_report, @feedback_evaluator, @output
+        @feedback_score, @feedback_report, @feedback_evaluator, @output, @trajectory
       )
     `);
 
@@ -172,6 +182,7 @@ export class SqliteMemoryProvider implements MemoryProvider {
       feedback_report: exp.feedback?.report ?? null,
       feedback_evaluator: exp.feedback?.evaluator ?? null,
       output: exp.output ?? null,
+      trajectory: exp.trajectory ? JSON.stringify(exp.trajectory) : null,
     });
   }
 
@@ -380,6 +391,10 @@ export class SqliteMemoryProvider implements MemoryProvider {
   private createTables(): void {
     const db = this.getDb();
 
+    // A1 (v0.5): trajectory column is NOT defined here. It is added by the
+    // PRAGMA-guarded ALTER below — single source of truth, so pre-A1 installs
+    // and fresh installs both reach the same end-state (CREATE creates pre-A1
+    // shape, ALTER adds A1 column). Mirrors the postgres-memory.ts pattern.
     db.exec(`
       CREATE TABLE IF NOT EXISTS experiments (
         id TEXT PRIMARY KEY,
@@ -446,6 +461,14 @@ export class SqliteMemoryProvider implements MemoryProvider {
       CREATE INDEX IF NOT EXISTS idx_experiments_agent_started
         ON experiments(agent_name, started_at DESC);
     `);
+
+    // A1 (v0.5): additive migration for pre-existing DBs.
+    // SQLite ALTER TABLE has no IF NOT EXISTS, so we probe column list first.
+    // PRAGMA table_info is a cheap O(n_columns) read — runs once per init().
+    const cols = db.prepare(`PRAGMA table_info(experiments)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'trajectory')) {
+      db.exec(`ALTER TABLE experiments ADD COLUMN trajectory TEXT`);
+    }
   }
 }
 
@@ -482,7 +505,34 @@ function rowToExperiment(row: ExperimentRow): DarwinExperiment {
     experiment.output = row.output;
   }
 
+  const trace = parseTrajectoryColumn(row.trajectory);
+  if (trace) {
+    experiment.trajectory = trace;
+  }
+
   return experiment;
+}
+
+/**
+ * Parse a SQLite TEXT trajectory column into a typed ExecutionTrace.
+ *
+ * Defensive: malformed JSON, missing version, or future schema versions
+ * are silently ignored (returns undefined). Consumers that need to handle
+ * newer versions can read the raw column via direct SQL.
+ */
+function parseTrajectoryColumn(raw: string | null): ExecutionTrace | undefined {
+  if (raw === null || raw === '') return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const obj = parsed as Record<string, unknown>;
+    if (obj.version !== 1) return undefined;
+    return obj as unknown as ExecutionTrace;
+  } catch {
+    // Defensive: malformed JSON in the column (e.g. manual insert).
+    // Don't crash the whole load — just drop the trajectory.
+    return undefined;
+  }
 }
 
 function rowToPromptVersion(row: PromptVersionRow): PromptVersion {

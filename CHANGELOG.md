@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.5.0-alpha.2] — 2026-05-25
+
+**GEPA-Style Reflective Optimizer (Phase 2 A2).** Multi-objective Pareto
+selection + text-feedback-driven prompt mutation as a TS-native
+adaptation of the GEPA framework (arxiv 2507.19457). Released under the
+`alpha` npm dist-tag in parallel with v0.5.0-alpha.1 (execution-trace
+capture, A1). `npm install darwin-agents@alpha` resolves to
+0.5.0-alpha.2; `npm install darwin-agents` stays on 0.4.9 (latest).
+
+### Added
+
+- **`GepaOptimizer`** — generation-loop wrapper producing N variant
+  mutations per call (default N=3, [1, 10]). Three `feedbackStrategy`
+  modes: `"split"` (round-robin partition, diversity), `"replicate"`
+  (every variant sees all feedback), `"single"` (one reflection).
+  Separate `nextGeneration(scored, opts)` Pareto-selects survivors for
+  the next generation.
+- **`Reflector`** — single-shot LLM call with GEPA's "smallest possible
+  targeted edit" template. Output is cleaned (fences stripped) and
+  truncated at sentence boundary.
+- **`pareto.ts`** — `dominates` / `nonDominatedFront` / `paretoSelect` /
+  `scalarise` pure helpers + `DARWIN_DEFAULT_OBJECTIVES` constant
+  (matching `DarwinMetrics` field names + existing weight scheme).
+- **`RunPromptFn`** — shared injected-LLM-call type, single source of
+  truth for both `PromptOptimizer` and `Reflector`.
+- **A1 sync (S1184):** `createTraceCapture` + `ExecutionTrace` /
+  `TraceToolCall` / `TraceTokenUsage` / `TraceTurnError` now exported
+  from the OS package (were already in v0.5.0-alpha.1 on npm, OS source
+  catches up this release).
+
+### Deliberate deviations from GEPA paper (documented in source)
+
+- N variants per `generate()` call vs GEPA Algorithm 1's 1-offspring-
+  per-iteration.
+- `feedbackStrategy: "split"` is our adaptation, not in the paper.
+- `paretoSelect` truncation uses scalarised tie-break, not GEPA
+  Algorithm 2's coverage-proportional sampling — V0.6 will add
+  `truncationStrategy: "coverage" | "crowding"`.
+- GEPA+Merge (paper Appendix F, ~+5% lift) NOT implemented — V0.6.
+- Instance-wise coverage sampling NOT implemented — V0.6.
+- Single injected `runPrompt` for both task and reflection — GEPA docs
+  recommend stronger `reflection_lm`. Optional `reflectionRunPrompt`
+  override deferred to V0.5.1.
+
+### Fixed (R1 + R2 V0.5.0-alpha.2 code-review findings)
+
+The 3-Agent code-review loop ran twice. R1 found 13 findings, R2 caught
+2 must-fix that R1 missed. All addressed pre-publish.
+
+**R1 — 6 MUST-FIX (S1185):**
+
+1. **HIGH (Critic H1):** Template injection — `String.replace` order
+   meant `currentPrompt` containing `{FEEDBACKS}` literal could trigger
+   double-substitution. Fixed by substituting `{CURRENT_PROMPT}` last.
+2. **HIGH (Critic H2):** `feedbackCap` accepted negative values — added
+   `Math.max(1, Math.floor(...))` guard.
+3. **HIGH (Analyst A5):** `ParetoObjective` JSDoc example used wrong
+   `DarwinMetrics` field names. Fixed + `DARWIN_DEFAULT_OBJECTIVES`
+   constant.
+4. **HIGH (Analyst A1):** `RunPromptFn` was duplicated. Extracted to
+   `evolution/run-prompt-fn.ts`.
+5. **MED (Critic M2):** `nextGeneration` used reference-identity on
+   `metrics` — switched to explicit index-based mapping (refactor-safe).
+6. **MED (Critic M4):** Added scale-normalization JSDoc warning on
+   `ParetoObjective.weight`.
+
+**R2 — 2 MUST-FIX (caught what R1 missed, S1185):**
+
+7. **CRITICAL (R2-C1):** R1's clamp `Math.max(1, Math.floor(NaN)) ===
+   NaN` — silent bypass for NaN/Infinity. Hardened with
+   `Number.isFinite()` + fallback to default.
+8. **LOW (R2-L1):** `generate("p", [])` threw opaque internal error.
+   Added GEPA-specific boundary validation pointing callers at
+   `PromptOptimizer` for cold-start. Plus R2-M1 guard for shared
+   metrics-object references.
+
+### Test coverage
+
+- **307/308 OS tests green** (1 pre-existing skip, 0 fail). Was 268 in
+  v0.4.9. New test files: `pareto.test.ts` (16), `reflector.test.ts`
+  (14), `optimizer-gepa.test.ts` (12), `r1-fixes.test.ts` (12 R1+R2
+  regression). A1 trace + memory-trajectory tests synced from
+  v0.5.0-alpha.1.
+- tsc strict + build clean.
+
 ## [0.4.9] — 2026-05-22
 
 Polish on top of v0.4.8. Adds spec-compliance, error classification,

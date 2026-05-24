@@ -19,6 +19,8 @@
 // Core API
 export { defineAgent, defineConfig, loadConfig, loadConfigSync } from './core/agent.js';
 export { runAgent } from './core/runner.js';
+
+// V0.5.0-alpha.1 — Execution Trace Capture (S1184 Phase 2 A1)
 export { createTraceCapture } from './core/trace-capture.js';
 export type { TraceCapture, TraceCaptureOptions } from './core/trace-capture.js';
 
@@ -66,3 +68,25 @@ export { createMemory, SqliteMemoryProvider, PostgresMemoryProvider } from './me
 // Notifications
 export { loadNotificationConfig } from './evolution/notifications.js';
 export type { NotificationConfig } from './evolution/notifications.js';
+
+// V0.5.0-alpha.2 — GEPA-Style Reflective Optimizer (S1185 Phase 2 A2)
+export {
+  dominates,
+  nonDominatedFront,
+  paretoSelect,
+  scalarise,
+  DARWIN_DEFAULT_OBJECTIVES,
+  type ParetoObjective,
+} from './evolution/pareto.js';
+export {
+  Reflector,
+  type ReflectiveFeedback,
+  type ReflectOptions,
+} from './evolution/reflector.js';
+export type { RunPromptFn } from './evolution/run-prompt-fn.js';
+export {
+  GepaOptimizer,
+  type ScoredVariant,
+  type GenerateOptions as GepaGenerateOptions,
+  type NextGenerationOptions as GepaNextGenerationOptions,
+} from './evolution/optimizer-gepa.js';

@@ -1,5 +1,104 @@
 # Changelog
 
+## [0.5.1-alpha.1] — 2026-05-29
+
+**GEPA Polish-Welle.** Closes the three deliberate paper deviations
+documented in `optimizer-gepa.ts` as V0.6 backlog from V0.5.0-alpha.2.
+**Zero breaking changes** — every V0.5.0 callsite keeps working unchanged.
+**R1 + R2 + R3 code-review-loop GO**, **336/337 vitest tests grün** (+29
+V0.5.1 regression tests). tsc strict clean, build clean.
+
+### Added — three new surfaces
+
+- **`crowdingDistance(variants, objectives)`** in `src/evolution/pareto.ts` —
+  pure NSGA-II Deb 2002 density-estimator. Returns one distance per
+  variant: per-objective min-max-normalised neighbour gap, summed across
+  objectives, with `+Infinity` for boundary variants so they always
+  survive truncation. Scale-safe through per-objective normalisation
+  (unlike `scalarise` which is scale-sensitive).
+- **`ParetoTruncationStrategy`** type + new 4th parameter to
+  `paretoSelect(variants, objectives, maxKeep, truncationStrategy)`.
+  Two strategies: `"scalarised"` (V0.5.0 default, kept) and `"crowding"`
+  (NSGA-II density-preserving). Backward-compatible default.
+- **`GepaOptimizerOptions`** interface + new constructor option
+  `reflectionRunPrompt?: RunPromptFn`. When supplied, reflection AND
+  merge route through the override — matches GEPA paper guidance
+  (stronger LM for reflection than for task execution). Falls back to
+  the main `runPrompt` when omitted. Closes V0.5.0 R1 Research F7.
+- **`GepaOptimizer.merge(parents, opts)`** — GEPA Paper Appendix F
+  system-aware merge. Takes two distinct Pareto-front parents, asks the
+  reflection LM to combine their strongest aspects into one mutated
+  prompt. Returns `{ id: "gepa-merge-<a>+<b>", prompt }`. Validations:
+  exactly 2 parents, distinct ids, non-empty prompts. Output is
+  fence-stripped + sentence-boundary capped to
+  `max(longerParent.length * 1.3, 3500)`. Paper reports ~5% lift when
+  run every K-th generation.
+- **`GepaOptimizer.nextGeneration.truncationStrategy` passthrough** —
+  forwards the new `paretoSelect` parameter from `NextGenerationOptions`.
+  Default `"scalarised"` matches V0.5.0 byte-for-byte.
+
+### Fixed — R1 + R2 + R3 code-review-loop
+
+R1 critic reported a P1 template-injection in `merge` (claimed `{SCORE_A}`
+/ `{SCORE_B}` placeholders inside parent prompts were double-substituted
+because they ran before `{PROMPT_A}` / `{PROMPT_B}`). On R2 verification
+the V1 ordering (ID + SCORE first, PROMPT last) was confirmed CORRECT —
+`String.prototype.replace` only finds matches in the current working
+string, and user content does not enter the working string until the
+final two replacements. **Net effect:** code unchanged, but
+`tests/v0.5.1-features.test.ts` now explicitly regression-tests BOTH
+`{ID_B}` AND `{SCORE_A}` + `{SCORE_B}` literals inside parent prompts —
+the test coverage gap was the real R1 finding, not the substitution order.
+
+R1 Analyst documentation-drift fixes:
+
+- `src/evolution/optimizer-gepa.ts` header — V0.6 deferrals updated to
+  reflect V0.5.1 shipping `truncationStrategy` + `merge` +
+  `reflectionRunPrompt`. Instance-coverage sampling remains V0.6
+  backlog.
+- `src/evolution/reflector.ts` — "deferred to V0.5.1" wording replaced
+  with "SHIPPED in V0.5.1".
+- `src/evolution/pareto.ts` — `"coverage"` mention removed from the
+  `paretoSelect` docstring; type carries only `"scalarised" | "crowding"`,
+  no type/doc mismatch remains.
+
+### Test coverage
+
+- **336/337 vitest tests grün** (was 307/308 baseline + 29 new tests
+  in `tests/v0.5.1-features.test.ts`). 1 pre-existing skip carried over.
+- New tests cover: `crowdingDistance` (4 boundary + 4 three-variant
+  scale-safe + non-finite defense), `paretoSelect` (default vs explicit
+  scalarised parity + crowding boundary preservation), `GepaOptimizer`
+  reflection-LM routing + fallback + invalid-type guard, `merge`
+  (template-injection for ID + SCORE, tuple validation, same-id
+  rejection, empty-prompt rejection, reflection-LM routing, fence-strip,
+  length cap, rejection propagation), `nextGeneration`
+  truncationStrategy passthrough + backward-compat byte-equivalence.
+
+### V0.6 backlog (carried over from V0.5.1 deferrals)
+
+- `"coverage"` strategy on `ParetoTruncationStrategy` (GEPA Algorithm 2
+  instance-proportional sampling)
+- Extract `cleanOutput` + `truncateAtSentenceBoundary` to shared
+  `src/evolution/text-utils.ts` (currently byte-identical in `Reflector`
+  + `GepaOptimizer`)
+- Collision-safe `makeMergeId` separator (current `+` collides if
+  caller-side ids contain `+` literally — unlikely with default
+  `gepa-cand-${i}` ids)
+- More edge tests: `merge` with non-finite metrics, `crowdingDistance`
+  with all-Infinity inputs
+
+### Migration from V0.5.0
+
+None required. V0.5.1 is additive. Adopt new surfaces incrementally:
+
+- Switch `nextGeneration` to `truncationStrategy: "crowding"` for
+  diversity-critical workloads
+- Pass a stronger Opus model as `reflectionRunPrompt` while keeping a
+  cheaper Haiku as the main task LM
+- Invoke `optimizer.merge([survivors[0], survivors[1]])` every K-th
+  generation for the Paper Appendix F lift
+
 ## [0.5.0-alpha.2] — 2026-05-25
 
 **GEPA-Style Reflective Optimizer (Phase 2 A2).** Multi-objective Pareto

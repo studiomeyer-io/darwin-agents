@@ -40,14 +40,18 @@
  *   - **`feedbackStrategy: "split"` is OUR adaptation** — GEPA paper
  *     does not partition feedback across offspring. We do it to force
  *     mutation diversity in a single `Promise.all` batch.
- *   - **paretoSelect truncation uses scalarised tie-break** — GEPA
- *     Algorithm 2 samples Pareto candidates proportional to instance
- *     coverage. We use a simpler weighted-sum tie-break. V0.6 will add
- *     a `truncationStrategy` option for coverage-proportional +
- *     NSGA-II crowding-distance.
+ *   - **paretoSelect truncation has two strategies (V0.5.1):**
+ *     `"scalarised"` (V0.5.0 default, weighted-sum tie-break) and
+ *     `"crowding"` (NSGA-II Deb 2002 density-preserving truncation).
+ *     GEPA Algorithm 2's instance-proportional coverage sampling is
+ *     still NOT implemented — backlog for V0.6.
  *   - **GEPA+Merge (system-aware crossover from two Pareto-pool
- *     ancestors, paper Appendix F)** is NOT implemented. +5% reported
- *     lift in the paper. Backlog for V0.6.
+ *     ancestors, paper Appendix F)** SHIPPED in V0.5.1 via
+ *     {@link GepaOptimizer#merge}. Paper reports ~5% lift when run on
+ *     every K-th generation.
+ *   - **Stronger reflection LM** SHIPPED in V0.5.1 via
+ *     {@link GepaOptimizerOptions.reflectionRunPrompt}. Falls back to
+ *     the main `runPrompt` when omitted.
  *   - **Instance-wise coverage sampling** (paper Algorithm 2) is NOT
  *     implemented. Backlog for V0.6.
  *
@@ -84,6 +88,7 @@ import { Reflector } from "./reflector.js";
 import {
   paretoSelect,
   type ParetoObjective,
+  type ParetoTruncationStrategy,
 } from "./pareto.js";
 
 /** One evaluated variant in a generation. */
@@ -126,6 +131,15 @@ export interface NextGenerationOptions extends GenerateOptions {
    * Max variants to keep on the Pareto front. Default 3.
    */
   maxCarry?: number;
+  /**
+   * V0.5.1 — strategy used when the Pareto front exceeds `maxCarry`
+   * and needs truncation. Default `"scalarised"` (preserves V0.5.0
+   * behaviour). Switch to `"crowding"` for NSGA-II density-preserving
+   * truncation that maintains diversity along the front.
+   *
+   * NEW V0.5.1 (S1235).
+   */
+  truncationStrategy?: ParetoTruncationStrategy;
 }
 
 const DEFAULT_NUM_VARIANTS = 3;
@@ -133,11 +147,99 @@ const MIN_NUM_VARIANTS = 1;
 const MAX_NUM_VARIANTS = 10;
 const DEFAULT_MAX_CARRY = 3;
 
+/**
+ * V0.5.1 — GEPA+Merge prompt template (Paper Appendix F).
+ *
+ * Asks the LLM to combine the best aspects of two Pareto-front parents
+ * into a single mutated prompt. Deliberately NOT a literal cross-over
+ * of token spans — the paper reports the "system-aware merge" variant
+ * (semantic combination via reflection LM) lifts task performance by
+ * roughly 5%. Token-span crossover (the alternative they tested) did
+ * not yield the same gain.
+ *
+ * NEW V0.5.1 (S1235).
+ */
+const DEFAULT_MERGE_TEMPLATE = `
+You are a prompt-engineering merger. Below are two instruction prompts from a Pareto-front of variants. Each has its own strengths and weaknesses on different evaluation dimensions.
+
+PARENT A (id={ID_A}, score {SCORE_A}):
+\`\`\`
+{PROMPT_A}
+\`\`\`
+
+PARENT B (id={ID_B}, score {SCORE_B}):
+\`\`\`
+{PROMPT_B}
+\`\`\`
+
+Task: produce ONE merged instruction that combines the strongest aspects of BOTH parents. You may borrow phrasing from either, but the merge must preserve correct behavior from BOTH and not regress on any dimension either parent handles well. Keep the overall length envelope reasonable (no growth beyond ~30% of the longer parent).
+
+Return ONLY the merged instruction text. No prose, no explanations, no markdown fences.
+`.trim();
+
+/**
+ * V0.5.1 options for {@link GepaOptimizer} constructor.
+ *
+ * R1 Research Finding F7 (S1185) closure — `reflectionRunPrompt` lets
+ * callers route reflection / merge calls to a STRONGER LM than the task
+ * LM, matching GEPA's official `reflection_lm` parameter. When omitted,
+ * reflection and merge fall back to the main `runPrompt`. NEW V0.5.1.
+ */
+export interface GepaOptimizerOptions {
+  /**
+   * Stronger LM for reflection / merge calls. Pass a higher-tier
+   * `RunPromptFn` (e.g. Claude Opus) here when your main task LM is a
+   * cheaper one. Per GEPA paper guidance reflection is the leverage
+   * point — a stronger reflector lifts mutation quality more than a
+   * stronger task LM.
+   *
+   * When omitted, reflection + merge use the main `runPrompt`.
+   *
+   * NEW V0.5.1 (S1235).
+   */
+  reflectionRunPrompt?: RunPromptFn;
+}
+
+/**
+ * V0.5.1 options for {@link GepaOptimizer#merge}.
+ */
+export interface MergeOptions {
+  /**
+   * Override the merge prompt template. Default is the GEPA Appendix-F
+   * system-aware merge template. Use a custom template when you want
+   * different merge pressure (e.g. conservative-additive vs. selective).
+   */
+  mergePromptTemplate?: string;
+  /**
+   * Hard upper bound on the returned merged-prompt length. Default
+   * `Math.max(max(parents[].prompt.length) * 1.3, 3500)` — same growth
+   * ceiling as {@link Reflector}.
+   */
+  maxMergeLength?: number;
+}
+
 export class GepaOptimizer {
   private readonly reflector: Reflector;
+  private readonly reflectionRunPrompt: RunPromptFn;
 
-  constructor(runPrompt: RunPromptFn) {
-    this.reflector = new Reflector(runPrompt);
+  constructor(runPrompt: RunPromptFn, opts: GepaOptimizerOptions = {}) {
+    if (typeof runPrompt !== "function") {
+      throw new TypeError("GepaOptimizer: runPrompt must be a function");
+    }
+    // V0.5.1 (R1 Research F7 closure, S1235): if a stronger reflection LM
+    // is provided, route reflection + merge through it; otherwise fall
+    // back to the main runPrompt so existing V0.5.0 callsites keep
+    // working unchanged.
+    if (
+      opts.reflectionRunPrompt !== undefined &&
+      typeof opts.reflectionRunPrompt !== "function"
+    ) {
+      throw new TypeError(
+        "GepaOptimizer: opts.reflectionRunPrompt must be a function when supplied",
+      );
+    }
+    this.reflectionRunPrompt = opts.reflectionRunPrompt ?? runPrompt;
+    this.reflector = new Reflector(this.reflectionRunPrompt);
   }
 
   /**
@@ -247,7 +349,14 @@ export class GepaOptimizer {
     const objectives = opts.objectives as ReadonlyArray<
       ParetoObjective<Record<string, number>>
     >;
-    const survivorMetrics = paretoSelect(metricsArr, objectives, maxCarry);
+    // V0.5.1 (S1235) — forward truncationStrategy. Default "scalarised"
+    // preserves V0.5.0 behaviour byte-for-byte.
+    const survivorMetrics = paretoSelect(
+      metricsArr,
+      objectives,
+      maxCarry,
+      opts.truncationStrategy ?? "scalarised",
+    );
     // Build "metrics-ref → index" map then look up each survivor's index.
     // Linear scan twice is O(N²) worst-case but N≤10 in practice.
     const metricsToIndex = new Map<Record<string, number>, number>();
@@ -260,6 +369,131 @@ export class GepaOptimizer {
     return scored.filter((_, i) => survivorIndices.has(i));
   }
 
+  /**
+   * V0.5.1 (S1235) — GEPA+Merge (Paper Appendix F).
+   *
+   * Combines the strongest aspects of TWO Pareto-front parents into a
+   * single mutated prompt via a reflection-LM call. The paper reports
+   * ~+5% lift over generation-only optimisation when this is run on
+   * every K-th generation (typically K=3-5). The merged prompt then
+   * competes alongside the regular generation outputs in the next
+   * `nextGeneration` Pareto-select step.
+   *
+   * Typical usage:
+   * ```ts
+   * // Every Kth generation, merge the top two Pareto-front members.
+   * if (gen % 3 === 0 && survivors.length >= 2) {
+   *   const merged = await optimizer.merge(
+   *     [survivors[0], survivors[1]],
+   *   );
+   *   // Score `merged.prompt` via your evaluator, then include the
+   *   // scored variant in the next nextGeneration() pool.
+   * }
+   * ```
+   *
+   * Errors are thrown — `merge` is a deliberate optimisation step, the
+   * caller chooses when to invoke it. No swallowing.
+   */
+  async merge(
+    parents: readonly [ScoredVariant, ScoredVariant],
+    opts: MergeOptions = {},
+  ): Promise<{ id: string; prompt: string }> {
+    if (!Array.isArray(parents) || parents.length !== 2) {
+      throw new TypeError(
+        "GepaOptimizer.merge: parents must be a tuple of exactly two ScoredVariants",
+      );
+    }
+    const [a, b] = parents;
+    if (!a || !b || typeof a.prompt !== "string" || typeof b.prompt !== "string") {
+      throw new TypeError(
+        "GepaOptimizer.merge: both parents must carry a non-empty `prompt` string",
+      );
+    }
+    if (a.prompt.length === 0 || b.prompt.length === 0) {
+      throw new TypeError(
+        "GepaOptimizer.merge: parent prompts must be non-empty",
+      );
+    }
+    // R1-self-check: emit a merge for two IDENTICAL parents would be a
+    // waste of an LLM call AND likely produce a near-identical mutation
+    // anyway. Fail loud so the caller fixes the pairing logic upstream
+    // rather than silently consume budget.
+    if (a.id === b.id) {
+      throw new TypeError(
+        `GepaOptimizer.merge: both parents share id "${a.id}" — merge is only ` +
+          `meaningful between distinct Pareto-front members.`,
+      );
+    }
+
+    const template = opts.mergePromptTemplate ?? DEFAULT_MERGE_TEMPLATE;
+
+    // Scalar score for the prompt header — purely informational for the
+    // reflection LM. Sum of variant.metrics values (best-effort), zero
+    // for missing or non-finite. Caller can override via the template.
+    const scoreOf = (v: ScoredVariant): number => {
+      let s = 0;
+      for (const val of Object.values(v.metrics)) {
+        if (typeof val === "number" && Number.isFinite(val)) s += val;
+      }
+      return s;
+    };
+
+    // Template-injection defense (S1235): all FOUR metadata placeholders
+    // (`{ID_A}` / `{ID_B}` / `{SCORE_A}` / `{SCORE_B}`) are substituted
+    // FIRST, then the user-controlled `{PROMPT_A}` / `{PROMPT_B}` slots
+    // LAST. After the metadata substitutions are done, any literal
+    // `{ID_*}` / `{SCORE_*}` strings INSIDE the parent prompts cannot be
+    // re-processed — `String.prototype.replace` only matches what's
+    // currently in the working string, and the user content does not
+    // enter the working string until the final two replacements.
+    //
+    // R1 V0.5.1 self-check (S1235): R1 critic suggested swapping the
+    // order, but that would BREAK the defense — putting PROMPT first
+    // would let the subsequent ID/SCORE replacements grab literal
+    // `{ID_A}` etc. inside the user content. The original ordering is
+    // correct; the test coverage for SCORE placeholders is what was
+    // genuinely missing, and is now added in `tests/v0.5.1-features.test.ts`.
+    const metaPrompt = template
+      .replace("{ID_A}", a.id)
+      .replace("{ID_B}", b.id)
+      .replace("{SCORE_A}", scoreOf(a).toFixed(2))
+      .replace("{SCORE_B}", scoreOf(b).toFixed(2))
+      .replace("{PROMPT_A}", a.prompt)
+      .replace("{PROMPT_B}", b.prompt);
+
+    let merged = await this.reflectionRunPrompt(metaPrompt);
+    merged = this.cleanOutput(merged);
+
+    const longerParent = a.prompt.length >= b.prompt.length ? a.prompt : b.prompt;
+    const maxLength =
+      opts.maxMergeLength ?? Math.max(Math.round(longerParent.length * 1.3), 3500);
+    if (merged.length > maxLength) {
+      merged = this.truncateAtSentenceBoundary(merged, maxLength);
+    }
+
+    return { id: this.makeMergeId(a.id, b.id), prompt: merged };
+  }
+
+  /** Strip markdown fences + leading/trailing whitespace — mirrors `Reflector.cleanOutput`. */
+  private cleanOutput(raw: string): string {
+    let out = raw.trim();
+    const fence = out.match(/^```[a-z]*\n?([\s\S]*?)\n?```$/i);
+    if (fence) out = fence[1]!.trim();
+    return out;
+  }
+
+  /** Sentence-boundary truncation — mirrors `Reflector.truncateAtSentenceBoundary`. */
+  private truncateAtSentenceBoundary(text: string, maxLength: number): string {
+    if (text.length <= maxLength) return text;
+    const truncated = text.slice(0, maxLength);
+    const lastPeriod = truncated.lastIndexOf(".");
+    const lastNewline = truncated.lastIndexOf("\n");
+    const cutPoint = Math.max(lastPeriod, lastNewline);
+    return cutPoint > maxLength * 0.7
+      ? truncated.slice(0, cutPoint + 1)
+      : truncated;
+  }
+
   /** Clamp variant count into the documented bounds. */
   private clampN(n: number): number {
     if (!Number.isFinite(n)) return DEFAULT_NUM_VARIANTS;
@@ -269,5 +503,10 @@ export class GepaOptimizer {
   /** Stable variant id: `gepa-cand-${i}` (caller can re-namespace). */
   private makeId(i: number): string {
     return `gepa-cand-${i}`;
+  }
+
+  /** V0.5.1 — stable merged-variant id: `gepa-merge-${idA}+${idB}`. */
+  private makeMergeId(idA: string, idB: string): string {
+    return `gepa-merge-${idA}+${idB}`;
   }
 }

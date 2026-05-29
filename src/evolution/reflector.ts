@@ -28,13 +28,14 @@
  * deviations from Algorithm 1/2 of the GEPA paper (arxiv 2507.19457).
  * For a feature-complete GEPA experience use the upstream Python tool.
  *
- * **Single-LM design note (R1 Research Finding F7, S1185):** GEPA's
- * official guidance is to use a STRONGER LM for reflection than for
- * task execution (their `reflection_lm` parameter). This adapter
- * intentionally accepts only one injected `RunPromptFn` to keep the
- * V0.5 alpha surface minimal. Stronger-reflection-LM support
- * (`reflectionRunPrompt` override) is deferred to V0.5.1 — pass a
- * higher-tier model in your single `runPrompt` callback as a workaround.
+ * **Stronger reflection LM (V0.5.1, S1235):** GEPA's official guidance
+ * is to use a STRONGER LM for reflection than for task execution
+ * (their `reflection_lm` parameter). Direct support shipped in V0.5.1
+ * via `GepaOptimizerOptions.reflectionRunPrompt` on `GepaOptimizer`'s
+ * constructor — the override is wired into the internal Reflector so
+ * `reflect()` calls route through the stronger LM. The `Reflector`
+ * class itself remains single-LM by design (the override lives one
+ * layer up in `GepaOptimizer`).
  */
 
 import type { ExecutionTrace } from "../types.js";

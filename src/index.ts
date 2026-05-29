@@ -70,13 +70,16 @@ export { loadNotificationConfig } from './evolution/notifications.js';
 export type { NotificationConfig } from './evolution/notifications.js';
 
 // V0.5.0-alpha.2 — GEPA-Style Reflective Optimizer (S1185 Phase 2 A2)
+// V0.5.1 — crowdingDistance + ParetoTruncationStrategy + GepaOptimizer.merge + reflectionRunPrompt
 export {
   dominates,
   nonDominatedFront,
   paretoSelect,
   scalarise,
+  crowdingDistance,
   DARWIN_DEFAULT_OBJECTIVES,
   type ParetoObjective,
+  type ParetoTruncationStrategy,
 } from './evolution/pareto.js';
 export {
   Reflector,
@@ -89,4 +92,6 @@ export {
   type ScoredVariant,
   type GenerateOptions as GepaGenerateOptions,
   type NextGenerationOptions as GepaNextGenerationOptions,
+  type GepaOptimizerOptions,
+  type MergeOptions as GepaMergeOptions,
 } from './evolution/optimizer-gepa.js';

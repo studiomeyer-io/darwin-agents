@@ -171,21 +171,141 @@ export function scalarise<T extends Record<string, unknown>>(
  * Pareto-select up to `maxKeep` variants:
  *   1. Compute non-dominated front.
  *   2. If front size ≤ maxKeep: return front.
- *   3. If front size > maxKeep: sort by scalarised score (descending),
- *      keep top maxKeep.
+ *   3. If front size > maxKeep: truncate via the configured strategy
+ *      (default `"scalarised"` — weighted-sum tie-break).
  *
  * Use this when the GEPA generation budget is fixed (e.g. carry exactly
  * 3 variants to the next round) but the Pareto front happens to be
  * larger.
+ *
+ * V0.5.1 (S1235) — `truncationStrategy` opens up two new modes that
+ * close R1 Research deferrals from V0.5.0-alpha.2:
+ *   - `"scalarised"` (default, V0.5.0 behaviour): weighted-sum tie-break.
+ *     Scale-sensitive — pre-normalise objectives if their value ranges
+ *     differ (see `ParetoObjective.weight` docstring).
+ *   - `"crowding"` (NSGA-II Deb 2002): density-estimator that favours
+ *     variants in sparsely-populated regions of the front. Per-objective
+ *     min-max normalisation makes it scale-safe. Boundary variants
+ *     always survive (assigned Infinity). Recommended for diversity-
+ *     critical workloads.
+
+ * GEPA Algorithm 2's instance-proportional coverage sampling is the
+ * third paper strategy and is NOT implemented in V0.5.1 — the caller-
+ * side coverage data needed to drive it varies enough across domains
+ * that a one-size-fits-all signature would mislead. Backlog for V0.6.
  */
+export type ParetoTruncationStrategy = "scalarised" | "crowding";
+
 export function paretoSelect<T extends Record<string, unknown>>(
   variants: ReadonlyArray<T>,
   objectives: ReadonlyArray<ParetoObjective<T>>,
   maxKeep?: number,
+  truncationStrategy: ParetoTruncationStrategy = "scalarised",
 ): T[] {
   const front = nonDominatedFront(variants, objectives);
   if (typeof maxKeep !== "number" || front.length <= maxKeep) return front;
+  if (truncationStrategy === "crowding") {
+    // NSGA-II crowding-distance truncation (Deb et al. 2002, IEEE TEVC).
+    // Per-objective min-max normalisation makes this scale-safe — the
+    // tie-break does NOT inherit `scalarise`'s scale-sensitivity.
+    const distances = crowdingDistance(front, objectives);
+    return [...front]
+      .map((v, i) => ({ v, cd: distances[i]! }))
+      .sort((a, b) => b.cd - a.cd)
+      .slice(0, maxKeep)
+      .map((x) => x.v);
+  }
+  // Default "scalarised" — preserves V0.5.0 behaviour exactly.
   return [...front]
     .sort((a, b) => scalarise(b, objectives) - scalarise(a, objectives))
     .slice(0, maxKeep);
+}
+
+/**
+ * Compute the NSGA-II crowding distance for each variant in a
+ * non-dominated front. Returns an array of the same length as
+ * `variants`, indexed in input order.
+ *
+ * The classic Deb 2002 algorithm:
+ *   1. For each objective `m`: sort the front by `m`.
+ *   2. Boundary variants (lowest + highest `m`) get distance `+Infinity`
+ *      so they always survive truncation.
+ *   3. Interior variants get the normalised gap between neighbours:
+ *      `(f_m(x_{i+1}) - f_m(x_{i-1})) / (f_m_max - f_m_min)`
+ *   4. Sum across objectives.
+ *
+ * **Pure**, no I/O, deterministic. Safe to call from the hot path of
+ * paretoSelect. Returns `0` for any variant whose objective is non-finite
+ * — never returns NaN.
+ *
+ * NEW V0.5.1 (S1235).
+ *
+ * @example
+ * ```ts
+ * import { crowdingDistance, DARWIN_DEFAULT_OBJECTIVES } from "darwin-agents";
+ *
+ * const front = [
+ *   { id: "a", qualityScore: 8, sourceCount: 3, durationMs: 100, outputLength: 500 },
+ *   { id: "b", qualityScore: 9, sourceCount: 2, durationMs: 200, outputLength: 400 },
+ *   { id: "c", qualityScore: 7, sourceCount: 4, durationMs: 150, outputLength: 600 },
+ * ];
+ * const distances = crowdingDistance(front, DARWIN_DEFAULT_OBJECTIVES);
+ * // distances[i] = sum of per-objective normalised neighbour gaps for variant i
+ * ```
+ */
+export function crowdingDistance<T extends Record<string, unknown>>(
+  variants: ReadonlyArray<T>,
+  objectives: ReadonlyArray<ParetoObjective<T>>,
+): number[] {
+  const n = variants.length;
+  if (n === 0) return [];
+  if (n === 1) return [Number.POSITIVE_INFINITY];
+  if (n === 2) {
+    // Both are boundaries on every objective — assign Infinity to both
+    // so truncation does not pick arbitrarily.
+    return [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
+  }
+  if (objectives.length === 0) return Array(n).fill(0);
+
+  const distances: number[] = Array(n).fill(0);
+
+  for (const obj of objectives) {
+    // Build [origIndex, value] pairs so we can sort without losing the
+    // mapping back to the input order.
+    const indexed: Array<{ i: number; v: number }> = [];
+    let allFinite = true;
+    for (let i = 0; i < n; i++) {
+      const raw = variants[i]![obj.key];
+      if (typeof raw !== "number" || !Number.isFinite(raw)) {
+        allFinite = false;
+        break;
+      }
+      // Direction-normalise so "better" is always larger — keeps the
+      // boundary assignment symmetric for maximize / minimize.
+      indexed.push({ i, v: obj.direction === "maximize" ? raw : -raw });
+    }
+    if (!allFinite) continue; // Skip objectives with non-finite values.
+
+    indexed.sort((a, b) => a.v - b.v);
+    const min = indexed[0]!.v;
+    const max = indexed[n - 1]!.v;
+    const range = max - min;
+
+    // Boundary variants get +Infinity — assigned BEFORE the range check
+    // so degenerate-range fronts still keep their boundaries unique.
+    distances[indexed[0]!.i] = Number.POSITIVE_INFINITY;
+    distances[indexed[n - 1]!.i] = Number.POSITIVE_INFINITY;
+
+    if (range === 0) continue; // All variants identical on this objective.
+
+    for (let k = 1; k < n - 1; k++) {
+      // Skip if we already hit Infinity from a previous objective —
+      // adding to Infinity is still Infinity, so no work to do.
+      if (distances[indexed[k]!.i] === Number.POSITIVE_INFINITY) continue;
+      const gap = (indexed[k + 1]!.v - indexed[k - 1]!.v) / range;
+      distances[indexed[k]!.i] += gap;
+    }
+  }
+
+  return distances;
 }

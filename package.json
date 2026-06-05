@@ -58,7 +58,7 @@
   },
   "dependencies": {},
   "peerDependencies": {
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^11.0.0 || ^12.0.0",
     "pg": "^8.0.0"
   },
   "peerDependenciesMeta": {
@@ -71,6 +71,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.0",
     "@types/node": "^25.6.0",
     "@types/pg": "^8.11.0",
     "tsx": "^4.19.0",

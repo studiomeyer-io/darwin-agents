@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **CI green again on Node 20/22** (red since v0.5.0-alpha.2). The `better-sqlite3`
+  peer dependency was pinned to `^11.0.0`, which ships no prebuilt binary for newer
+  Node ABIs — `new Database()` in the test `before` hook crashed with a
+  `NODE_MODULE_VERSION` mismatch (127 vs 137), which `node:test` reported as the
+  whole trajectory suite being "cancelled by parent". Widened the peer range to
+  `^11.0.0 || ^12.0.0` (consumers may use either major) and added
+  `better-sqlite3@^12.10.0` as a devDependency so the test suite runs against the
+  full Node 20–26 ABI matrix. Verified on Node 22 + 24 (336/336 tests green), tsc clean.
+
 ## [0.5.1-alpha.1] — 2026-05-29
 
 **GEPA Polish-Welle.** Closes the three deliberate paper deviations

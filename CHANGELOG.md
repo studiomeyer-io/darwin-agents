@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.1-alpha.2] — 2026-06-06
+
 ### Fixed
 
 - **CI green again on Node 20/22** (red since v0.5.0-alpha.2). The `better-sqlite3`

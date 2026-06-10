@@ -2,6 +2,75 @@
 
 ## [Unreleased]
 
+## [0.6.0-alpha.1] — 2026-06-10
+
+**GEPA goes online.** The GEPA-style reflective optimizer (shipped as a
+standalone library surface in v0.5.x) is now wired into the production
+evolution loop. Until now Darwin had two halves — a GEPA optimizer you could
+call yourself, and a separate A/B + safety-gated loop — that were never
+connected; the loop always used the legacy stats-meta-prompt optimizer. This
+release closes that gap. Everything is **opt-in and additive** — with the new
+flags off, the evolution loop, the A/B gate, and the stored `changeReason`
+are byte-for-byte identical to v0.5.x. **2 review rounds (3 agents + 1 verifier)
+GO**, **355 tests green** (354 pass, 1 pre-existing skip, +19 new), tsc + build clean.
+
+### Added
+
+- **`evolution.useGepa`** (per-agent) — opt into GEPA reflective variant
+  generation inside `DarwinLoop`. When on (and a `GepaOptimizer` is wired into
+  the loop), the next-prompt mutation is produced by the Reflector (rich text
+  feedback → smallest-possible-edit) instead of the legacy stats-meta-prompt
+  optimizer. The loop reuses the critic feedback it already collects. Falls
+  back to the legacy optimizer on cold start (no critic feedback yet), on any
+  reflector error (with a `console.warn` breadcrumb), or when the reflective
+  mutation fails the alignment guard.
+- **`evolution.reflectionModel`** — model id for the GEPA reflection LM (e.g.
+  `claude-opus-4-8`). GEPA's guidance and the Decagon production ablation both
+  find the reflection model is the leverage point — a weak reflector can leave
+  the prompt unchanged. The CLI warns when `useGepa` is on but no
+  `reflectionModel` is set.
+- **`evolution.paretoGate`** — opt into a multi-objective Pareto-dominance
+  guard at A/B activation. A challenger that wins the scalar composite is
+  activated ONLY if it is a strict Pareto improvement over the incumbent
+  across the full objective vector (quality / sources / length / duration) —
+  a scalar win that regressed some objective is rejected. Uses the fixed
+  `DARWIN_DEFAULT_OBJECTIVES` as an independent second opinion (not the agent's
+  custom `evolution.metrics` weights — by design).
+- **`SafetyThresholds.requireConfidence`** — opt into a peeking-resistant A/B
+  gate. Because `evaluateABTest` runs after every run, a fixed 5%-margin rule
+  under continuous monitoring inflates the false-positive rate. When on, a
+  margin win must also clear an effect-size / sample-size bar (`calculateConfidence`,
+  previously dead code) before a winner is declared; sub-threshold improvements
+  are intentionally not adopted and the test terminates via the incumbent
+  tie-break. (mSPRT / always-valid confidence sequences are the rigorous
+  roadmap upgrade — this is the minimal first step.)
+- **`checkAlignmentPreservation` + `SAFETY_PATTERNS`** exported from the package
+  root (`src/evolution/alignment.ts`) — the shared safety-keyword guard, so
+  consumers wiring their own `GepaOptimizer` can apply the same check.
+- **`ExperimentTracker.getAverageMetrics(agent, version, since?)`** — averaged
+  objective vector (not a scalar), feeding the Pareto activation gate.
+
+### Changed
+
+- **The alignment guard now covers BOTH mutation paths.** `checkAlignmentPreservation`
+  moved from a private method on `PromptOptimizer` to the shared
+  `src/evolution/alignment.ts`; the legacy optimizer delegates to it and the
+  GEPA loop path runs it before accepting a mutation. Previously the safety-keyword
+  check lived only on the legacy path — wiring GEPA in without this would have
+  opened a safety-regression hole. The three redundant case-variant patterns
+  (`/\bdo NOT\b/` etc.) were dropped (no-ops under the `gi` recompile); the
+  accept/reject decision is unchanged.
+- **Default model ids modernised** across providers + CLI: the deprecated
+  `claude-sonnet-4-20250514` (Sonnet 4.0, retires 2026-06-15) → `claude-sonnet-4-6`.
+
+### Fixed
+
+- A/B completion logging reported the loser's composite as the winner score
+  whenever the regression check (or the new Pareto gate) flipped the winner
+  from B back to A — the score lookups keyed off `outcome` instead of the final
+  `winner`. (Pre-existing for the regression flip; surfaced and fixed during
+  v0.6.0 review.)
+
 ## [0.5.1-alpha.2] — 2026-06-06
 
 ### Fixed

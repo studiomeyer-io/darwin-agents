@@ -48,6 +48,46 @@ export interface EvolutionConfig {
   minRuns?: number;
   /** Minimum output length to save (default: 2000). Lower for short-form agents like marketing. */
   minOutputLength?: number;
+  /**
+   * v0.6.0 — Opt into the GEPA-style reflective optimizer for variant
+   * generation inside the evolution loop. When `true` AND a `GepaOptimizer`
+   * is wired into the loop, the next-prompt mutation is produced by the
+   * Reflector (rich text feedback → smallest-possible-edit) instead of the
+   * legacy stats-meta-prompt optimizer. Falls back to the legacy optimizer
+   * on cold start (no critic feedback yet) or if the reflective mutation
+   * fails the alignment guard. Default `false` — legacy behaviour unchanged.
+   */
+  useGepa?: boolean;
+  /**
+   * v0.6.0 — Model id for the GEPA reflection LM (e.g. `claude-opus-4-8`).
+   * GEPA's published guidance and the Decagon production ablation both find
+   * the reflection model is the leverage point — a weak reflector can leave
+   * the prompt unchanged. Set this to a STRONGER model than the task model.
+   * When omitted, reflection falls back to the agent's own model and the
+   * runner emits a warning. Only consulted when `useGepa` is `true`.
+   */
+  reflectionModel?: string;
+  /**
+   * v0.6.0 — Opt into a multi-objective Pareto-dominance guard at A/B
+   * activation. When `true`, a challenger that wins on the scalar composite
+   * is activated ONLY if it is a strict Pareto improvement over the incumbent
+   * across the full objective vector (quality / sources / length / duration) —
+   * better-or-equal on every objective, strictly better on at least one. A
+   * scalar-composite win that is not a Pareto improvement means the challenger
+   * traded a regression on some objective for its win, and is rejected.
+   *
+   * Deliberate design note: the gate evaluates the FIXED, unweighted
+   * `DARWIN_DEFAULT_OBJECTIVES` vector — NOT the agent's custom
+   * `evolution.metrics` weights. It is an independent, second multi-objective
+   * opinion that sits alongside the weighted scalar composite, so an agent
+   * with custom weights can still see a challenger rejected for regressing an
+   * objective it had down-weighted. That is intentional (no silent regressions
+   * on any raw objective); leave `paretoGate` off if you only care about the
+   * weighted composite.
+   *
+   * Default `false` — single-objective composite gating unchanged.
+   */
+  paretoGate?: boolean;
 }
 
 // ─── Config ─────────────────────────────────────────
@@ -344,6 +384,26 @@ export interface SafetyThresholds {
   minDataPoints: number;
   maxRegression: number;
   failureRollbackThreshold: number;
+  /**
+   * v0.6.0 — Require a minimum statistical confidence (effect size) before
+   * declaring an A/B winner on the score margin. Guards against the
+   * "peeking problem": `evaluateABTest` is called after every run, and a
+   * fixed relative-improvement threshold with continuous monitoring inflates
+   * the false-positive rate (winners declared by chance). When `true`, a
+   * margin-based win must ALSO clear the effect-size / sample-size bar from
+   * `calculateConfidence` — otherwise the test continues. Reliability
+   * auto-loss and the anti-infinite-loop incumbent tie-break are unaffected.
+   *
+   * Consequence to be aware of: a challenger with a genuine but SMALL effect
+   * (effect size < 0.2) never clears the confidence bar, so the test keeps
+   * running until the 2×minRuns tie-break fires and the incumbent wins by
+   * default. With `requireConfidence` on, sub-threshold improvements are
+   * therefore intentionally NOT adopted — that is the peeking-resistance
+   * trade-off, not a stall.
+   *
+   * Default `undefined` (= `false`) — winner logic unchanged byte-for-byte.
+   */
+  requireConfidence?: boolean;
 }
 
 export const DEFAULT_SAFETY: SafetyThresholds = {

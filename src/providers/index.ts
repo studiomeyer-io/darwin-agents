@@ -57,8 +57,8 @@ export function createProvider(config: ProviderConfig): LLMProvider {
 
 /** Default model names per provider */
 export const DEFAULT_MODELS: Record<ProviderConfig['type'], string> = {
-  'claude-cli': 'claude-sonnet-4-20250514',
-  'anthropic-api': 'claude-sonnet-4-20250514',
+  'claude-cli': 'claude-sonnet-4-6',
+  'anthropic-api': 'claude-sonnet-4-6',
   'openai': 'gpt-5.4',
   'ollama': 'llama3.1',
 };

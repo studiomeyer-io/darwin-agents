@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import type { DarwinConfig, AgentDefinition, McpServerConfig } from '../types.js';
 import type { LLMCallOptions, LLMCallResult, LLMProvider, ProviderConfig } from './types.js';
 
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 /** Extended options for Claude CLI (MCP, tools, etc.) */
 export interface ClaudeCliRunOptions {

@@ -12,6 +12,7 @@ import { DarwinLoop } from '../evolution/loop.js';
 import { ExperimentTracker } from '../evolution/tracker.js';
 import { PatternDetector } from '../evolution/patterns.js';
 import { PromptOptimizer } from '../evolution/optimizer.js';
+import { GepaOptimizer } from '../evolution/optimizer-gepa.js';
 import { SafetyGate } from '../evolution/safety.js';
 import { runMultiCritic, getCriticPrompts } from '../evolution/multi-critic.js';
 import { loadNotificationConfig } from '../evolution/notifications.js';
@@ -43,7 +44,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
 
   // Initialize all critics with CLI default
   for (const { name } of prompts) {
-    defaults[name] = { model: 'claude-sonnet-4-20250514', label: 'claude-cli' };
+    defaults[name] = { model: 'claude-sonnet-4-6', label: 'claude-cli' };
   }
 
   const criticNames = prompts.map(p => p.name);
@@ -68,7 +69,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
       const anthropicProvider = createProvider({ type: 'anthropic-api' });
       defaults[criticNames[1]] = {
         provider: anthropicProvider,
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-6',
         label: 'anthropic-api',
       };
     } catch {
@@ -315,7 +316,7 @@ async function runCommandInner(
               type: 'llm',
               systemPrompt,
               maxTurns: 3,
-              model: criticInfo?.model ?? 'claude-sonnet-4-20250514',
+              model: criticInfo?.model ?? 'claude-sonnet-4-6',
             },
             criticTask,
             {
@@ -399,7 +400,7 @@ async function runCommandInner(
           type: 'llm',
           systemPrompt: 'You are a prompt optimization expert. Return ONLY the improved prompt text.',
           maxTurns: 3,
-          model: 'claude-sonnet-4-20250514',
+          model: 'claude-sonnet-4-6',
         },
         metaPrompt,
         { config, taskType: 'optimization', autonomous: true },
@@ -407,8 +408,41 @@ async function runCommandInner(
       return optimizerResult.output;
     });
 
+    // v0.6.0 — GEPA reflective optimizer (opt-in via agent.evolution.useGepa).
+    // Routes the reflection LLM call through a (ideally STRONGER) model: GEPA's
+    // published guidance + the Decagon production ablation both find the
+    // reflection model is the leverage point — a weak reflector can leave the
+    // prompt unchanged. Warn if useGepa is on but no reflectionModel is set.
+    let gepa: GepaOptimizer | undefined;
+    if (agent.evolution?.useGepa) {
+      const reflectionModel = agent.evolution.reflectionModel;
+      if (!reflectionModel) {
+        console.warn(
+          '[darwin] evolution.useGepa is on but no evolution.reflectionModel is set — ' +
+          'reflection will use the agent model. GEPA works best with a STRONGER reflection ' +
+          'model (e.g. claude-opus-4-8); set agent.evolution.reflectionModel to silence this.',
+        );
+      }
+      gepa = new GepaOptimizer(async (reflectionPrompt: string) => {
+        const reflectionResult = await runAgent(
+          {
+            name: 'reflector',
+            role: 'GEPA Reflector',
+            description: 'Reflective prompt mutator (GEPA smallest-possible-edit)',
+            type: 'llm',
+            systemPrompt: 'You are a prompt-engineering reflector. Return ONLY the mutated prompt text.',
+            maxTurns: 3,
+            model: reflectionModel ?? agent.model ?? 'claude-sonnet-4-6',
+          },
+          reflectionPrompt,
+          { config, taskType: 'reflection', autonomous: true },
+        );
+        return reflectionResult.output;
+      });
+    }
+
     const notifications = loadNotificationConfig();
-    const loop = new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications });
+    const loop = new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications, gepa });
 
     console.log(`\n[darwin] Evolution: Running Darwin loop...`);
     const evoResult = await loop.afterRun(result.experiment);

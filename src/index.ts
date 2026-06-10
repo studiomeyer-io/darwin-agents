@@ -95,3 +95,12 @@ export {
   type GepaOptimizerOptions,
   type MergeOptions as GepaMergeOptions,
 } from './evolution/optimizer-gepa.js';
+
+// V0.6.0 — shared alignment-preservation guard. Run by BOTH the legacy
+// PromptOptimizer and the GEPA reflective loop path; exported so consumers
+// wiring their own GepaOptimizer can apply the same safety-keyword check to
+// their mutations.
+export {
+  checkAlignmentPreservation,
+  SAFETY_PATTERNS,
+} from './evolution/alignment.js';

@@ -117,29 +117,45 @@ export class SafetyGate {
       return 'continue';
     }
 
-    // Check if B beats A by >5%
+    // Determine which side (if any) cleared the 5% relative-improvement bar.
+    let marginOutcome: ABTestOutcome | null = null;
     if (adjustedA > 0) {
       const bOverA = (adjustedB - adjustedA) / adjustedA;
       if (bOverA > improvementThreshold) {
-        return 'b_wins';
+        marginOutcome = 'b_wins';
       }
     } else if (adjustedB > 0) {
-      return 'b_wins';
+      marginOutcome = 'b_wins';
     }
-
-    // Check if A beats B by >5%
-    if (adjustedB > 0) {
-      const aOverB = (adjustedA - adjustedB) / adjustedB;
-      if (aOverB > improvementThreshold) {
-        return 'a_wins';
+    if (marginOutcome === null) {
+      if (adjustedB > 0) {
+        const aOverB = (adjustedA - adjustedB) / adjustedB;
+        if (aOverB > improvementThreshold) {
+          marginOutcome = 'a_wins';
+        }
+      } else if (adjustedA > 0) {
+        marginOutcome = 'a_wins';
       }
-    } else if (adjustedA > 0) {
-      return 'a_wins';
     }
 
-    // Neither version has a decisive advantage.
-    // But prevent infinite tests: if both have 2x minRuns, declare incumbent (A) the winner.
-    // Rationale: if B can't prove itself better after double the sample, A keeps its position.
+    if (marginOutcome !== null) {
+      // v0.6.0 peeking-guard: only adopt the margin winner if it ALSO clears
+      // the effect-size / sample-size bar when requireConfidence is on. If it
+      // does not, we do NOT early-return 'continue' — we fall through to the
+      // tie-break below so the test still terminates (an early 'continue' here
+      // would loop forever on a persistent small-margin challenger).
+      if (
+        !this.thresholds.requireConfidence ||
+        this.meetsConfidence(adjustedA, adjustedB, runsA, runsB, minRuns)
+      ) {
+        return marginOutcome;
+      }
+    }
+
+    // Neither version has a decisive (confident) advantage.
+    // Prevent infinite tests: if both have 2x minRuns, declare incumbent (A) the
+    // winner. Rationale: if B can't prove itself better after double the sample
+    // (or can't clear the confidence bar), A keeps its position.
     const maxRunsPerSide = minRuns * 2;
     if (runsA >= maxRunsPerSide && runsB >= maxRunsPerSide) {
       return 'a_wins'; // Incumbent wins by default — challenger failed to prove superiority
@@ -179,6 +195,29 @@ export class SafetyGate {
     const confident = effectSize >= 0.2 && totalSamples >= minRuns * 2;
 
     return { effectSize, confident };
+  }
+
+  /**
+   * v0.6.0 — Peeking-resistant confidence check used by `evaluateABTest`
+   * when `requireConfidence` is on. Same effect-size proxy as
+   * {@link calculateConfidence} (|Δ| / pooled-mean), but keyed to the
+   * test's *effective* minRuns rather than the global default so the gate
+   * scales with per-test sample sizing. Requires a "small" effect (≥ 0.2)
+   * and at least 2×minRuns total samples before a margin win counts.
+   */
+  private meetsConfidence(
+    scoreA: number,
+    scoreB: number,
+    runsA: number,
+    runsB: number,
+    minRuns: number,
+  ): boolean {
+    const pooled = (scoreA + scoreB) / 2;
+    if (pooled === 0) {
+      return false;
+    }
+    const effectSize = Math.abs(scoreA - scoreB) / pooled;
+    return effectSize >= 0.2 && runsA + runsB >= minRuns * 2;
   }
 
   /**

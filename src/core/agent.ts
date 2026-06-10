@@ -13,7 +13,7 @@ import type { AgentDefinition, DarwinConfig } from '../types.js';
 // ─── Defaults ────────────────────────────────────────
 
 const DEFAULT_MAX_TURNS = 10;
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const AGENT_NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
 
 /**

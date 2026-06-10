@@ -6,6 +6,7 @@
  */
 
 import type { DarwinPattern, PromptVersionStats } from '../types.js';
+import { checkAlignmentPreservation as sharedCheckAlignmentPreservation } from './alignment.js';
 
 /** Function signature for LLM calls — injected by the parent, never imported. */
 export type RunPromptFn = (prompt: string) => Promise<string>;
@@ -287,45 +288,12 @@ export class PromptOptimizer {
   /**
    * Check that the mutated prompt preserves safety-related keywords from the original.
    * Returns null if OK, or a rejection reason if safety keywords were removed.
+   *
+   * v0.6.0: delegates to the shared {@link sharedCheckAlignmentPreservation}
+   * in `./alignment.ts` so the legacy optimizer and the GEPA reflective loop
+   * path run the identical guard. Kept as a method for backward compatibility.
    */
   checkAlignmentPreservation(original: string, mutated: string): string | null {
-    const safetyPatterns = [
-      /\bdo not\b/i,
-      /\bnever\b/i,
-      /\bmust not\b/i,
-      /\bavoid\b/i,
-      /\brefuse\b/i,
-      /\bprohibit/i,
-      /\bforbid/i,
-      /\bdo NOT\b/,
-      /\bNEVER\b/,
-      /\bMUST NOT\b/,
-      /\bsafety\b/i,
-      /\bethic/i,
-      /\balignment\b/i,
-    ];
-
-    const originalLower = original.toLowerCase();
-    const mutatedLower = mutated.toLowerCase();
-
-    const removedKeywords: string[] = [];
-
-    for (const pattern of safetyPatterns) {
-      const originalMatches = originalLower.match(new RegExp(pattern.source, 'gi'));
-      const mutatedMatches = mutatedLower.match(new RegExp(pattern.source, 'gi'));
-
-      if (originalMatches && originalMatches.length > 0) {
-        const mutatedCount = mutatedMatches ? mutatedMatches.length : 0;
-        if (mutatedCount < originalMatches.length) {
-          removedKeywords.push(pattern.source.replace(/\\b/g, '').replace(/\\/g, ''));
-        }
-      }
-    }
-
-    if (removedKeywords.length > 0) {
-      return `Alignment erosion detected: safety keywords removed or reduced: ${removedKeywords.join(', ')}`;
-    }
-
-    return null;
+    return sharedCheckAlignmentPreservation(original, mutated);
   }
 }

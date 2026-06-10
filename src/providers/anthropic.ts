@@ -10,7 +10,7 @@
 import type { LLMCallOptions, LLMCallResult, LLMProvider, ProviderConfig } from './types.js';
 
 const DEFAULT_BASE_URL = 'https://api.anthropic.com';
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TOKENS = 8192;
 const API_VERSION = '2023-06-01';
 

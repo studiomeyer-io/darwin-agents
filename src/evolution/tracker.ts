@@ -217,4 +217,53 @@ export class ExperimentTracker {
 
     return total / filtered.length;
   }
+
+  /**
+   * v0.6.0 — Average raw metric vector for a specific agent + prompt version,
+   * keyed by the names in `DarwinMetrics` / `DARWIN_DEFAULT_OBJECTIVES`
+   * (`qualityScore` / `sourceCount` / `outputLength` / `durationMs`). Unlike
+   * {@link getAverageComposite}, this does NOT collapse to a scalar — it
+   * feeds the multi-objective Pareto-dominance gate at A/B activation so a
+   * scalar winner that regressed on one objective can be caught.
+   *
+   * `qualityScore` averages only over experiments that actually have a score
+   * (NULL = critic failed, excluded — same convention as `getStats`). Other
+   * objectives average over all filtered experiments. Returns `{}` when there
+   * are no experiments for the version (caller treats empty as "skip gate").
+   *
+   * If `since` is provided, only experiments at/after that ISO timestamp are
+   * included — pass the A/B test start so the incumbent's historical data
+   * does not skew the comparison.
+   */
+  async getAverageMetrics(
+    agentName: string,
+    version: string,
+    since?: string,
+  ): Promise<Record<string, number>> {
+    const experiments = await this.memory.loadExperiments(agentName);
+    let filtered = experiments.filter((e) => e.promptVersion === version);
+
+    if (since) {
+      filtered = filtered.filter((e) => e.startedAt >= since);
+    }
+
+    if (filtered.length === 0) {
+      return {};
+    }
+
+    const n = filtered.length;
+    const withQuality = filtered.filter((e) => e.metrics.qualityScore !== null);
+    const avgQuality =
+      withQuality.length > 0
+        ? withQuality.reduce((s, e) => s + (e.metrics.qualityScore ?? 0), 0) /
+          withQuality.length
+        : 0;
+
+    return {
+      qualityScore: avgQuality,
+      sourceCount: filtered.reduce((s, e) => s + e.metrics.sourceCount, 0) / n,
+      outputLength: filtered.reduce((s, e) => s + e.metrics.outputLength, 0) / n,
+      durationMs: filtered.reduce((s, e) => s + e.metrics.durationMs, 0) / n,
+    };
+  }
 }

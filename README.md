@@ -116,6 +116,33 @@ Be concise. No fluff. Capture the essence.`,
 });
 ```
 
+### Reflective evolution — GEPA, online (v0.6, opt-in)
+
+By default Darwin mutates prompts from aggregate stats. Turn on `useGepa` and
+the evolution loop instead generates each challenger with a **GEPA-style
+reflector** — it reads the recent critic feedback Darwin already collects and
+writes the *smallest targeted edit* that fixes the failure modes, then A/B-tests
+it against live traffic like any other variant. This is the part no other
+TypeScript framework ships: a GEPA reflective optimizer running *inside* a
+production safety gate, not as an offline batch job.
+
+```typescript
+evolution: {
+  enabled: true,
+  evaluator: 'multi-critic',
+  useGepa: true,                       // reflective generation instead of stats-meta-prompt
+  reflectionModel: 'claude-opus-4-8',  // GEPA's leverage point — use a STRONGER model here
+  paretoGate: true,                    // activate a challenger only if it's a true Pareto improvement
+},
+```
+
+Everything degrades safely: with no critic feedback yet (cold start), on any
+reflector error, or if a mutation would erode a safety constraint, the loop
+falls back to the default optimizer. The same alignment guard now runs on both
+paths. Pair with `requireConfidence` on your `SafetyThresholds` for a
+peeking-resistant A/B gate. All of it is off unless you opt in — existing
+agents behave exactly as before.
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -370,7 +397,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 ## Known Limitations
 
 - **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. We mitigate this with multi-model critics (GPT + Claude), but inherent self-preference bias exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
-- **Statistical simplicity**: A/B tests use mean comparison with a 5% threshold, not formal significance tests (t-test, Mann-Whitney U). `computeDynamicMinRuns()` adjusts sample sizes based on variance, but p-values are on the roadmap.
+- **Statistical simplicity**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance, and v0.6 adds an opt-in `requireConfidence` gate (effect-size + sample-size guard) that resists the peeking problem of evaluating after every run. A proper sequential test (mSPRT / always-valid confidence sequences) is the next step on the roadmap.
 - **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
 
 ## Contributing

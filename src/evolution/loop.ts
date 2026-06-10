@@ -24,6 +24,10 @@ import type { SafetyGate } from './safety.js';
 import type { PatternDetector } from './patterns.js';
 import type { NotificationConfig } from './notifications.js';
 import { notifyABTestComplete, notifyEvolutionStarted, notifyRollback } from './notifications.js';
+import type { GepaOptimizer } from './optimizer-gepa.js';
+import type { ReflectiveFeedback } from './reflector.js';
+import { checkAlignmentPreservation } from './alignment.js';
+import { dominates, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -49,6 +53,14 @@ interface DarwinLoopDeps {
   agent?: AgentDefinition;
   /** Notification config (Telegram alerts) — auto-loaded from env if not set */
   notifications?: NotificationConfig;
+  /**
+   * v0.6.0 — Optional GEPA-style reflective optimizer. When present AND the
+   * agent has `evolution.useGepa === true`, variant generation routes through
+   * the reflector (rich text feedback → smallest-possible-edit) instead of
+   * the legacy stats-meta-prompt optimizer. Omit it (or leave `useGepa`
+   * false) to keep the legacy single-shot path — behaviour is unchanged.
+   */
+  gepa?: GepaOptimizer;
 }
 
 // ─── Validation Constants ─────────────────────────────
@@ -69,6 +81,7 @@ export class DarwinLoop {
   private patterns: PatternDetector;
   private agent?: AgentDefinition;
   private notifications: NotificationConfig;
+  private gepa?: GepaOptimizer;
 
   constructor(deps: DarwinLoopDeps) {
     this.memory = deps.memory;
@@ -78,6 +91,7 @@ export class DarwinLoop {
     this.patterns = deps.patterns;
     this.agent = deps.agent;
     this.notifications = deps.notifications ?? {};
+    this.gepa = deps.gepa;
   }
 
   /**
@@ -249,14 +263,31 @@ export class DarwinLoop {
     // The optimizer previously only saw aggregated stats but not WHY runs scored poorly.
     const recentFeedback = await this.getRecentFeedback(agent, 5);
 
-    const newPromptText = await this.optimizer.generateVariant(
-      activePrompt.promptText,
-      detectedPatterns,
-      stats,
-      toolContext,
-      catStats,
-      recentFeedback,
-    );
+    // ── Variant generation: GEPA reflective path (opt-in) or legacy ──
+    // v0.6.0: when `evolution.useGepa` is on AND a GepaOptimizer is wired in,
+    // generate the challenger via the reflector (rich text feedback →
+    // smallest-possible-edit). The GEPA path returns null on cold start
+    // (no critic feedback yet) or when its mutation fails the alignment
+    // guard — in either case we fall back to the legacy meta-prompt
+    // optimizer so the loop never stalls.
+    let newPromptText: string | null = null;
+    let generatedBy: 'gepa' | 'legacy' = 'legacy';
+    if (this.agent?.evolution?.useGepa === true && this.gepa) {
+      newPromptText = await this.generateVariantGepa(agent, activePrompt.promptText);
+      if (newPromptText !== null) {
+        generatedBy = 'gepa';
+      }
+    }
+    if (newPromptText === null) {
+      newPromptText = await this.optimizer.generateVariant(
+        activePrompt.promptText,
+        detectedPatterns,
+        stats,
+        toolContext,
+        catStats,
+        recentFeedback,
+      );
+    }
 
     // Create a new prompt version
     const newVersion = this.nextVersion(activePrompt.version);
@@ -266,7 +297,12 @@ export class DarwinLoop {
       promptText: newPromptText,
       createdAt: new Date().toISOString(),
       parentVersion: activePrompt.version,
-      changeReason: this.buildChangeReason(detectedPatterns),
+      // Only tag the change reason with the generator when GEPA was opted in —
+      // keeps the stored `changeReason` byte-for-byte identical for legacy-only
+      // agents (v0.6.0 review Finding 8).
+      changeReason: this.agent?.evolution?.useGepa
+        ? `[${generatedBy}] ${this.buildChangeReason(detectedPatterns)}`
+        : this.buildChangeReason(detectedPatterns),
       active: false, // Not active yet — going into A/B test
       stats: { totalRuns: 0, avgQuality: 0, avgDuration: 0, successRate: 0, avgSourceCount: 0 },
     };
@@ -298,7 +334,8 @@ export class DarwinLoop {
     result.promptEvolved = true;
     result.abTestStarted = true;
     result.newVersion = newVersion;
-    result.message = `New prompt ${newVersion} generated. A/B test started: ${activePrompt.version} vs ${newVersion} (minRuns: ${dynamicMinRuns}).`;
+    const genLabel = this.agent?.evolution?.useGepa ? ` via ${generatedBy}` : '';
+    result.message = `New prompt ${newVersion} generated${genLabel}. A/B test started: ${activePrompt.version} vs ${newVersion} (minRuns: ${dynamicMinRuns}).`;
 
     // Notify via Telegram (non-blocking)
     notifyEvolutionStarted(
@@ -380,6 +417,38 @@ export class DarwinLoop {
       }
     }
 
+    // v0.6.0 — Multi-objective Pareto-dominance gate (opt-in).
+    // The composite score is a weighted scalar — a challenger can win on it
+    // while quietly REGRESSING on one objective (e.g. higher quality but 3×
+    // slower). Note: if the incumbent A actually Pareto-dominated B, the
+    // monotone composite would already have favoured A (outcome a_wins), so a
+    // "does A dominate B" test could never fire here. The meaningful guard is
+    // the inverse: when `evolution.paretoGate` is on, accept the challenger B
+    // ONLY if it is a strict Pareto improvement (B dominates A across the full
+    // objective vector). A scalar-win that is not a Pareto improvement means B
+    // traded a regression on some objective for the win — keep the incumbent.
+    if (outcome === 'b_wins' && this.agent?.evolution?.paretoGate && winner === currentTest.versionB) {
+      const since = currentTest.startedAt;
+      const metricsA = await this.tracker.getAverageMetrics(agentName, currentTest.versionA, since);
+      const metricsB = await this.tracker.getAverageMetrics(agentName, currentTest.versionB, since);
+      // Only gate when both sides have data for every objective — otherwise
+      // `dominates` short-circuits to false on a missing key and we would
+      // reject every challenger for lack of data. Skip the gate instead.
+      if (Object.keys(metricsA).length > 0 && Object.keys(metricsB).length > 0) {
+        const bDominatesA = dominates(
+          metricsB,
+          metricsA,
+          DARWIN_DEFAULT_OBJECTIVES as ReadonlyArray<ParetoObjective<Record<string, number>>>,
+        );
+        if (!bDominatesA) {
+          // Challenger won the scalar composite but is not a strict Pareto
+          // improvement (it regressed on at least one objective) → keep A.
+          winner = currentTest.versionA;
+          loser = currentTest.versionB;
+        }
+      }
+    }
+
     // Activate winner, deactivate loser
     await this.activateVersion(agentName, winner);
 
@@ -391,11 +460,16 @@ export class DarwinLoop {
       return s;
     });
 
-    const scoreMsg = `(composite: ${outcome === 'a_wins' ? compositeA.toFixed(3) : compositeB.toFixed(3)} vs ${outcome === 'a_wins' ? compositeB.toFixed(3) : compositeA.toFixed(3)})`;
+    // Derive the reported scores from the FINAL `winner`, not the raw
+    // `outcome` — the regression check and the Pareto gate can both flip
+    // `winner` from B back to A while `outcome` stays 'b_wins'. Keying the
+    // log/notification off `outcome` would report the loser's composite as
+    // the winner score (observability bug, v0.6.0 review Finding 1/4).
+    const winnerScore = winner === currentTest.versionA ? compositeA : compositeB;
+    const loserScore = winner === currentTest.versionA ? compositeB : compositeA;
+    const scoreMsg = `(composite: ${winnerScore.toFixed(3)} vs ${loserScore.toFixed(3)})`;
 
     // Notify via Telegram (non-blocking)
-    const winnerScore = outcome === 'a_wins' ? compositeA : compositeB;
-    const loserScore = outcome === 'a_wins' ? compositeB : compositeA;
     notifyABTestComplete(this.notifications, agentName, winner, loser, winnerScore, loserScore)
       .catch(() => {/* swallow — notification is best-effort */});
 
@@ -480,6 +554,101 @@ export class DarwinLoop {
     }
 
     return feedback;
+  }
+
+  /**
+   * v0.6.0 — Generate the next prompt variant via the GEPA reflective path.
+   *
+   * Builds rich {@link ReflectiveFeedback} from recent critic reports +
+   * execution trajectories and asks the {@link GepaOptimizer} for ONE
+   * smallest-possible-edit mutation (the online loop carries a single
+   * challenger into the A/B test; the N-variant + Pareto + merge surfaces
+   * are for offline/batch optimisation). The mutation is then run through
+   * the SHARED alignment guard — the same check the legacy optimizer uses —
+   * so the GEPA path cannot ship a prompt that erodes safety keywords.
+   *
+   * Returns `null` (→ caller falls back to the legacy optimizer) when:
+   *   - no GepaOptimizer is wired in,
+   *   - there is no critic feedback yet (cold start — the reflector has
+   *     nothing to reflect on),
+   *   - the reflector throws or returns an empty mutation, or
+   *   - the mutation fails the alignment guard.
+   */
+  private async generateVariantGepa(
+    agentName: string,
+    currentPrompt: string,
+  ): Promise<string | null> {
+    if (!this.gepa) {
+      return null;
+    }
+
+    const feedbacks = await this.getReflectiveFeedback(agentName, 5);
+    if (feedbacks.length === 0) {
+      // Cold start: no critic feedback to reflect on. Let the legacy
+      // meta-prompt optimizer (which works from aggregate stats + patterns)
+      // handle the first mutation.
+      return null;
+    }
+
+    let mutated: string;
+    try {
+      const variants = await this.gepa.generate(currentPrompt, feedbacks, {
+        numVariants: 1,
+        feedbackStrategy: 'single',
+      });
+      mutated = variants[0]?.prompt ?? '';
+    } catch (err) {
+      // Any reflector/provider error → fall back to the legacy path rather
+      // than failing the whole evolution cycle. Emit a breadcrumb so a
+      // persistently-failing reflector (which would silently run the loop in
+      // legacy mode forever) is visible (v0.6.0 review Finding F6).
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[darwin] GEPA reflection failed for "${agentName}", falling back to legacy optimizer: ${reason}`);
+      return null;
+    }
+
+    if (mutated.length === 0) {
+      return null;
+    }
+
+    // Shared alignment guard (v0.6.0): the GEPA path runs the IDENTICAL
+    // safety-keyword preservation check as PromptOptimizer.generateVariant.
+    // A mutation that drops "never" / "do not" / "must not" / … is rejected.
+    const alignmentIssue = checkAlignmentPreservation(currentPrompt, mutated);
+    if (alignmentIssue) {
+      return null;
+    }
+
+    return mutated;
+  }
+
+  /**
+   * v0.6.0 — Build GEPA {@link ReflectiveFeedback} from the most recent
+   * experiments that carry critic feedback. Each becomes a (variantId,
+   * score, textFeedback, trace) tuple the reflector uses to synthesise the
+   * mutation. `loadExperiments` returns newest-first, so we take the first
+   * `limit` that have a feedback report.
+   */
+  private async getReflectiveFeedback(
+    agentName: string,
+    limit: number,
+  ): Promise<ReflectiveFeedback[]> {
+    const experiments = await this.memory.loadExperiments(agentName);
+
+    const feedbacks: ReflectiveFeedback[] = [];
+    for (const exp of experiments) {
+      if (feedbacks.length >= limit) break;
+      if (exp.feedback?.report) {
+        feedbacks.push({
+          variantId: exp.promptVersion,
+          score: exp.feedback.score,
+          textFeedback: `Task: "${exp.task}"\n${exp.feedback.report}`,
+          trace: exp.trajectory,
+        });
+      }
+    }
+
+    return feedbacks;
   }
 
   /**

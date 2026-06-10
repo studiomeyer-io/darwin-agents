@@ -49,7 +49,7 @@ export interface RunOptions {
 // ─── Constants ───────────────────────────────────────
 
 const DEFAULT_TIMEOUT = 600_000; // 10 minutes
-const DEFAULT_MODEL = 'claude-sonnet-4-20250514';
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_MAX_TURNS = 10;
 const DEFAULT_DATA_DIR = '.darwin';
 const DEFAULT_TASK_TYPE = 'general';

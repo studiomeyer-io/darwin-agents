@@ -18,7 +18,8 @@ import {
   setMaxRunWallMs,
   resetRunCounters,
 } from '../src/core/runner.js';
-import type { AgentDefinition, LLMProvider } from '../src/types.js';
+import type { AgentDefinition } from '../src/types.js';
+import type { LLMProvider } from '../src/providers/types.js';
 
 // Fake provider — never touches the network or spawns a subprocess.
 function makeFakeProvider(): LLMProvider {
@@ -37,7 +38,8 @@ function makeFakeProvider(): LLMProvider {
 
 const TEST_AGENT: AgentDefinition = {
   name: 'test-agent',
-  type: 'researcher',
+  role: 'Test Agent',
+  type: 'llm',
   description: 'test',
   systemPrompt: 'You are a test agent.',
   maxTurns: 1,
@@ -62,7 +64,7 @@ describe('Darwin runner budget caps', () => {
     for (let i = 0; i < 3; i++) {
       await runAgent(TEST_AGENT, 'task ' + String(i), {
         provider,
-        config: { dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
+        config: { provider: 'claude-cli', memory: 'sqlite', dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
       });
     }
 
@@ -70,7 +72,7 @@ describe('Darwin runner budget caps', () => {
     await assert.rejects(
       runAgent(TEST_AGENT, 'task 4', {
         provider,
-        config: { dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
+        config: { provider: 'claude-cli', memory: 'sqlite', dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
       }),
       (err: unknown) => {
         assert.ok(err instanceof DarwinBudgetError);
@@ -91,7 +93,7 @@ describe('Darwin runner budget caps', () => {
     for (let i = 0; i < 10; i++) {
       await runAgent(TEST_AGENT, 'task ' + String(i), {
         provider,
-        config: { dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
+        config: { provider: 'claude-cli', memory: 'sqlite', dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
       });
     }
   });
@@ -108,7 +110,7 @@ describe('Darwin runner budget caps', () => {
     await assert.rejects(
       runAgent(TEST_AGENT, 'task', {
         provider,
-        config: { dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
+        config: { provider: 'claude-cli', memory: 'sqlite', dataDir: '/tmp/darwin-budget-test-' + String(process.pid) },
       }),
       (err: unknown) => {
         assert.ok(err instanceof DarwinBudgetError);

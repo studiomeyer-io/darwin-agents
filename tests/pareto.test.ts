@@ -16,6 +16,9 @@ import {
 interface V {
   q: number;
   c: number;
+  // Index signature so V satisfies the `Record<string, unknown>` constraint
+  // on dominates()/paretoSelect()/crowdingDistance().
+  [key: string]: number;
 }
 
 const objs: ParetoObjective<V>[] = [

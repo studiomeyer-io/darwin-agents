@@ -43,8 +43,9 @@
  *   - **paretoSelect truncation has two strategies (V0.5.1):**
  *     `"scalarised"` (V0.5.0 default, weighted-sum tie-break) and
  *     `"crowding"` (NSGA-II Deb 2002 density-preserving truncation).
- *     GEPA Algorithm 2's instance-proportional coverage sampling is
- *     still NOT implemented — backlog for V0.6.
+ *     GEPA Algorithm 2's instance-proportional coverage sampling SHIPPED in
+ *     v0.7.0 — see `coverageFrontier`/`selectByCoverage`/`sampleByCoverage`
+ *     in `pareto.ts` and the `useCoverage` path in {@link GepaOptimizer#nextGeneration}.
  *   - **GEPA+Merge (system-aware crossover from two Pareto-pool
  *     ancestors, paper Appendix F)** SHIPPED in V0.5.1 via
  *     {@link GepaOptimizer#merge}. Paper reports ~5% lift when run on
@@ -52,8 +53,9 @@
  *   - **Stronger reflection LM** SHIPPED in V0.5.1 via
  *     {@link GepaOptimizerOptions.reflectionRunPrompt}. Falls back to
  *     the main `runPrompt` when omitted.
- *   - **Instance-wise coverage sampling** (paper Algorithm 2) is NOT
- *     implemented. Backlog for V0.6.
+ *   - **Instance-wise coverage sampling** (paper Algorithm 2) SHIPPED in
+ *     v0.7.0 (`coverageFrontier`/`selectByCoverage`/`sampleByCoverage` in
+ *     `pareto.ts`; opt-in via `NextGenerationOptions.useCoverage`).
  *
  * @example
  * ```ts
@@ -87,6 +89,8 @@ import type { ReflectiveFeedback, RunPromptFn } from "./reflector.js";
 import { Reflector } from "./reflector.js";
 import {
   paretoSelect,
+  selectByCoverage,
+  type CoverageScores,
   type ParetoObjective,
   type ParetoTruncationStrategy,
 } from "./pareto.js";
@@ -99,6 +103,16 @@ export interface ScoredVariant {
   prompt: string;
   /** Score map keyed by objective name — must include the keys in `objectives`. */
   metrics: Record<string, number>;
+  /**
+   * v0.7.0 — Optional per-frontier-key scores for GEPA Algorithm 2 coverage
+   * sampling (higher is better; caller direction-normalises). A "key" is a
+   * validation-example id, an objective, or an example×objective pair. When
+   * present on every variant AND `NextGenerationOptions.useCoverage` is on,
+   * survivors are chosen by coverage breadth (variants winning DIFFERENT keys)
+   * instead of by aggregate Pareto truncation — preserving the diversity GEPA
+   * relies on. Ignored when absent (falls back to the metrics-based path).
+   */
+  perKeyScores?: Record<string, number>;
   /** Optional text feedback collected for the next generation's reflector. */
   textFeedback?: string;
 }
@@ -140,12 +154,57 @@ export interface NextGenerationOptions extends GenerateOptions {
    * NEW V0.5.1 (S1235).
    */
   truncationStrategy?: ParetoTruncationStrategy;
+  /**
+   * v0.7.0 — Opt into GEPA Algorithm 2 instance-level coverage selection.
+   * When `true` AND every scored variant carries a `perKeyScores` map,
+   * survivors are chosen by coverage breadth ({@link selectByCoverage}) — the
+   * variants that win on the most DIFFERENT frontier keys — instead of the
+   * aggregate-metrics Pareto truncation. This preserves the per-subset
+   * diversity GEPA's reflection loop depends on (a candidate strong on a niche
+   * of tasks is not crowded out by the global-average winner). When the
+   * `perKeyScores` data is missing on any variant, this silently falls back to
+   * the metrics-based Pareto path so existing callers are unaffected.
+   *
+   * Default `false` — V0.5.x behaviour unchanged.
+   */
+  useCoverage?: boolean;
 }
 
 const DEFAULT_NUM_VARIANTS = 3;
 const MIN_NUM_VARIANTS = 1;
 const MAX_NUM_VARIANTS = 10;
 const DEFAULT_MAX_CARRY = 3;
+
+/**
+ * v0.7.0 — Epoch-shuffled minibatch sampler (GEPA `reflection_minibatch_size`
+ * + epoch-shuffled batch sampler, adapted to an online loop).
+ *
+ * Returns a deterministic rotating window of `size` items, offset by `epoch`,
+ * wrapping around the array. Across consecutive epochs the window walks the
+ * whole array, so every item is eventually reflected on — without the
+ * persistent sampler state a true epoch shuffle needs, and without any RNG
+ * (the module stays pure). When `size` is non-positive or ≥ the array length,
+ * the full array is returned (no minibatching).
+ *
+ * @example
+ *   epochShuffledMinibatch(['a','b','c','d','e'], 2, 0) // ['a','b']
+ *   epochShuffledMinibatch(['a','b','c','d','e'], 2, 1) // ['c','d']
+ *   epochShuffledMinibatch(['a','b','c','d','e'], 2, 2) // ['e','a']
+ */
+export function epochShuffledMinibatch<T>(
+  items: ReadonlyArray<T>,
+  size: number,
+  epoch: number,
+): T[] {
+  const n = items.length;
+  if (n === 0) return [];
+  if (!Number.isFinite(size) || size <= 0 || size >= n) return [...items];
+  const e = Number.isFinite(epoch) && epoch >= 0 ? Math.floor(epoch) : 0;
+  const start = (e * size) % n;
+  const out: T[] = [];
+  for (let i = 0; i < size; i++) out.push(items[(start + i) % n]!);
+  return out;
+}
 
 /**
  * V0.5.1 — GEPA+Merge prompt template (Paper Appendix F).
@@ -328,6 +387,16 @@ export class GepaOptimizer {
       );
     }
     const maxCarry = opts.maxCarry ?? DEFAULT_MAX_CARRY;
+
+    // v0.7.0 — GEPA Algorithm 2 coverage selection (opt-in). Only taken when
+    // useCoverage is on AND every variant carries perKeyScores; otherwise we
+    // fall through to the metrics-based Pareto path so existing callers are
+    // byte-for-byte unaffected.
+    if (opts.useCoverage && scored.length > 0 && scored.every((v) => v.perKeyScores)) {
+      const coverage: CoverageScores = scored.map((v) => v.perKeyScores!);
+      return selectByCoverage(scored as ScoredVariant[], coverage, maxCarry);
+    }
+
     // R1 V0.5.0-alpha.2 Critic Finding M2 (S1185): map metrics back to
     // indices via parallel array (NOT reference-identity on the metrics
     // object). Reference-identity worked today because paretoSelect

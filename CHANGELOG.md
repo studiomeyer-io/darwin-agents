@@ -2,6 +2,87 @@
 
 ## [Unreleased]
 
+## [0.7.0-alpha.1] — 2026-06-19
+
+**Statistical rigor + coverage sampling.** Six additive, opt-in upgrades that
+make the self-evolution loop statistically honest and bring the GEPA optimizer
+closer to the paper. With the new flags off, the evolution loop, the A/B gate,
+and prompt mutation are byte-for-byte identical to v0.6.0 — except the feedback
+window default (see **Changed**). Reviewed by a 3-agent code-review round
+(critic + analyst + research) plus per-fix re-verification. **436 tests green**
+(was 355, +81), `tsc` + `typecheck:tests` + `build` all clean. Zero hard deps
+preserved — the new embedding capability is **injected** (`EmbedFn`), and the
+coverage RNG is injected too, so the pure modules stay pure.
+
+### Added
+
+- **Always-valid sequential A/B testing** (`src/evolution/sequential.ts`, new):
+  `msprtTwoSample` (Mixture SPRT, Gaussian-mixture prior, Welch variance of the
+  difference of means) and `hoeffdingTwoSample` (σ-free time-uniform confidence
+  sequence for bounded scores). Wired into the safety gate via
+  `SafetyThresholds.confidenceMethod: 'effect-size' | 'msprt' | 'hoeffding'`
+  (+ `confidenceAlpha` / `confidenceTau` / `confidenceMinSamples` /
+  `confidenceScoreRange`). Only consulted when `requireConfidence` is on;
+  defaults to the v0.6.0 effect-size heuristic. This is the rigorous upgrade to
+  the peeking-resistant gate promised in the v0.6 roadmap. The loop loads the
+  per-arm composite samples (`ExperimentTracker.getCompositeScores`) only when a
+  sequential method is configured.
+- **ε-Pareto dominance** (`dominatesEpsilon` in `pareto.ts`) +
+  `EvolutionConfig.paretoEpsilon`. A small relative tolerance (applied
+  symmetrically to both the regression and the strict-better check) lets the
+  `paretoGate` accept a challenger that wins big on one objective while
+  regressing microscopically (≤ ε) on another — instead of rejecting it over
+  noise. `paretoEpsilon: 0` (default) is exactly the strict v0.6.0 gate.
+- **Instance-wise coverage sampling** (GEPA Algorithm 2) in `pareto.ts`:
+  `coverageFrontier`, `coverageWeights`, `selectByCoverage` (deterministic,
+  diversity-preserving survivor selection), and `sampleByCoverage`
+  (coverage-proportional candidate sampling with an **injected** RNG). Opt-in in
+  the GEPA loop via `GepaNextGenerationOptions.useCoverage` + a per-variant
+  `perKeyScores` map. Closes the long-standing "coverage sampling = backlog for
+  V0.6" deferral.
+- **Semantic (embedding-distance) alignment guard**
+  (`checkAlignmentPreservationSemantic` in `alignment.ts`) + injectable
+  `EmbedFn`. When an embedder is wired into the loop (`DarwinLoopDeps.embed`),
+  a mutation that *rewords* a safety constraint (rather than removing it) is no
+  longer a false-positive rejection. Fail-closed: no embedder, an embedder
+  error, or malformed output all fall back to the strict keyword check, so the
+  guard never weakens.
+- **Epoch-shuffled reflection minibatch** (`epochShuffledMinibatch` in
+  `optimizer-gepa.ts`) + `EvolutionConfig.reflectionMinibatchSize`. Reflect on a
+  focused, rotating subset of the feedback window each cycle (GEPA's
+  `reflection_minibatch_size` + epoch-shuffled sampler, adapted to the online
+  loop), so reflection prompts stay tight while still covering the whole window.
+- **Style-bias-free judging** (`stripMarkdownForJudging` in `multi-critic.ts`) +
+  `RunMultiCriticOptions.normalizeForJudging` / `EvolutionConfig.normalizeForJudging`.
+  Strips markdown to plain prose before the multi-critic scores an output, so the
+  judge measures content, not formatting (LLM judges carry a documented style
+  bias toward markdown). Off by default; turn on for prose agents, leave off when
+  the output format itself is the deliverable.
+
+### Changed
+
+- **`EvolutionConfig.feedbackWindow` default is 15** (was a hard-coded 5). This
+  is the v0.6-roadmap "feedback window 5→15" upgrade: both the legacy optimizer
+  and the GEPA reflector now see more recent critic feedback by default. This is
+  the one default-path behaviour change in this release — set
+  `feedbackWindow: 5` to restore the exact v0.6.0 input. A larger window is more
+  information for the optimizer, not a regression, but it is called out here so
+  the change is not silent.
+
+### Notes
+
+- The sequential-confidence gate (`requireConfidence` + `confidenceMethod`) and
+  the semantic-alignment embedder (`embed`) are configured through the **library
+  API** — construct `new SafetyGate({ requireConfidence, confidenceMethod })`
+  and `new DarwinLoop({ ..., safety, embed })`. The bundled `darwin` CLI runs
+  with safety defaults; the per-agent `EvolutionConfig` knobs (`useGepa`,
+  `paretoGate`, `paretoEpsilon`, `useCoverage` via `perKeyScores`,
+  `feedbackWindow`, `reflectionMinibatchSize`, `normalizeForJudging`) are honored
+  by any loop constructed with the agent.
+- The mSPRT closed form is expressed in estimator coordinates with the Welch
+  variance of the difference of means — robust to unequal arm variances and free
+  of the sample-mean form's `n` vs `n²` ambiguity.
+
 ## [0.6.0-alpha.1] — 2026-06-10
 
 **GEPA goes online.** The GEPA-style reflective optimizer (shipped as a

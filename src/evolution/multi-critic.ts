@@ -43,6 +43,81 @@ export interface MultiCriticResult {
 /** Function that runs a critic and returns its output */
 export type RunCriticFn = (systemPrompt: string, task: string, criticName: string) => Promise<string>;
 
+/** Options for {@link runMultiCritic} (v0.7.0). */
+export interface RunMultiCriticOptions {
+  /**
+   * v0.7.0 — Strip markdown from the agent output BEFORE handing it to the
+   * critics, so they score CONTENT, not FORMAT.
+   *
+   * Why: LLM-as-judge research consistently documents a FORMAT/STYLE bias —
+   * judges tend to prefer well-formatted (markdown) answers over identical
+   * plain prose. When evolving prompts produce outputs in different formats,
+   * an un-normalised judge measures formatting, not quality, and the optimizer
+   * drifts toward "add more bold/headers" instead of "be more correct".
+   * Normalising both candidates' outputs the same way removes that confound.
+   * (Position bias, by contrast, is reported to be negligible on current
+   * frontier judge models, so this normalises format only — not order.)
+   *
+   * Off by default (byte-for-byte v0.6.0 behaviour). Turn ON for agents whose
+   * deliverable is prose; leave OFF when the format itself is the deliverable
+   * (e.g. an agent that must "produce a markdown table").
+   */
+  normalizeForJudging?: boolean;
+}
+
+/**
+ * v0.7.0 — Strip markdown formatting to plain prose for style-bias-free
+ * judging. Preserves the words and line structure; removes only formatting
+ * tokens (headers, bold/italic, code fences + inline code, links→text,
+ * images→alt, list bullets, blockquotes, table pipes, horizontal rules,
+ * strikethrough). Pure, deterministic.
+ */
+export function stripMarkdownForJudging(text: string): string {
+  if (typeof text !== 'string' || text.length === 0) return '';
+  let out = text;
+
+  // Code fences ```lang ... ``` → keep the inner code, drop the fences.
+  out = out.replace(/```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g, (_m, code) => code);
+
+  // Block-level, line by line.
+  out = out
+    .split('\n')
+    .map((line) => {
+      // Horizontal rule (---, ***, ___).
+      if (/^\s*([-*_])\1{2,}\s*$/.test(line)) return '';
+      // Table separator row (|---|:--:|).
+      if (/\|/.test(line) && /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(line)) return '';
+      let l = line;
+      l = l.replace(/^\s*>+\s?/, ''); // blockquote
+      l = l.replace(/^\s*#{1,6}\s+/, ''); // ATX header
+      l = l.replace(/^\s*[-*+]\s+/, ''); // bullet list
+      l = l.replace(/^\s*\d+\.\s+/, ''); // numbered list
+      // Flatten table rows ONLY — a line that starts/ends with a pipe or has
+      // ≥2 pipes. Avoids mangling prose like "option A | option B" (single
+      // mid-line pipe), which the old blanket /\|/ test would have stripped.
+      const pipeCount = (l.match(/\|/g) ?? []).length;
+      if (/^\s*\|/.test(l) || /\|\s*$/.test(l) || pipeCount >= 2) {
+        l = l.replace(/\s*\|\s*/g, ' ').trim();
+      }
+      return l;
+    })
+    .join('\n');
+
+  // Inline.
+  out = out.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1'); // images → alt
+  out = out.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'); // links → text
+  out = out.replace(/\*\*\*([^*]+)\*\*\*/g, '$1'); // bold+italic *** (before **)
+  out = out.replace(/\*\*([^*]+)\*\*/g, '$1'); // bold **
+  out = out.replace(/__([^_]+)__/g, '$1'); // bold __
+  out = out.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '$1'); // italic *
+  out = out.replace(/(?<![A-Za-z0-9_])_([^_\n]+)_(?![A-Za-z0-9_])/g, '$1'); // italic _
+  out = out.replace(/~~([^~]+)~~/g, '$1'); // strikethrough
+  out = out.replace(/`([^`]+)`/g, '$1'); // inline code
+
+  // Tidy whitespace.
+  return out.replace(/[ \t]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+}
+
 // ─── Output Format (shared across all critics) ────────
 
 const CRITIC_OUTPUT_FORMAT = `OUTPUT FORMAT (EXACTLY THIS):
@@ -537,9 +612,14 @@ export async function runMultiCritic(
   task: string,
   runCritic: RunCriticFn,
   agentName?: string,
+  options: RunMultiCriticOptions = {},
 ): Promise<MultiCriticResult> {
   const outputLabel = AGENT_OUTPUT_LABELS[agentName ?? ''] ?? 'output';
-  const evaluationTask = `Evaluate the following ${outputLabel} for the task "${task}":\n\n${agentOutput}`;
+  // v0.7.0: optional style-bias normalisation — judge content, not markdown.
+  const judgedOutput = options.normalizeForJudging
+    ? stripMarkdownForJudging(agentOutput)
+    : agentOutput;
+  const evaluationTask = `Evaluate the following ${outputLabel} for the task "${task}":\n\n${judgedOutput}`;
 
   const prompts = getCriticPrompts(agentName ?? '');
 

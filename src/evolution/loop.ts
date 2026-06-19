@@ -20,14 +20,15 @@ import type {
 } from '../types.js';
 import type { ExperimentTracker } from './tracker.js';
 import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
-import type { SafetyGate } from './safety.js';
+import type { SafetyGate, ABTestSamples } from './safety.js';
 import type { PatternDetector } from './patterns.js';
 import type { NotificationConfig } from './notifications.js';
 import { notifyABTestComplete, notifyEvolutionStarted, notifyRollback } from './notifications.js';
 import type { GepaOptimizer } from './optimizer-gepa.js';
+import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
-import { checkAlignmentPreservation } from './alignment.js';
-import { dominates, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
+import { checkAlignmentPreservation, checkAlignmentPreservationSemantic, type EmbedFn } from './alignment.js';
+import { dominatesEpsilon, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -61,6 +62,20 @@ interface DarwinLoopDeps {
    * false) to keep the legacy single-shot path — behaviour is unchanged.
    */
   gepa?: GepaOptimizer;
+  /**
+   * v0.7.0 — Optional batch embedder. When present, the GEPA mutation path
+   * upgrades its alignment guard from keyword-count to the semantic
+   * (embedding-distance) check: a safety constraint that was REWORDED (not
+   * removed) is accepted instead of triggering a false-positive rejection.
+   * When omitted, the guard stays keyword-only (fail-closed). Darwin keeps
+   * zero hard deps — you inject the embedder.
+   */
+  embed?: EmbedFn;
+  /**
+   * v0.7.0 — Cosine-similarity threshold for the semantic alignment guard
+   * (only used when `embed` is set). Default 0.82.
+   */
+  alignmentSimilarityThreshold?: number;
 }
 
 // ─── Validation Constants ─────────────────────────────
@@ -82,6 +97,8 @@ export class DarwinLoop {
   private agent?: AgentDefinition;
   private notifications: NotificationConfig;
   private gepa?: GepaOptimizer;
+  private embed?: EmbedFn;
+  private alignmentSimilarityThreshold?: number;
 
   constructor(deps: DarwinLoopDeps) {
     this.memory = deps.memory;
@@ -92,6 +109,8 @@ export class DarwinLoop {
     this.agent = deps.agent;
     this.notifications = deps.notifications ?? {};
     this.gepa = deps.gepa;
+    this.embed = deps.embed;
+    this.alignmentSimilarityThreshold = deps.alignmentSimilarityThreshold;
   }
 
   /**
@@ -261,7 +280,8 @@ export class DarwinLoop {
 
     // Extract recent critic feedback reports for the optimizer.
     // The optimizer previously only saw aggregated stats but not WHY runs scored poorly.
-    const recentFeedback = await this.getRecentFeedback(agent, 5);
+    // v0.7.0: feedback window is configurable (default 15, was hard-coded 5).
+    const recentFeedback = await this.getRecentFeedback(agent, this.feedbackWindow());
 
     // ── Variant generation: GEPA reflective path (opt-in) or legacy ──
     // v0.6.0: when `evolution.useGepa` is on AND a GepaOptimizer is wired in,
@@ -273,7 +293,11 @@ export class DarwinLoop {
     let newPromptText: string | null = null;
     let generatedBy: 'gepa' | 'legacy' = 'legacy';
     if (this.agent?.evolution?.useGepa === true && this.gepa) {
-      newPromptText = await this.generateVariantGepa(agent, activePrompt.promptText);
+      // Epoch = the integer of the active prompt version (v1→1, v12→12). It
+      // advances by one each evolution cycle, so the epoch-shuffled minibatch
+      // rotates which feedback subset the reflector sees per cycle.
+      const epoch = this.versionInt(activePrompt.version);
+      newPromptText = await this.generateVariantGepa(agent, activePrompt.promptText, epoch);
       if (newPromptText !== null) {
         generatedBy = 'gepa';
       }
@@ -388,6 +412,19 @@ export class DarwinLoop {
       currentTest.startedAt,
     );
 
+    // v0.7.0 — When the peeking guard runs a sequential test (mSPRT /
+    // Hoeffding), it needs the RAW per-arm composite samples (and thus their
+    // variance), not just the means. Load them only when that method is
+    // configured — the default effect-size guard needs no extra data.
+    let abSamples: ABTestSamples | undefined;
+    if (this.safety.usesSequentialConfidence()) {
+      const [samplesA, samplesB] = await Promise.all([
+        this.tracker.getCompositeScores(agentName, currentTest.versionA, agentWeights, currentTest.startedAt),
+        this.tracker.getCompositeScores(agentName, currentTest.versionB, agentWeights, currentTest.startedAt),
+      ]);
+      abSamples = { a: samplesA, b: samplesB };
+    }
+
     // Evaluate the test (including reliability from failure counts)
     const outcome = this.safety.evaluateABTest(
       compositeA,
@@ -397,6 +434,7 @@ export class DarwinLoop {
       currentTest.failsA ?? 0,
       currentTest.failsB ?? 0,
       currentTest.minRuns,
+      abSamples,
     );
 
     if (outcome === 'continue') {
@@ -435,10 +473,14 @@ export class DarwinLoop {
       // `dominates` short-circuits to false on a missing key and we would
       // reject every challenger for lack of data. Skip the gate instead.
       if (Object.keys(metricsA).length > 0 && Object.keys(metricsB).length > 0) {
-        const bDominatesA = dominates(
+        // v0.7.0 — ε-relaxed Pareto dominance. With `paretoEpsilon` unset (0)
+        // this is byte-for-byte the strict v0.6.0 gate; a positive epsilon
+        // lets B win despite a marginal (≤ε) regression on some objective.
+        const bDominatesA = dominatesEpsilon(
           metricsB,
           metricsA,
           DARWIN_DEFAULT_OBJECTIVES as ReadonlyArray<ParetoObjective<Record<string, number>>>,
+          this.agent?.evolution?.paretoEpsilon ?? 0,
         );
         if (!bDominatesA) {
           // Challenger won the scalar composite but is not a strict Pareto
@@ -535,6 +577,26 @@ export class DarwinLoop {
   }
 
   /**
+   * v0.7.0 — Configurable feedback window (default 15, was a hard-coded 5).
+   * A larger window gives both the legacy optimizer and the GEPA reflector
+   * more of the recent behaviour to learn from. Clamped to ≥ 1.
+   */
+  private feedbackWindow(): number {
+    const w = this.agent?.evolution?.feedbackWindow;
+    if (typeof w === 'number' && Number.isFinite(w) && w >= 1) return Math.floor(w);
+    return 15;
+  }
+
+  /**
+   * v0.7.0 — Parse the integer out of a "vN" version string for use as the
+   * epoch-shuffled-minibatch epoch. "v1"→1, "v12"→12; non-parsable→0.
+   */
+  private versionInt(version: string): number {
+    const m = /(\d+)/.exec(version ?? '');
+    return m ? parseInt(m[1]!, 10) : 0;
+  }
+
+  /**
    * Extract recent critic feedback reports from experiments.
    *
    * Returns up to `limit` feedback report texts from the most recent experiments
@@ -577,12 +639,21 @@ export class DarwinLoop {
   private async generateVariantGepa(
     agentName: string,
     currentPrompt: string,
+    epoch: number = 0,
   ): Promise<string | null> {
     if (!this.gepa) {
       return null;
     }
 
-    const feedbacks = await this.getReflectiveFeedback(agentName, 5);
+    // v0.7.0: pull the configurable feedback window (default 15, was 5).
+    let feedbacks = await this.getReflectiveFeedback(agentName, this.feedbackWindow());
+    // v0.7.0: optional epoch-shuffled minibatch — reflect on a focused, rotating
+    // subset of the window so the reflection prompt stays tight while still
+    // covering all recent feedback across cycles.
+    const minibatchSize = this.agent?.evolution?.reflectionMinibatchSize;
+    if (typeof minibatchSize === 'number' && minibatchSize > 0 && feedbacks.length > minibatchSize) {
+      feedbacks = epochShuffledMinibatch(feedbacks, minibatchSize, epoch);
+    }
     if (feedbacks.length === 0) {
       // Cold start: no critic feedback to reflect on. Let the legacy
       // meta-prompt optimizer (which works from aggregate stats + patterns)
@@ -611,10 +682,19 @@ export class DarwinLoop {
       return null;
     }
 
-    // Shared alignment guard (v0.6.0): the GEPA path runs the IDENTICAL
-    // safety-keyword preservation check as PromptOptimizer.generateVariant.
-    // A mutation that drops "never" / "do not" / "must not" / … is rejected.
-    const alignmentIssue = checkAlignmentPreservation(currentPrompt, mutated);
+    // Shared alignment guard: the GEPA path runs the same safety-keyword
+    // preservation check as PromptOptimizer.generateVariant. A mutation that
+    // drops "never" / "do not" / "must not" / … is rejected.
+    //
+    // v0.7.0: when an embedder is injected, upgrade to the semantic guard —
+    // a constraint that was REWORDED (not removed) is no longer a
+    // false-positive rejection. Fail-closed: no embedder ⇒ keyword-only.
+    const alignmentIssue = this.embed
+      ? await checkAlignmentPreservationSemantic(currentPrompt, mutated, {
+          embed: this.embed,
+          minSafetySimilarity: this.alignmentSimilarityThreshold,
+        })
+      : checkAlignmentPreservation(currentPrompt, mutated);
     if (alignmentIssue) {
       return null;
     }

@@ -329,6 +329,7 @@ async function runCommandInner(
           return criticRun.output;
         },
         agent.name,
+        { normalizeForJudging: agent.evolution?.normalizeForJudging },
       );
 
       if (multiResult.medianScore > 0) {

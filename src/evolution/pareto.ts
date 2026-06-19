@@ -108,6 +108,59 @@ export function dominates<T extends Record<string, unknown>>(
 }
 
 /**
+ * True iff `a` ε-dominates `b` over the given objectives (v0.7.0).
+ *
+ * ε-dominance relaxes strict {@link dominates} with a per-objective relative
+ * tolerance applied SYMMETRICALLY: `a` may be worse than `b` on an objective
+ * by up to a fraction `epsilon` of that objective's own magnitude and still
+ * count as "non-regressing", AND `a` must beat `b` by more than that same band
+ * on at least one objective to count as a real improvement. This stops a
+ * genuinely better challenger from being rejected over a microscopic
+ * regression (e.g. "+12% quality but 0.3% slower"), while not letting a
+ * within-noise "gain" masquerade as domination.
+ *
+ * The tolerance is `epsilon · |bNorm|` per objective, so it is **scale-safe**
+ * across mixed-unit objectives (quality 0–10 vs duration in ms) — exactly
+ * like strict dominance, no pre-normalisation needed. At `epsilon = 0` this
+ * is byte-for-byte equivalent to {@link dominates} (`a < b` ⇒ false, `a > b`
+ * ⇒ strictly-better). Degenerate objective values (0) fall back to strict on
+ * that axis (zero tolerance) — fail-closed.
+ *
+ * Returns false if either side has a non-finite value for any objective
+ * (same defensive contract as {@link dominates}).
+ *
+ * @param epsilon Relative tolerance ≥ 0. Negative / NaN inputs clamp to 0.
+ */
+export function dominatesEpsilon<T extends Record<string, unknown>>(
+  a: T,
+  b: T,
+  objectives: ReadonlyArray<ParetoObjective<T>>,
+  epsilon: number,
+): boolean {
+  if (objectives.length === 0) return false;
+  const eps = Number.isFinite(epsilon) && epsilon > 0 ? epsilon : 0;
+  let strictlyBetterSomewhere = false;
+  for (const obj of objectives) {
+    const av = a[obj.key];
+    const bv = b[obj.key];
+    if (typeof av !== "number" || typeof bv !== "number") return false;
+    if (!Number.isFinite(av) || !Number.isFinite(bv)) return false;
+    const aNorm = obj.direction === "maximize" ? av : -av;
+    const bNorm = obj.direction === "maximize" ? bv : -bv;
+    const tol = eps * Math.abs(bNorm);
+    // `a` regressed below `b` by more than the tolerance band → not dominating.
+    if (aNorm < bNorm - tol) return false;
+    // Strictly-better must clear the SAME ε band — a within-ε "gain" is noise,
+    // not a real improvement. Applying the tolerance only to the regression
+    // side (and counting any `aNorm > bNorm` as a win) would be asymmetric:
+    // an infinitesimal gain could classify `a` as dominating while the loss
+    // side is forgiven. At ε=0 this reduces exactly to strict `aNorm > bNorm`.
+    if (aNorm > bNorm + tol) strictlyBetterSomewhere = true;
+  }
+  return strictlyBetterSomewhere;
+}
+
+/**
  * Return the subset of `variants` that are NOT dominated by any other
  * variant in the set. This is the Pareto front.
  *
@@ -190,9 +243,11 @@ export function scalarise<T extends Record<string, unknown>>(
  *     critical workloads.
 
  * GEPA Algorithm 2's instance-proportional coverage sampling is the
- * third paper strategy and is NOT implemented in V0.5.1 — the caller-
- * side coverage data needed to drive it varies enough across domains
- * that a one-size-fits-all signature would mislead. Backlog for V0.6.
+ * third paper strategy. It is NOT a `paretoSelect` truncation mode
+ * (it needs the per-key score matrix, not aggregate metrics) — it
+ * SHIPPED in v0.7.0 as its own pure functions {@link coverageFrontier} /
+ * {@link selectByCoverage} / {@link sampleByCoverage}, wired into the GEPA
+ * loop via `NextGenerationOptions.useCoverage`.
  */
 export type ParetoTruncationStrategy = "scalarised" | "crowding";
 
@@ -253,6 +308,177 @@ export function paretoSelect<T extends Record<string, unknown>>(
  * // distances[i] = sum of per-objective normalised neighbour gaps for variant i
  * ```
  */
+/**
+ * A "frontier key" in GEPA's instance-level Pareto search — a validation
+ * example id, an objective name, or an "example×objective" pair. Coverage is
+ * measured per key: a candidate that is best-in-class on many keys is more
+ * valuable (it excels on more task subsets) even if no single aggregate score
+ * crowns it.
+ */
+export type FrontierKey = string;
+
+/**
+ * Per-variant, per-key score matrix for coverage sampling. Outer index =
+ * variant; inner map = `frontierKey → score` (higher is always better — the
+ * caller direction-normalises before calling). Variants may carry different
+ * key sets; missing keys are treated as −∞ (never best on that key).
+ *
+ * NEW v0.7.0.
+ */
+export type CoverageScores = ReadonlyArray<Readonly<Record<FrontierKey, number>>>;
+
+/**
+ * GEPA Algorithm 2 — the instance-level Pareto frontier. For each frontier
+ * key, returns the set of variant indices that achieve the maximum score on
+ * that key (ties keep all winners). This is the structure GEPA's official
+ * `pareto` candidate selector is built on: selection probability proportional
+ * to the number of keys a candidate wins.
+ *
+ * Pure, deterministic. `eps` is the float-tie tolerance (a variant counts as
+ * a winner on a key if its score ≥ keyMax − eps). Non-finite scores never win.
+ *
+ * NEW v0.7.0 — closes the "coverage sampling = backlog for V0.6" deferral.
+ */
+export function coverageFrontier(
+  scores: CoverageScores,
+  eps = 1e-9,
+): Map<FrontierKey, Set<number>> {
+  const frontier = new Map<FrontierKey, Set<number>>();
+  if (scores.length === 0) return frontier;
+
+  // Collect every key that appears on any variant.
+  const allKeys = new Set<FrontierKey>();
+  for (const variant of scores) {
+    for (const key of Object.keys(variant)) allKeys.add(key);
+  }
+
+  for (const key of allKeys) {
+    let max = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < scores.length; i++) {
+      const v = scores[i]![key];
+      if (typeof v === "number" && Number.isFinite(v) && v > max) max = v;
+    }
+    if (!Number.isFinite(max)) continue; // no finite score on this key
+    const winners = new Set<number>();
+    for (let i = 0; i < scores.length; i++) {
+      const v = scores[i]![key];
+      if (typeof v === "number" && Number.isFinite(v) && v >= max - eps) {
+        winners.add(i);
+      }
+    }
+    frontier.set(key, winners);
+  }
+  return frontier;
+}
+
+/**
+ * Coverage weight per variant = how many frontier keys it is best-in-class on
+ * (a key shared by K co-winners contributes 1/K to each, so the weights sum
+ * to the number of covered keys — fractional credit prevents a duplicate
+ * candidate from doubling the population's apparent coverage). Returns an
+ * array indexed by variant. This is the GEPA selection weight.
+ *
+ * NEW v0.7.0.
+ */
+export function coverageWeights(scores: CoverageScores, eps = 1e-9): number[] {
+  const weights = new Array<number>(scores.length).fill(0);
+  const frontier = coverageFrontier(scores, eps);
+  for (const winners of frontier.values()) {
+    if (winners.size === 0) continue;
+    const share = 1 / winners.size;
+    for (const idx of winners) weights[idx]! += share;
+  }
+  return weights;
+}
+
+/**
+ * Deterministically select up to `maxKeep` variants by coverage BREADTH —
+ * GEPA's diversity-preserving survivor rule. Ranks by coverage weight desc,
+ * tie-broken by total score sum desc, then original index (stable). Unlike
+ * `paretoSelect` truncation (which can keep N near-copies of the aggregate
+ * winner), this keeps candidates that win on DIFFERENT keys, preserving the
+ * spread that makes the next reflection generation productive.
+ *
+ * Pure — no RNG, so it is the test-friendly survivor selector. For the
+ * probabilistic GEPA candidate-to-mutate step, use {@link sampleByCoverage}.
+ *
+ * NEW v0.7.0.
+ */
+export function selectByCoverage<T>(
+  variants: ReadonlyArray<T>,
+  scores: CoverageScores,
+  maxKeep: number,
+  eps = 1e-9,
+): T[] {
+  const n = variants.length;
+  if (n === 0) return [];
+  if (typeof maxKeep !== "number" || maxKeep >= n) return [...variants];
+  if (maxKeep <= 0) return [];
+
+  const weights = coverageWeights(scores, eps);
+  const totals = scores.map((s) => {
+    let sum = 0;
+    for (const v of Object.values(s)) {
+      if (typeof v === "number" && Number.isFinite(v)) sum += v;
+    }
+    return sum;
+  });
+
+  return [...variants.keys()]
+    .sort((i, j) => {
+      const dw = (weights[j] ?? 0) - (weights[i] ?? 0);
+      if (dw !== 0) return dw;
+      const dt = (totals[j] ?? 0) - (totals[i] ?? 0);
+      if (dt !== 0) return dt;
+      return i - j; // stable
+    })
+    .slice(0, maxKeep)
+    .map((i) => variants[i]!);
+}
+
+/**
+ * GEPA Algorithm 2 candidate-selection step — pick ONE variant index, sampled
+ * with probability proportional to its coverage weight (candidates excelling
+ * on more task subsets are mutated more often). Because this module is pure,
+ * the randomness is INJECTED: pass an `rng` returning a float in [0,1). When
+ * every variant has zero coverage the choice is uniform. Returns a variant
+ * index (−1 only for empty input).
+ *
+ * Mirrors the official GEPA `NonDominatedSelector(rng)` contract — same shape,
+ * so a seeded RNG makes runs reproducible.
+ *
+ * NEW v0.7.0.
+ */
+export function sampleByCoverage(
+  scores: CoverageScores,
+  rng: () => number,
+  eps = 1e-9,
+): number {
+  const n = scores.length;
+  if (n === 0) return -1;
+  if (n === 1) return 0;
+
+  const weights = coverageWeights(scores, eps);
+  const total = weights.reduce((a, b) => a + b, 0);
+
+  // Draw a uniform in [0,1); clamp non-finite/out-of-range rng output.
+  const raw = rng();
+  const u = Number.isFinite(raw) ? Math.min(0.999999999, Math.max(0, raw)) : 0;
+
+  if (!(total > 0)) {
+    // No coverage signal anywhere → uniform pick.
+    return Math.min(n - 1, Math.floor(u * n));
+  }
+
+  let cumulative = 0;
+  const target = u * total;
+  for (let i = 0; i < n; i++) {
+    cumulative += weights[i] ?? 0;
+    if (target < cumulative) return i;
+  }
+  return n - 1; // float-safety fallthrough
+}
+
 export function crowdingDistance<T extends Record<string, unknown>>(
   variants: ReadonlyArray<T>,
   objectives: ReadonlyArray<ParetoObjective<T>>,

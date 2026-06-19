@@ -219,6 +219,38 @@ export class ExperimentTracker {
   }
 
   /**
+   * v0.7.0 — Per-experiment composite scores for a specific agent + prompt
+   * version, in chronological order. Unlike {@link getAverageComposite} this
+   * does NOT collapse to a scalar — it feeds the always-valid sequential
+   * confidence gate (mSPRT / Hoeffding), which needs the individual samples
+   * (and therefore their variance), not just the mean.
+   *
+   * If `since` is provided, only experiments at/after that ISO timestamp are
+   * included — pass the A/B test start so the incumbent's historical runs do
+   * not skew the comparison (same convention as {@link getAverageComposite}).
+   */
+  async getCompositeScores(
+    agentName: string,
+    version: string,
+    weights: MetricWeights = DEFAULT_WEIGHTS,
+    since?: string,
+  ): Promise<number[]> {
+    const experiments = await this.memory.loadExperiments(agentName);
+    let filtered = experiments.filter((e) => e.promptVersion === version);
+
+    if (since) {
+      filtered = filtered.filter((e) => e.startedAt >= since);
+    }
+
+    // loadExperiments() returns newest-first; reverse to chronological order
+    // so the sequence mirrors how the data actually accrued during the test.
+    return filtered
+      .slice()
+      .reverse()
+      .map((exp) => this.getCompositeScore(exp, weights));
+  }
+
+  /**
    * v0.6.0 — Average raw metric vector for a specific agent + prompt version,
    * keyed by the names in `DarwinMetrics` / `DARWIN_DEFAULT_OBJECTIVES`
    * (`qualityScore` / `sourceCount` / `outputLength` / `durationMs`). Unlike

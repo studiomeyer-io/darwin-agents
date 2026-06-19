@@ -227,3 +227,70 @@ describe('SafetyGate.calculateConfidence', () => {
     assert.equal(result.confident, false);
   });
 });
+
+// ─── v0.7.0 — sequential confidence methods (mSPRT / Hoeffding) ──────
+
+describe('SafetyGate.evaluateABTest — sequential confidence (v0.7.0)', () => {
+  const minRuns = 10;
+
+  it('mSPRT: confirms b_wins on a large, consistent gap', () => {
+    const gate = new SafetyGate({
+      ...DEFAULT_SAFETY,
+      requireConfidence: true,
+      confidenceMethod: 'msprt',
+    });
+    const samples = { a: Array(12).fill(0.6), b: Array(12).fill(0.85) };
+    const outcome = gate.evaluateABTest(0.6, 0.85, 12, 12, 0, 0, minRuns, samples);
+    assert.equal(outcome, 'b_wins');
+  });
+
+  it('mSPRT: a margin win that is NOT statistically decisive does not adopt B', () => {
+    const gate = new SafetyGate({
+      ...DEFAULT_SAFETY,
+      requireConfidence: true,
+      confidenceMethod: 'msprt',
+    });
+    // Margin > 5% on the means, but the per-sample arms overlap heavily
+    // (same spread, tiny mean gap) → mSPRT abstains → not adopted yet.
+    const a = [0.55, 0.7, 0.85, 0.6, 0.8, 0.65, 0.75, 0.7, 0.72, 0.68, 0.71, 0.69];
+    const b = [0.58, 0.73, 0.88, 0.63, 0.83, 0.68, 0.78, 0.73, 0.75, 0.71, 0.74, 0.72];
+    const meanA = a.reduce((s, x) => s + x, 0) / a.length;
+    const meanB = b.reduce((s, x) => s + x, 0) / b.length;
+    const outcome = gate.evaluateABTest(meanA, meanB, 12, 12, 0, 0, minRuns, { a, b });
+    // Not enough confidence AND below 2×minRuns tie-break → keep testing.
+    assert.equal(outcome, 'continue');
+  });
+
+  it('mSPRT: gracefully falls back to effect-size when no samples supplied', () => {
+    const gate = new SafetyGate({
+      ...DEFAULT_SAFETY,
+      requireConfidence: true,
+      confidenceMethod: 'msprt',
+    });
+    // No samples arg → effect-size path. Large effect + 2×minRuns → b_wins.
+    const outcome = gate.evaluateABTest(0.6, 0.9, 20, 20, 0, 0, minRuns);
+    assert.equal(outcome, 'b_wins');
+  });
+
+  it('Hoeffding: confirms a_wins when A is decisively higher', () => {
+    const gate = new SafetyGate({
+      ...DEFAULT_SAFETY,
+      requireConfidence: true,
+      confidenceMethod: 'hoeffding',
+    });
+    const samples = { a: Array(40).fill(0.9), b: Array(40).fill(0.3) };
+    const outcome = gate.evaluateABTest(0.9, 0.3, 40, 40, 0, 0, minRuns, samples);
+    assert.equal(outcome, 'a_wins');
+  });
+
+  it('effect-size method ignores samples and behaves like v0.6.0', () => {
+    const gate = new SafetyGate({
+      ...DEFAULT_SAFETY,
+      requireConfidence: true,
+      confidenceMethod: 'effect-size',
+    });
+    const samples = { a: Array(20).fill(0.6), b: Array(20).fill(0.9) };
+    const outcome = gate.evaluateABTest(0.6, 0.9, 20, 20, 0, 0, minRuns, samples);
+    assert.equal(outcome, 'b_wins');
+  });
+});

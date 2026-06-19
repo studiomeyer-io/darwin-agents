@@ -44,10 +44,34 @@ export interface EvolutionConfig {
   evaluator?: string;
   /** Custom metric weights */
   metrics?: MetricWeights;
+  /**
+   * v0.7.0 — Strip markdown from this agent's output before the multi-critic
+   * judges it, so the score reflects CONTENT not FORMAT (LLM judges carry a
+   * documented style bias toward markdown-formatted answers). Turn ON for
+   * prose agents; leave OFF when the output format itself is the deliverable.
+   * Default `false`.
+   */
+  normalizeForJudging?: boolean;
   /** Minimum runs before first optimization */
   minRuns?: number;
   /** Minimum output length to save (default: 2000). Lower for short-form agents like marketing. */
   minOutputLength?: number;
+  /**
+   * v0.7.0 — How many recent critic-feedback reports to feed the optimizer /
+   * GEPA reflector per evolution cycle. Was hard-coded to 5; the v0.6 roadmap
+   * raised the default to 15 so reflection sees more of the recent behaviour
+   * (GEPA reflects better with a richer feedback window). Default 15.
+   */
+  feedbackWindow?: number;
+  /**
+   * v0.7.0 — When set (and smaller than `feedbackWindow`), the GEPA reflector
+   * reflects on an epoch-shuffled MINIBATCH of this many feedbacks drawn from
+   * the window, rotating which subset is used each cycle (GEPA's
+   * `reflection_minibatch_size` + epoch-shuffled sampler, adapted to the
+   * online loop). Keeps each reflection prompt focused while still covering
+   * the whole window across cycles. Omit to reflect on the full window.
+   */
+  reflectionMinibatchSize?: number;
   /**
    * v0.6.0 — Opt into the GEPA-style reflective optimizer for variant
    * generation inside the evolution loop. When `true` AND a `GepaOptimizer`
@@ -88,6 +112,18 @@ export interface EvolutionConfig {
    * Default `false` — single-objective composite gating unchanged.
    */
   paretoGate?: boolean;
+  /**
+   * v0.7.0 — Relative tolerance for the {@link paretoGate} (only consulted
+   * when `paretoGate` is `true`). With strict Pareto dominance (ε = 0, the
+   * default) a challenger is rejected if it regresses on ANY objective by
+   * even a microscopic amount — so a "+12% quality, 0.3% slower" challenger
+   * loses. A small `paretoEpsilon` (e.g. `0.02` = 2%) lets a challenger
+   * regress by up to that fraction of an objective's magnitude and still be
+   * accepted, provided it is strictly better on at least one objective. The
+   * tolerance is per-objective-relative, so it stays scale-safe across mixed
+   * units. Default `0` (strict, byte-for-byte the v0.6.0 gate).
+   */
+  paretoEpsilon?: number;
 }
 
 // ─── Config ─────────────────────────────────────────
@@ -404,6 +440,34 @@ export interface SafetyThresholds {
    * Default `undefined` (= `false`) — winner logic unchanged byte-for-byte.
    */
   requireConfidence?: boolean;
+  /**
+   * v0.7.0 — Which statistic backs the {@link requireConfidence} peeking
+   * guard. Only consulted when `requireConfidence` is `true`.
+   *
+   *   - `'effect-size'` (default): the v0.6.0 heuristic — |Δ| / pooled-mean
+   *     ≥ 0.2 with 2×minRuns samples. No per-sample data needed. Cheap,
+   *     approximate. Byte-for-byte the v0.6.0 behaviour.
+   *   - `'msprt'`: Mixture SPRT (Johari/Pekelis/Walsh 2017) — always-valid
+   *     sequential test using the observed per-arm composite scores. The
+   *     rigorous upgrade; needs the per-sample scores (the loop supplies
+   *     them automatically). Abstains during warmup (see `confidenceMinSamples`).
+   *   - `'hoeffding'`: σ-free time-uniform confidence sequence for the
+   *     bounded composite score (range from `confidenceScoreRange`). Valid
+   *     at any n, more conservative than mSPRT — the honest choice with few
+   *     runs or skewed score distributions.
+   *
+   * Default `undefined` (= `'effect-size'`).
+   */
+  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
+  /** v0.7.0 — Significance level for `'msprt'`/`'hoeffding'`. Default 0.05. */
+  confidenceAlpha?: number;
+  /** v0.7.0 — mSPRT mixing-prior std-dev over the true mean difference (raw
+   *  composite-score units). Default 0.1. */
+  confidenceTau?: number;
+  /** v0.7.0 — Per-arm warmup floor for `'msprt'`/`'hoeffding'`. Default 5. */
+  confidenceMinSamples?: number;
+  /** v0.7.0 — [lo,hi] bounds of the composite score for `'hoeffding'`. Default [0,1]. */
+  confidenceScoreRange?: readonly [number, number];
 }
 
 export const DEFAULT_SAFETY: SafetyThresholds = {

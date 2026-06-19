@@ -73,13 +73,20 @@ export type { NotificationConfig } from './evolution/notifications.js';
 // V0.5.1 — crowdingDistance + ParetoTruncationStrategy + GepaOptimizer.merge + reflectionRunPrompt
 export {
   dominates,
+  dominatesEpsilon,
   nonDominatedFront,
   paretoSelect,
   scalarise,
   crowdingDistance,
+  coverageFrontier,
+  coverageWeights,
+  selectByCoverage,
+  sampleByCoverage,
   DARWIN_DEFAULT_OBJECTIVES,
   type ParetoObjective,
   type ParetoTruncationStrategy,
+  type FrontierKey,
+  type CoverageScores,
 } from './evolution/pareto.js';
 export {
   Reflector,
@@ -89,6 +96,7 @@ export {
 export type { RunPromptFn } from './evolution/run-prompt-fn.js';
 export {
   GepaOptimizer,
+  epochShuffledMinibatch,
   type ScoredVariant,
   type GenerateOptions as GepaGenerateOptions,
   type NextGenerationOptions as GepaNextGenerationOptions,
@@ -102,5 +110,35 @@ export {
 // their mutations.
 export {
   checkAlignmentPreservation,
+  checkAlignmentPreservationSemantic,
   SAFETY_PATTERNS,
+  type EmbedFn,
+  type SemanticAlignmentOptions,
 } from './evolution/alignment.js';
+
+// V0.7.0 — multi-critic style-bias normalisation (judge content, not markdown).
+export {
+  runMultiCritic,
+  stripMarkdownForJudging,
+  getCriticPrompts,
+  type RunCriticFn,
+  type RunMultiCriticOptions,
+  type CriticPromptDef,
+  type CriticScore,
+  type MultiCriticResult,
+} from './evolution/multi-critic.js';
+
+// V0.7.0 — always-valid sequential testing primitives (mSPRT + Hoeffding
+// confidence sequences). Back the peeking-resistant A/B confidence gate;
+// exported so consumers can run the same statistically-rigorous comparison
+// on their own score arrays.
+export {
+  meanVar,
+  msprtTwoSample,
+  hoeffdingTwoSample,
+  type ConfidenceMethod,
+  type SequentialVerdict,
+  type MeanVar,
+  type MsprtOptions,
+  type HoeffdingOptions,
+} from './evolution/sequential.js';

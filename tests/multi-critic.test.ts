@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { runMultiCritic, getCriticPrompts } from '../src/evolution/multi-critic.js';
+import { runMultiCritic, getCriticPrompts, stripMarkdownForJudging } from '../src/evolution/multi-critic.js';
 import type { RunCriticFn } from '../src/evolution/multi-critic.js';
 
 describe('runMultiCritic', () => {
@@ -168,5 +168,107 @@ describe('runMultiCritic — uses agent-specific critic set (v0.4.6)', () => {
     assert.deepStrictEqual(received.sort(), [
       'actionability-verdict', 'counter-argument-depth', 'fairness-steelman',
     ]);
+  });
+});
+
+// ─── v0.7.0 — style-bias normalisation ──────────────────────────────
+
+describe('stripMarkdownForJudging (v0.7.0)', () => {
+  it('strips headers, bold, italic but keeps the words', () => {
+    const md = '# Title\n\nThis is **bold** and *italic* and `code`.';
+    const out = stripMarkdownForJudging(md);
+    assert.ok(!out.includes('#'));
+    assert.ok(!out.includes('**'));
+    assert.ok(!out.includes('`'));
+    assert.ok(out.includes('Title'));
+    assert.ok(out.includes('bold'));
+    assert.ok(out.includes('italic'));
+    assert.ok(out.includes('code'));
+  });
+
+  it('strips list bullets and numbers but keeps items', () => {
+    const md = '- first\n- second\n1. third';
+    const out = stripMarkdownForJudging(md);
+    assert.ok(/first/.test(out) && /second/.test(out) && /third/.test(out));
+    assert.ok(!/^- /m.test(out));
+    assert.ok(!/^\d+\. /m.test(out));
+  });
+
+  it('converts links to their text and images to alt', () => {
+    const md = 'See [the docs](https://example.com) and ![logo](x.png).';
+    const out = stripMarkdownForJudging(md);
+    assert.ok(out.includes('the docs'));
+    assert.ok(!out.includes('https://example.com'));
+    assert.ok(out.includes('logo'));
+  });
+
+  it('flattens tables and drops separator rows + fences', () => {
+    const md = '| A | B |\n| --- | --- |\n| 1 | 2 |\n\n```js\nconst x=1;\n```';
+    const out = stripMarkdownForJudging(md);
+    assert.ok(!out.includes('|'));
+    assert.ok(!out.includes('```'));
+    assert.ok(out.includes('const x=1;'));
+  });
+
+  it('produces identical output for same content in different formats', () => {
+    const markdown = '**Key point:** the *result* is `42`.';
+    const plain = 'Key point: the result is 42.';
+    // After stripping, the markdown reduces to the same words as the plain form
+    const a = stripMarkdownForJudging(markdown);
+    assert.equal(a, 'Key point: the result is 42.');
+    assert.equal(stripMarkdownForJudging(plain), plain);
+  });
+
+  it('handles empty / non-string input', () => {
+    assert.equal(stripMarkdownForJudging(''), '');
+    assert.equal(stripMarkdownForJudging(undefined as unknown as string), '');
+  });
+});
+
+describe('runMultiCritic — normalizeForJudging (v0.7.0)', () => {
+  it('passes stripped output to critics when normalizeForJudging is on', async () => {
+    let receivedTask = '';
+    const mockCritic: RunCriticFn = async (_p, task) => {
+      receivedTask = task;
+      return '===SCORE===\n7\n===ASSESSMENT===\nok\n===END===';
+    };
+    await runMultiCritic('# Heading\n\n**bold** text', 'task', mockCritic, 'writer', {
+      normalizeForJudging: true,
+    });
+    assert.ok(!receivedTask.includes('#'));
+    assert.ok(!receivedTask.includes('**'));
+    assert.ok(receivedTask.includes('Heading'));
+    assert.ok(receivedTask.includes('bold'));
+  });
+
+  it('leaves output untouched when normalizeForJudging is off (default)', async () => {
+    let receivedTask = '';
+    const mockCritic: RunCriticFn = async (_p, task) => {
+      receivedTask = task;
+      return '===SCORE===\n7\n===ASSESSMENT===\nok\n===END===';
+    };
+    await runMultiCritic('# Heading\n\n**bold** text', 'task', mockCritic, 'writer');
+    assert.ok(receivedTask.includes('# Heading'));
+    assert.ok(receivedTask.includes('**bold**'));
+  });
+});
+
+describe('stripMarkdownForJudging — hardening (v0.7.0 R1 fixes)', () => {
+  it('preserves prose with a single mid-line pipe (not a table)', () => {
+    const out = stripMarkdownForJudging('Choose option A | option B here.');
+    assert.ok(out.includes('|'), 'single mid-line pipe must survive');
+    assert.ok(out.includes('option A') && out.includes('option B'));
+  });
+
+  it('still flattens real table rows (edge pipes / >=2 pipes)', () => {
+    const out = stripMarkdownForJudging('| A | B |\n| --- | --- |\n| 1 | 2 |');
+    assert.ok(!out.includes('|'));
+    assert.ok(out.includes('A') && out.includes('B') && out.includes('1') && out.includes('2'));
+  });
+
+  it('strips bold+italic triple-asterisk', () => {
+    const out = stripMarkdownForJudging('This is ***very important*** text.');
+    assert.ok(!out.includes('*'));
+    assert.ok(out.includes('very important'));
   });
 });

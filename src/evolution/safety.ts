@@ -8,8 +8,20 @@
 
 import type { PromptVersionStats, SafetyThresholds, DarwinExperiment } from '../types.js';
 import { DEFAULT_SAFETY } from '../types.js';
+import { msprtTwoSample, hoeffdingTwoSample } from './sequential.js';
 
 export type ABTestOutcome = 'a_wins' | 'b_wins' | 'continue';
+
+/**
+ * v0.7.0 — Optional per-arm composite-score samples for the sequential
+ * confidence methods (`'msprt'` / `'hoeffding'`). When omitted, the gate
+ * falls back to the v0.6.0 effect-size heuristic so all existing callers are
+ * byte-for-byte unaffected.
+ */
+export interface ABTestSamples {
+  a: ReadonlyArray<number>;
+  b: ReadonlyArray<number>;
+}
 
 export interface ABTestConfidence {
   /** Effect size (Cohen's d approximation) */
@@ -35,6 +47,20 @@ export class SafetyGate {
    */
   canEvolve(_agentName: string, stats: PromptVersionStats): boolean {
     return stats.totalRuns >= this.thresholds.minDataPoints;
+  }
+
+  /**
+   * v0.7.0 — True iff the peeking guard is configured to use a sequential
+   * method (mSPRT / Hoeffding), which needs the per-arm composite samples.
+   * The loop calls this to decide whether to load that (slightly more
+   * expensive) per-sample data before calling {@link evaluateABTest}.
+   */
+  usesSequentialConfidence(): boolean {
+    return (
+      this.thresholds.requireConfidence === true &&
+      (this.thresholds.confidenceMethod === 'msprt' ||
+        this.thresholds.confidenceMethod === 'hoeffding')
+    );
   }
 
   /**
@@ -85,6 +111,7 @@ export class SafetyGate {
     failsA: number = 0,
     failsB: number = 0,
     overrideMinRuns?: number,
+    samples?: ABTestSamples,
   ): ABTestOutcome {
     const minRuns = overrideMinRuns ?? this.thresholds.minDataPoints;
     const totalA = runsA + failsA;
@@ -146,7 +173,7 @@ export class SafetyGate {
       // would loop forever on a persistent small-margin challenger).
       if (
         !this.thresholds.requireConfidence ||
-        this.meetsConfidence(adjustedA, adjustedB, runsA, runsB, minRuns)
+        this.isConfident(adjustedA, adjustedB, runsA, runsB, minRuns, marginOutcome, samples)
       ) {
         return marginOutcome;
       }
@@ -218,6 +245,61 @@ export class SafetyGate {
     }
     const effectSize = Math.abs(scoreA - scoreB) / pooled;
     return effectSize >= 0.2 && runsA + runsB >= minRuns * 2;
+  }
+
+  /**
+   * v0.7.0 — Dispatch the peeking-resistant confidence gate to the
+   * configured {@link SafetyThresholds.confidenceMethod}.
+   *
+   *   - `'effect-size'` (default): the v0.6.0 heuristic ({@link meetsConfidence}).
+   *     Byte-for-byte unchanged when no method is set.
+   *   - `'msprt'` / `'hoeffding'`: an always-valid sequential test over the
+   *     RAW per-arm composite samples (reliability is already handled by the
+   *     auto-loss rule upstream, so the statistical test uses the unadjusted
+   *     scores). The verdict must be `decisive` AND point in the SAME
+   *     direction as the score margin — a sequential test that fires for the
+   *     opposite arm does not confirm this margin.
+   *
+   * Falls back to the effect-size heuristic when a sequential method is set
+   * but no per-sample data was supplied (graceful — never throws).
+   */
+  private isConfident(
+    adjustedA: number,
+    adjustedB: number,
+    runsA: number,
+    runsB: number,
+    minRuns: number,
+    marginOutcome: ABTestOutcome,
+    samples?: ABTestSamples,
+  ): boolean {
+    const method = this.thresholds.confidenceMethod ?? 'effect-size';
+
+    if (method === 'effect-size' || !samples) {
+      return this.meetsConfidence(adjustedA, adjustedB, runsA, runsB, minRuns);
+    }
+
+    const opts = {
+      alpha: this.thresholds.confidenceAlpha,
+      minSamplesPerArm: this.thresholds.confidenceMinSamples,
+    };
+
+    const verdict =
+      method === 'hoeffding'
+        ? hoeffdingTwoSample(samples.a, samples.b, {
+            ...opts,
+            lo: this.thresholds.confidenceScoreRange?.[0],
+            hi: this.thresholds.confidenceScoreRange?.[1],
+          })
+        : msprtTwoSample(samples.a, samples.b, {
+            ...opts,
+            tau: this.thresholds.confidenceTau,
+          });
+
+    if (!verdict.decisive) return false;
+    // The sequential test must confirm the SAME winner as the score margin.
+    // direction +1 = B>A (b_wins), −1 = A>B (a_wins).
+    const expected = marginOutcome === 'b_wins' ? 1 : -1;
+    return verdict.direction === expected;
   }
 
   /**

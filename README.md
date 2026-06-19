@@ -143,6 +143,45 @@ paths. Pair with `requireConfidence` on your `SafetyThresholds` for a
 peeking-resistant A/B gate. All of it is off unless you opt in — existing
 agents behave exactly as before.
 
+### Statistical rigor + coverage sampling (v0.7, opt-in)
+
+v0.7 makes the evolution loop statistically honest and brings the GEPA optimizer
+closer to the paper. Every piece is additive and off by default (one exception:
+the feedback window default rose from 5 to 15):
+
+```typescript
+import { SafetyGate, DarwinLoop } from 'darwin-agents';
+
+// Always-valid sequential A/B gate — peeking-resistant after every run.
+const safety = new SafetyGate({
+  minDataPoints: 10,
+  maxRegression: 0.2,
+  failureRollbackThreshold: 3,
+  requireConfidence: true,
+  confidenceMethod: 'msprt',   // Mixture SPRT (or 'hoeffding' — σ-free, conservative)
+});
+
+const loop = new DarwinLoop({
+  memory, tracker, optimizer, safety, patterns, agent,
+  embed: myBatchEmbedder,      // opt-in semantic alignment guard (zero hard deps — injected)
+});
+```
+
+- **mSPRT / Hoeffding confidence sequences** — a margin win is adopted only when
+  it clears an always-valid significance bar, so monitoring after every run no
+  longer inflates false positives.
+- **ε-Pareto gate** (`evolution.paretoEpsilon`) — forgive a microscopic
+  regression on one objective when a challenger wins decisively on another.
+- **Instance-wise coverage sampling** (`useCoverage` + per-variant `perKeyScores`)
+  — GEPA Algorithm 2: keep/sample the variants that excel on the most *different*
+  task subsets, not N copies of the global-average winner.
+- **Semantic alignment guard** — a *reworded* safety constraint is no longer a
+  false rejection; a *removed* one still is (fail-closed without an embedder).
+- **Epoch-shuffled reflection minibatch** (`reflectionMinibatchSize`) + a
+  configurable `feedbackWindow` (default 15).
+- **Style-bias-free judging** (`normalizeForJudging`) — strip markdown before the
+  critic scores, so it measures content not formatting.
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -397,7 +436,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 ## Known Limitations
 
 - **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. We mitigate this with multi-model critics (GPT + Claude), but inherent self-preference bias exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
-- **Statistical simplicity**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance, and v0.6 adds an opt-in `requireConfidence` gate (effect-size + sample-size guard) that resists the peeking problem of evaluating after every run. A proper sequential test (mSPRT / always-valid confidence sequences) is the next step on the roadmap.
+- **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and **v0.7 ships proper always-valid sequential tests** — set `confidenceMethod: 'msprt'` (Mixture SPRT) or `'hoeffding'` (σ-free confidence sequence) on your `SafetyThresholds` to make the peeking-resistant gate statistically sound. The default path remains the simple threshold for zero-config use.
 - **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
 
 ## Contributing

@@ -84,3 +84,158 @@ export function checkAlignmentPreservation(
 
   return null;
 }
+
+// ─── v0.7.0 — semantic (embedding-distance) alignment guard ──────────
+
+/**
+ * Batch embedding function. Returns one vector per input text (same order).
+ * INJECTED — Darwin keeps zero hard deps, so the caller supplies the embedder
+ * (OpenAI `text-embedding-3-small`, a local model, Anthropic, whatever). Pure
+ * keyword checking needs none of this; semantic checking is strictly opt-in.
+ *
+ * NEW v0.7.0.
+ */
+export type EmbedFn = (texts: string[]) => Promise<number[][]>;
+
+export interface SemanticAlignmentOptions {
+  /** Injected batch embedder. When omitted, the check is keyword-only (fail-closed). */
+  embed?: EmbedFn;
+  /**
+   * Cosine-similarity threshold above which an eroded safety keyword is judged
+   * to have been REWORDED (not removed) and the mutation is accepted. Default
+   * 0.82 — high enough that only a genuinely equivalent restatement passes.
+   */
+  minSafetySimilarity?: number;
+}
+
+const DEFAULT_SAFETY_SIMILARITY = 0.82;
+
+/**
+ * Semantic alignment guard (v0.7.0) — the embedding-distance upgrade to the
+ * keyword-count {@link checkAlignmentPreservation}. The keyword check is
+ * conservative BY DESIGN: it rejects a reworded-but-equivalent constraint
+ * ("never reveal secrets" → "you must keep secrets confidential") as if the
+ * safety instruction were removed. That false-positive costs a wasted
+ * evolution cycle every time the optimizer legitimately rephrases.
+ *
+ * This function keeps the keyword check as the first, cheap gate, and ONLY
+ * when it trips does it spend embeddings to ask: "is the safety statement
+ * still semantically present, just worded differently?" For every safety
+ * sentence in the original that contained an eroded keyword, it checks whether
+ * the mutated prompt still contains a sentence above `minSafetySimilarity`. If
+ * EVERY eroded safety sentence has a close semantic match, the rewording is
+ * accepted (returns null). Otherwise the keyword rejection stands.
+ *
+ * Fail-closed contract preserved:
+ *   - keyword check passes ⇒ null (no embedding spent)
+ *   - keyword check fails AND no `embed` supplied ⇒ keyword rejection (== sync)
+ *   - keyword check fails, embed supplied, embedding errors ⇒ keyword rejection
+ *
+ * So a missing/broken embedder NEVER weakens the guard — it just falls back to
+ * the strict keyword behaviour.
+ */
+export async function checkAlignmentPreservationSemantic(
+  original: string,
+  mutated: string,
+  opts: SemanticAlignmentOptions = {},
+): Promise<string | null> {
+  const keywordResult = checkAlignmentPreservation(original, mutated);
+  if (keywordResult === null) return null; // safe — fast path, no embeddings
+  if (!opts.embed) return keywordResult; // fail-closed: keyword-only
+
+  const threshold =
+    Number.isFinite(opts.minSafetySimilarity) &&
+    (opts.minSafetySimilarity as number) > 0 &&
+    (opts.minSafetySimilarity as number) <= 1
+      ? (opts.minSafetySimilarity as number)
+      : DEFAULT_SAFETY_SIMILARITY;
+
+  // Which patterns actually eroded? Re-derive from SAFETY_PATTERNS.
+  const eroded = erodedPatterns(original, mutated);
+  if (eroded.length === 0) return keywordResult; // shouldn't happen, be safe
+
+  // Original sentences carrying an eroded safety keyword = the statements we
+  // must prove still exist (semantically) in the mutated prompt.
+  const originalSentences = splitSentences(original);
+  const safetySentences = originalSentences.filter((s) =>
+    eroded.some((p) => new RegExp(p.source, 'i').test(s)),
+  );
+  if (safetySentences.length === 0) return keywordResult;
+
+  const mutatedSentences = splitSentences(mutated);
+  if (mutatedSentences.length === 0) return keywordResult; // nothing to match → reject
+
+  try {
+    // One batched embed call: [...safetySentences, ...mutatedSentences].
+    const all = await opts.embed([...safetySentences, ...mutatedSentences]);
+    if (!Array.isArray(all) || all.length !== safetySentences.length + mutatedSentences.length) {
+      return keywordResult; // malformed embedder output → fail-closed
+    }
+    const safetyVecs = all.slice(0, safetySentences.length);
+    const mutatedVecs = all.slice(safetySentences.length);
+
+    // Every eroded safety sentence must have a close match in the mutation.
+    for (const sv of safetyVecs) {
+      let best = -Infinity;
+      for (const mv of mutatedVecs) {
+        const sim = cosine(sv, mv);
+        if (sim > best) best = sim;
+      }
+      if (!(best >= threshold)) {
+        // This safety statement has no semantic equivalent in the mutation.
+        return keywordResult;
+      }
+    }
+    // All eroded safety statements survive semantically → reworded, accept.
+    return null;
+  } catch {
+    return keywordResult; // embedder threw → fail-closed
+  }
+}
+
+/** SAFETY_PATTERNS whose occurrence count dropped from original → mutated. */
+function erodedPatterns(original: string, mutated: string): RegExp[] {
+  const o = original.toLowerCase();
+  const m = mutated.toLowerCase();
+  const out: RegExp[] = [];
+  for (const pattern of SAFETY_PATTERNS) {
+    const oc = o.match(new RegExp(pattern.source, 'gi'))?.length ?? 0;
+    const mc = m.match(new RegExp(pattern.source, 'gi'))?.length ?? 0;
+    if (oc > 0 && mc < oc) out.push(pattern);
+  }
+  return out;
+}
+
+/**
+ * Split prose into trimmed, non-empty sentences. Boundaries: terminal
+ * punctuation followed by whitespace, terminal punctuation directly followed
+ * by an uppercase letter (handles "...secrets.Be transparent." with no space —
+ * otherwise two sentences fuse and a dropped safety constraint could ride in
+ * on a partial semantic match), or newlines.
+ */
+function splitSentences(text: string): string[] {
+  return text
+    .split(/(?<=[.!?])\s+|(?<=[.!?])(?=[A-Z])|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** Cosine similarity. Returns 0 for zero/length-mismatched/non-finite vectors. */
+function cosine(a: number[], b: number[]): number {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || a.length !== b.length) {
+    return 0;
+  }
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    const av = a[i]!;
+    const bv = b[i]!;
+    if (!Number.isFinite(av) || !Number.isFinite(bv)) return 0;
+    dot += av * bv;
+    na += av * av;
+    nb += bv * bv;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}

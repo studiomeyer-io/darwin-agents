@@ -2,19 +2,35 @@
 
 ## [Unreleased]
 
-## [0.7.0-alpha.1] — 2026-06-19
+## [0.7.0] — 2026-06-20
 
-**Statistical rigor + coverage sampling.** Six additive, opt-in upgrades that
+**Statistical rigor + coverage sampling.** Seven additive, opt-in upgrades that
 make the self-evolution loop statistically honest and bring the GEPA optimizer
-closer to the paper. With the new flags off, the evolution loop, the A/B gate,
-and prompt mutation are byte-for-byte identical to v0.6.0 — except the feedback
-window default (see **Changed**). Reviewed by a 3-agent code-review round
-(critic + analyst + research) plus per-fix re-verification. **436 tests green**
-(was 355, +81), `tsc` + `typecheck:tests` + `build` all clean. Zero hard deps
-preserved — the new embedding capability is **injected** (`EmbedFn`), and the
-coverage RNG is injected too, so the pure modules stay pure.
+to feature-parity with the paper. With the new flags off, the evolution loop,
+the A/B gate, and prompt mutation are byte-for-byte identical to v0.6.0 — except
+the feedback window default (see **Changed**). This is the first stable `latest`
+since 0.4.9: `npm i darwin-agents` now resolves to 0.7.0. (The 0.7.0-alpha.1
+preview, 2026-06-19, shipped the first six modules; 0.7.0 final adds GEPA
+system-aware **merge** and promotes the line to `latest`.) Reviewed by a 3-agent
+code-review round (critic + analyst + research) + an R2 verifier + a focused
+merge-wiring review, plus per-fix re-verification. **456 tests green** (was 355,
++101), `tsc` + `typecheck:tests` + `build` all clean. Zero hard deps preserved —
+the embedding capability is **injected** (`EmbedFn`) and the coverage RNG is
+injected too, so the pure modules stay pure.
 
 ### Added
+
+- **GEPA system-aware merge in the loop** (`EvolutionConfig.useMerge` +
+  `mergeEveryK`, default cadence 3) — on every K-th evolution cycle the loop
+  combines the two best Pareto-front prompt versions from the agent's history
+  into one challenger via `GepaOptimizer.merge` (paper Appendix-D, ~+5% lift),
+  instead of a reflective mutation. The merged challenger runs the SAME
+  alignment guard and A/B + safety gate as any other variant. Falls back to the
+  reflective path when fewer than two scored versions exist, the Pareto front
+  has fewer than two members, or the merge errors. Only consulted when `useGepa`
+  is also on. Default off — the `merge` library surface (shipped in v0.5.1) is
+  now wired into the production loop, closing the same kind of "built but not
+  wired" gap that v0.6.0 closed for the reflective optimizer.
 
 - **Always-valid sequential A/B testing** (`src/evolution/sequential.ts`, new):
   `msprtTwoSample` (Mixture SPRT, Gaussian-mixture prior, Welch variance of the

@@ -24,11 +24,11 @@ import type { SafetyGate, ABTestSamples } from './safety.js';
 import type { PatternDetector } from './patterns.js';
 import type { NotificationConfig } from './notifications.js';
 import { notifyABTestComplete, notifyEvolutionStarted, notifyRollback } from './notifications.js';
-import type { GepaOptimizer } from './optimizer-gepa.js';
+import type { GepaOptimizer, ScoredVariant } from './optimizer-gepa.js';
 import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
 import { checkAlignmentPreservation, checkAlignmentPreservationSemantic, type EmbedFn } from './alignment.js';
-import { dominatesEpsilon, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
+import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -291,15 +291,17 @@ export class DarwinLoop {
     // guard — in either case we fall back to the legacy meta-prompt
     // optimizer so the loop never stalls.
     let newPromptText: string | null = null;
-    let generatedBy: 'gepa' | 'legacy' = 'legacy';
+    let generatedBy: 'gepa' | 'merge' | 'legacy' = 'legacy';
     if (this.agent?.evolution?.useGepa === true && this.gepa) {
       // Epoch = the integer of the active prompt version (v1→1, v12→12). It
       // advances by one each evolution cycle, so the epoch-shuffled minibatch
-      // rotates which feedback subset the reflector sees per cycle.
+      // rotates which feedback subset the reflector sees per cycle, and the
+      // merge cadence fires every mergeEveryK-th cycle.
       const epoch = this.versionInt(activePrompt.version);
-      newPromptText = await this.generateVariantGepa(agent, activePrompt.promptText, epoch);
-      if (newPromptText !== null) {
-        generatedBy = 'gepa';
+      const gen = await this.generateVariantGepa(agent, activePrompt.promptText, epoch);
+      if (gen !== null) {
+        newPromptText = gen.prompt;
+        generatedBy = gen.via;
       }
     }
     if (newPromptText === null) {
@@ -640,9 +642,37 @@ export class DarwinLoop {
     agentName: string,
     currentPrompt: string,
     epoch: number = 0,
-  ): Promise<string | null> {
+  ): Promise<{ prompt: string; via: 'gepa' | 'merge' } | null> {
     if (!this.gepa) {
       return null;
+    }
+
+    // v0.7.0: on every mergeEveryK-th cycle, try a GEPA system-aware MERGE of
+    // the two best Pareto-front versions in this agent's history instead of a
+    // reflective mutation (paper Appendix-D, ~+5% lift). Falls through to the
+    // reflective path when there aren't two scored parents or the merge errors.
+    // `epoch > 0` skips the cold-start cycle (epoch 0 = unparseable/initial
+    // version, where there is never a merge pool yet) so the modulo gate is
+    // correct-by-design rather than relying on tryMergeVariant's no-op.
+    if (
+      this.agent?.evolution?.useMerge === true &&
+      epoch > 0 &&
+      epoch % this.mergeEveryK() === 0
+    ) {
+      const merged = await this.tryMergeVariant(agentName);
+      if (merged !== null) {
+        const guarded = await this.runAlignmentGuard(currentPrompt, merged);
+        if (guarded !== null) {
+          return { prompt: guarded, via: 'merge' };
+        }
+        // Merge produced a prompt that eroded a safety constraint — reject it
+        // and fall through to the reflective path. Emit a breadcrumb (mirrors
+        // the reflector-error log, v0.6.0 Finding F6) so a consistently
+        // alignment-failing merge is visible instead of silently degrading.
+        console.warn(
+          `[darwin] GEPA merge for "${agentName}" failed the alignment guard, falling through to reflective.`,
+        );
+      }
     }
 
     // v0.7.0: pull the configurable feedback window (default 15, was 5).
@@ -682,24 +712,95 @@ export class DarwinLoop {
       return null;
     }
 
-    // Shared alignment guard: the GEPA path runs the same safety-keyword
-    // preservation check as PromptOptimizer.generateVariant. A mutation that
-    // drops "never" / "do not" / "must not" / … is rejected.
-    //
-    // v0.7.0: when an embedder is injected, upgrade to the semantic guard —
-    // a constraint that was REWORDED (not removed) is no longer a
-    // false-positive rejection. Fail-closed: no embedder ⇒ keyword-only.
-    const alignmentIssue = this.embed
-      ? await checkAlignmentPreservationSemantic(currentPrompt, mutated, {
+    const guarded = await this.runAlignmentGuard(currentPrompt, mutated);
+    return guarded === null ? null : { prompt: guarded, via: 'gepa' };
+  }
+
+  /**
+   * v0.7.0 — Shared alignment guard for every GEPA-path mutation (reflective
+   * OR merge). Returns the candidate unchanged when it preserves the safety
+   * keywords, or `null` when it erodes one (→ caller rejects / falls back).
+   *
+   * Uses the semantic (embedding-distance) guard when an embedder is injected
+   * — a REWORDED safety constraint is accepted — and the strict keyword guard
+   * otherwise. Fail-closed: no embedder ⇒ keyword-only.
+   */
+  private async runAlignmentGuard(
+    currentPrompt: string,
+    candidate: string,
+  ): Promise<string | null> {
+    const issue = this.embed
+      ? await checkAlignmentPreservationSemantic(currentPrompt, candidate, {
           embed: this.embed,
           minSafetySimilarity: this.alignmentSimilarityThreshold,
         })
-      : checkAlignmentPreservation(currentPrompt, mutated);
-    if (alignmentIssue) {
+      : checkAlignmentPreservation(currentPrompt, candidate);
+    return issue === null ? candidate : null;
+  }
+
+  /**
+   * v0.7.0 — Merge cadence (every K-th cycle). Default 3, clamped ≥ 1.
+   */
+  private mergeEveryK(): number {
+    const k = this.agent?.evolution?.mergeEveryK;
+    if (typeof k === 'number' && Number.isFinite(k) && k >= 1) return Math.floor(k);
+    return 3;
+  }
+
+  /**
+   * v0.7.0 — GEPA system-aware MERGE (paper Appendix-D). Builds scored
+   * variants from this agent's prompt-version history (each version's prompt
+   * text + its averaged objective vector), takes the two best Pareto-front
+   * members, and asks the {@link GepaOptimizer} to combine their complementary
+   * strengths into one challenger prompt.
+   *
+   * Returns the merged prompt, or `null` (→ caller falls back to reflective)
+   * when: no optimizer is wired, fewer than two versions carry metric data,
+   * the Pareto front has fewer than two members, or the merge call throws.
+   * The returned prompt has NOT yet passed the alignment guard — the caller
+   * runs {@link runAlignmentGuard} on it.
+   */
+  private async tryMergeVariant(agentName: string): Promise<string | null> {
+    if (!this.gepa) return null;
+
+    const versions = await this.memory.getAllPromptVersions(agentName);
+    const scored: ScoredVariant[] = [];
+    // One getAverageMetrics (→ loadExperiments) call per version. O(N) backend
+    // round-trips, but N is the agent's prompt-version count (≤ ~20 in
+    // practice) and this only runs on the merge cadence, so it is cheap — same
+    // pattern handleABTest already uses for the Pareto gate.
+    for (const v of versions) {
+      if (!v.promptText) continue;
+      const metrics = await this.tracker.getAverageMetrics(agentName, v.version);
+      if (Object.keys(metrics).length === 0) continue; // no runs for this version
+      scored.push({ id: v.version, prompt: v.promptText, metrics });
+    }
+    if (scored.length < 2) return null; // need two parents to merge
+
+    // Two best Pareto-front members (distinct versions, scalarised tie-break).
+    const metricsArr = scored.map((s) => s.metrics);
+    const frontMetrics = paretoSelect(
+      metricsArr,
+      DARWIN_DEFAULT_OBJECTIVES as ReadonlyArray<ParetoObjective<Record<string, number>>>,
+      2,
+    );
+    if (frontMetrics.length < 2) return null; // single dominant version → nothing to merge
+
+    const indexOf = new Map<Record<string, number>, number>();
+    metricsArr.forEach((m, i) => indexOf.set(m, i));
+    const parents = frontMetrics
+      .map((m) => scored[indexOf.get(m)!])
+      .filter((s): s is ScoredVariant => s !== undefined);
+    if (parents.length < 2 || parents[0]!.id === parents[1]!.id) return null;
+
+    try {
+      const merged = await this.gepa.merge([parents[0]!, parents[1]!]);
+      return merged.prompt.length > 0 ? merged.prompt : null;
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(`[darwin] GEPA merge failed for "${agentName}", falling back to reflective: ${reason}`);
       return null;
     }
-
-    return mutated;
   }
 
   /**

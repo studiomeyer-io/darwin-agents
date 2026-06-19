@@ -775,3 +775,133 @@ describe('DarwinLoop — additivity smoke (v0.7.0 flags off)', () => {
     assert.equal(v2!.promptText, LEGACY_OUT);
   });
 });
+
+// ─── GEPA system-aware MERGE wiring (v0.7.0) ────────────────────────
+
+/** A meta-prompt is the MERGE template (vs the reflection template). */
+function isMergeMeta(meta: string): boolean {
+  return /PARENT A/.test(meta) && /merger/i.test(meta);
+}
+
+const MERGE_OUT =
+  'You are a research agent. Never fabricate sources. Cite many primary documents AND write deep, high-quality analysis.';
+const REFLECT_OUT = 'You are a research agent. Never fabricate sources. Reflective edit applied.';
+
+async function setupMergeLoop(
+  evolution: AgentDefinition['evolution'],
+  opts: { seedParents: boolean } = { seedParents: true },
+): Promise<{ result: Awaited<ReturnType<DarwinLoop['afterRun']>>; mergeCalled: boolean; reflectCalled: boolean; newPrompt: string }> {
+  const memory = createMockMemory();
+  // v1 + v2 are HISTORY (Pareto-distinct merge parents); v3 is the ACTIVE
+  // version being evolved. Active=v3 so the challenger is v4 — no name clash
+  // with the existing versions (nextVersion('v3')='v4').
+  memory._versions.push(
+    makePromptVersion({
+      version: 'v1', agentName: 'researcher', active: false,
+      promptText: 'You are a research agent. Never fabricate sources. Cite many primary documents.',
+    }),
+    makePromptVersion({
+      version: 'v2', agentName: 'researcher', active: false,
+      promptText: 'You are a research agent. Never fabricate sources. Write deep, high-quality analysis.',
+    }),
+    makePromptVersion({
+      version: 'v3', agentName: 'researcher', active: true,
+      promptText: 'You are a research agent. Never fabricate sources. Do solid work.',
+    }),
+  );
+  // v3 (active): weak quality → triggers evolution. Always seeded (20 so the
+  // weakness/trigger fires reliably even when no contrasting versions exist).
+  for (let i = 0; i < 20; i++) {
+    const e = makeExperiment({
+      agentName: 'researcher', promptVersion: 'v3', taskType: 'tech', success: true,
+      metrics: metrics({ qualityScore: 4.0, sourceCount: 8 }),
+    });
+    e.feedback = { score: 4.0, report: `v3 shallow ${i}`, evaluator: 'multi-critic' };
+    memory._experiments.push(e);
+  }
+  // v1 (high quality / low sources) + v2 (low quality / high sources) are two
+  // Pareto-distinct historical parents. Seeded only when we want a merge.
+  if (opts.seedParents) {
+    for (let i = 0; i < 6; i++) {
+      const a = makeExperiment({
+        agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+        metrics: metrics({ qualityScore: 8.5, sourceCount: 2 }),
+      });
+      a.feedback = { score: 8.5, report: `v1 deep ${i}`, evaluator: 'multi-critic' };
+      memory._experiments.push(a);
+      const b = makeExperiment({
+        agentName: 'researcher', promptVersion: 'v2', taskType: 'tech', success: true,
+        metrics: metrics({ qualityScore: 4.5, sourceCount: 18 }),
+      });
+      b.feedback = { score: 4.5, report: `v2 broad ${i}`, evaluator: 'multi-critic' };
+      memory._experiments.push(b);
+    }
+  }
+
+  let mergeCalled = false;
+  let reflectCalled = false;
+  const gepa = new GepaOptimizer(async (meta: string) => {
+    if (isMergeMeta(meta)) { mergeCalled = true; return MERGE_OUT; }
+    reflectCalled = true; return REFLECT_OUT;
+  });
+
+  const loop = new DarwinLoop({
+    memory,
+    tracker: new ExperimentTracker(memory),
+    optimizer: new PromptOptimizer(async () => 'LEGACY Never-safe fallback'),
+    safety: new SafetyGate(),
+    patterns: new PatternDetector(memory),
+    agent: makeAgent(evolution),
+    gepa,
+  });
+
+  const trigger = makeExperiment({
+    agentName: 'researcher', promptVersion: 'v3', taskType: 'tech', success: true,
+    metrics: metrics({ qualityScore: 4.0, sourceCount: 8 }),
+    feedback: { score: 4.0, report: 'trigger shallow', evaluator: 'multi-critic' },
+  });
+  const result = await loop.afterRun(trigger);
+  const newVer = memory._versions.find(
+    (v) => v.version !== 'v1' && v.version !== 'v2' && v.version !== 'v3',
+  );
+  return { result, mergeCalled, reflectCalled, newPrompt: newVer?.promptText ?? '' };
+}
+
+describe('DarwinLoop — GEPA system-aware merge (v0.7.0)', () => {
+  it('merges the two best Pareto versions on a K-th cycle (useMerge on)', async () => {
+    const { result, mergeCalled, newPrompt } = await setupMergeLoop({
+      enabled: true, useGepa: true, useMerge: true, mergeEveryK: 1,
+    });
+    assert.equal(mergeCalled, true, 'gepa.merge should have been invoked');
+    assert.ok(result.message.includes('via merge'), `expected merge tag: ${result.message}`);
+    assert.equal(newPrompt, MERGE_OUT, 'challenger should be the merged prompt');
+  });
+
+  it('falls back to reflective when fewer than two scored versions exist', async () => {
+    const { mergeCalled, reflectCalled, newPrompt } = await setupMergeLoop(
+      { enabled: true, useGepa: true, useMerge: true, mergeEveryK: 1 },
+      { seedParents: false }, // only the active v3 has metric data → < 2 Pareto parents
+    );
+    assert.equal(mergeCalled, false, 'merge cannot run with one scored version');
+    assert.equal(reflectCalled, true, 'should fall back to the reflective path');
+    assert.equal(newPrompt, REFLECT_OUT);
+  });
+
+  it('does NOT merge when useMerge is off (default), even with two Pareto versions', async () => {
+    const { mergeCalled, reflectCalled, result } = await setupMergeLoop({
+      enabled: true, useGepa: true, // no useMerge
+    });
+    assert.equal(mergeCalled, false);
+    assert.equal(reflectCalled, true);
+    assert.ok(result.message.includes('via gepa'), `expected gepa tag: ${result.message}`);
+  });
+
+  it('respects mergeEveryK cadence (epoch not divisible → reflective)', async () => {
+    // active version v3 → epoch 3; mergeEveryK=2 → 3 % 2 != 0 → no merge this cycle.
+    const { mergeCalled, reflectCalled } = await setupMergeLoop({
+      enabled: true, useGepa: true, useMerge: true, mergeEveryK: 2,
+    });
+    assert.equal(mergeCalled, false, 'merge should not fire off-cadence');
+    assert.equal(reflectCalled, true);
+  });
+});

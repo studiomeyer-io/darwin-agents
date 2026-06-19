@@ -113,6 +113,26 @@ export interface EvolutionConfig {
    */
   paretoGate?: boolean;
   /**
+   * v0.7.0 — Opt into GEPA system-aware MERGE as a challenger source (paper
+   * Appendix-D, ~+5% lift). Only consulted when `useGepa` is also `true` AND a
+   * `GepaOptimizer` is wired into the loop. On every `mergeEveryK`-th evolution
+   * cycle, instead of a reflective mutation the loop merges the two best
+   * Pareto-front prompt versions from this agent's history into one challenger
+   * (combining their complementary strengths), then A/B-tests it like any other
+   * variant. Falls back to reflective generation when fewer than two scored
+   * versions exist, when the Pareto front has fewer than two members, or on any
+   * merge error. The merged prompt runs the SAME alignment guard. Default
+   * `false` — merge never fires unless opted in.
+   */
+  useMerge?: boolean;
+  /**
+   * v0.7.0 — Merge cadence: attempt a system-aware merge on every K-th
+   * evolution cycle (the cycle index is the active prompt version number).
+   * GEPA runs merge roughly every 3–5 generations. Only consulted when
+   * `useMerge` is `true`. Default 3, clamped to ≥ 1.
+   */
+  mergeEveryK?: number;
+  /**
    * v0.7.0 — Relative tolerance for the {@link paretoGate} (only consulted
    * when `paretoGate` is `true`). With strict Pareto dominance (ε = 0, the
    * default) a challenger is rejected if it regresses on ANY objective by

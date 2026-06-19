@@ -175,6 +175,9 @@ const loop = new DarwinLoop({
 - **Instance-wise coverage sampling** (`useCoverage` + per-variant `perKeyScores`)
   — GEPA Algorithm 2: keep/sample the variants that excel on the most *different*
   task subsets, not N copies of the global-average winner.
+- **System-aware merge** (`useMerge` + `mergeEveryK`) — every K-th cycle, merge
+  the two best Pareto-front prompt versions in the agent's history into one
+  challenger (paper Appendix-D, ~+5% lift), instead of a reflective mutation.
 - **Semantic alignment guard** — a *reworded* safety constraint is no longer a
   false rejection; a *removed* one still is (fail-closed without an embedder).
 - **Epoch-shuffled reflection minibatch** (`reflectionMinibatchSize`) + a

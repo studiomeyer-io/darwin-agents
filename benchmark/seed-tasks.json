@@ -1,0 +1,27 @@
+[
+  {
+    "id": "tech-locking",
+    "type": "tech",
+    "task": "Explain the difference between optimistic and pessimistic locking in databases, with one concrete example of when each is the right choice. Max 250 words."
+  },
+  {
+    "id": "market-sdk-launch",
+    "type": "market",
+    "task": "Write a product announcement for a TypeScript SDK that adds self-evolving prompts to AI agents. Two short paragraphs and a clear call to action. No hype words."
+  },
+  {
+    "id": "webdesign-emptystate",
+    "type": "webdesign",
+    "task": "Write the microcopy for the empty-state screen of a habit-tracking app where the user has not added any habits yet. Friendly, concrete, three short lines plus one button label."
+  },
+  {
+    "id": "tech-idempotency",
+    "type": "tech",
+    "task": "Explain idempotency in HTTP APIs with one concrete example showing why PUT is idempotent and POST usually is not. Under 200 words."
+  },
+  {
+    "id": "market-linkedin-hooks",
+    "type": "market",
+    "task": "Write three distinct LinkedIn opening lines for a post about why most AI agents never improve after they ship. Each a different angle. No emojis."
+  }
+]

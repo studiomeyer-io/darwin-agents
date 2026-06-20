@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-20
+
+**Documentation honesty + a reproducible evolution benchmark.** No library code
+changed — `src/` is byte-for-byte 0.7.0, **455 tests green**, `build` clean. This
+release makes every claim in the README survive scrutiny and ships a way to
+reproduce the one that matters.
+
+### Added
+
+- **`benchmark/`** — a reproducible evolution benchmark (`npm run benchmark`).
+  Ships the baseline `writer` prompt and the prompt Darwin's own optimizer
+  produced from it, a frozen held-out task set, and the exact critic-scoring
+  loop, so anyone can reproduce the baseline-vs-evolved delta on their own tasks.
+  `--quick` (1 task) and `--dry` (validate wiring, zero LLM calls) flags.
+
+### Changed
+
+- **README metrics are now real and dated.** Replaced the stale "300+ runs /
+  7.2–7.8" block with actual figures from 419 runs across 19 agents
+  (Mar–Jun 2026), including the measured v1→v2 evolution lift (writer +0.23,
+  marketing +0.28).
+- **Removed the "Darwin Pro — coming soon" tier.** PostgreSQL already ships free
+  in the open-source package; the old table implied a paywall and even listed
+  Postgres itself as a paid feature. Replaced with an honest "SQLite or
+  PostgreSQL — both free, both MIT" section + an open roadmap for the
+  genuinely-unbuilt features (pgvector semantic search, cross-agent learnings,
+  analytics, contradiction detection, data export).
+- **Clarified the LLM-as-judge mitigation.** Critics are multi-*dimension* by
+  default; the CLI spreads them across model families (GPT + Claude) only when
+  more than one provider key is present.
+- **Comparison table:** "MCP native" → "MCP-native memory bridge" — the specific,
+  defensible claim (other frameworks added MCP tool use during 2025).
+- Surfaced the production safety gate, online GEPA, and always-valid sequential
+  tests in a "why this isn't a toy" callout near the top of the README.
+
 ## [0.7.0] — 2026-06-20
 
 **Statistical rigor + coverage sampling.** Seven additive, opt-in upgrades that

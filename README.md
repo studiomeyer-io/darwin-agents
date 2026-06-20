@@ -79,6 +79,16 @@ Your agent got better.
 You did nothing.
 ```
 
+> **Why this isn't a toy.** The loop runs behind a real production **safety gate**
+> — regression rollback to last-known-good, data-quality guards that pause
+> evolution during a tool outage, and an alignment check on *every* mutation so a
+> rewrite can't quietly erode a safety constraint. It can drive that mutation with
+> a [GEPA](https://arxiv.org/abs/2507.19457) reflective optimizer running **online,
+> inside the gate** (not as an offline batch step), and the A/B gate supports
+> **always-valid sequential tests** (mSPRT / Hoeffding) so checking after every run
+> doesn't inflate false positives. Details: [reflective evolution](#reflective-evolution--gepa-online-v06-opt-in)
+> · [statistical rigor](#statistical-rigor--coverage-sampling-v07-opt-in).
+
 ## Quick Start
 
 ```bash
@@ -313,27 +323,30 @@ last run's lessons.
 
 <!-- REAL_METRICS_START -->
 
-### Real results from 300+ production runs
+### Real results from our own production use (Mar–Jun 2026)
 
-These are actual metrics from our development — not synthetic benchmarks.
-
-```
-Agents:      writer, researcher, marketing, blog-writer
-Total Runs:  300+
-Success Rate: 100%
-
-Writer:       7.2/10  (120 runs across tech, webdesign, market)
-Marketing:    7.8/10  (70 runs across LinkedIn, Instagram)
-Researcher:   7.6/10  (50+ runs, web research with citations)
-```
-
-#### Multi-Model Critics in action
+Actual numbers from **419 runs across 19 agents** in our internal `darwin_db` —
+not synthetic benchmarks. "Success" means the run completed and produced valid
+output (100% across 419 runs); "quality" is the critic's separate 1–10 score.
 
 ```
-platform-compliance  ████████░░  8/10
-scroll-stopping      ████████░░  8/10
-conversion-intent    ████████░░  8/10
+Agent          Runs   Avg quality
+writer          172   6.94 / 10
+marketing        70   7.74 / 10
+investigator     28   8.33 / 10
+blog-writer       5   8.20 / 10
 ```
+
+**Evolution, measured.** When the safety gate adopted an evolved prompt, the
+critic score rose on the runs that followed — modest, but real and directional:
+
+```
+writer      v1  6.89 (126 runs)  →  v2  7.12 (42 runs)    +0.23
+marketing   v1  7.64 (45 runs)   →  v2  7.92 (25 runs)    +0.28
+```
+
+Don't take our word for it — reproduce the v1-vs-evolved comparison on your own
+tasks with [`npm run benchmark`](benchmark/).
 
 <!-- REAL_METRICS_END -->
 
@@ -346,7 +359,7 @@ conversion-intent    ████████░░  8/10
 | Safety gate + rollback | **Yes** | No | No | No | No |
 | TypeScript native | **Yes** | No (Python) | No (Python) | No (Python) | No (Python) |
 | Zero-config first agent | **Yes** | No | No | No | Partial |
-| MCP native | **Yes** | No | No | No | No |
+| MCP-native memory bridge | **Yes** | No | No | No | No |
 | File-based (no DB required) | **Yes** | No | No | No | No |
 | Built-in Critic agent | **Yes** | No | No | No | No |
 
@@ -374,8 +387,10 @@ Darwin uses SQLite by default — zero config, single file, no database to insta
     └── exp-researcher-2026-03-08-002.md
 ```
 
-**Want semantic search, cross-agent learnings, and analytics?**
-Upgrade to [Darwin Pro](#darwin-pro) for PostgreSQL + pgvector support.
+**Want concurrent multi-process writes and richer analytics?**
+PostgreSQL is supported out of the box, for free — set `DARWIN_POSTGRES_URL`.
+Semantic search (pgvector), cross-agent learnings and analytics are on the
+[roadmap](#storage-sqlite-or-postgresql--both-free-both-mit), not gated behind a paywall.
 
 ## CLI Reference
 
@@ -393,28 +408,32 @@ darwin evolve writer --reset       # Reset to v1
 darwin create my-agent             # Scaffold a new agent
 ```
 
-## Darwin Pro
+## Storage: SQLite or PostgreSQL — both free, both MIT
 
-The free version uses SQLite — great for getting started, handles thousands of experiments.
+Darwin runs on SQLite by default (zero config, single file) and on PostgreSQL
+out of the box — just set `DARWIN_POSTGRES_URL`. Both backends ship in the
+open-source package. There is no paywall.
 
-For teams and production use, Darwin Pro adds:
-
-| Feature | Free (SQLite) | Pro (PostgreSQL) |
+| Capability | SQLite | PostgreSQL |
 |---------|:---:|:---:|
 | Experiment tracking | ✓ | ✓ |
 | Prompt versioning | ✓ | ✓ |
-| A/B testing | ✓ | ✓ |
-| Safety gate | ✓ | ✓ |
-| Keyword search | ✓ | ✓ |
-| **Semantic search** (pgvector) | — | ✓ |
-| **Cross-agent learnings** | — | ✓ |
-| **Analytics & time series** | — | ✓ |
-| **Contradiction detection** | — | ✓ |
-| **Team support** (multi-user) | — | ✓ |
-| **Data export** (CSV/JSON) | — | ✓ |
-| **Learning decay** | — | ✓ |
+| A/B testing + safety gate | ✓ | ✓ |
+| Keyword search | ✓ (FTS5) | ✓ (GIN / `ts_rank`) |
+| Concurrent multi-process writes | — | ✓ |
 
-*Coming soon. Follow the repo for updates.*
+### Roadmap
+
+Not built yet — tracked in the open, PRs welcome:
+
+- Semantic search (pgvector embeddings)
+- Cross-agent learnings
+- Analytics & time series
+- Contradiction detection
+- Data export (CSV/JSON)
+
+The core stays MIT. If a hosted option ever ships, the self-host path keeps
+every feature.
 
 ## FAQ
 
@@ -438,7 +457,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 
 ## Known Limitations
 
-- **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. We mitigate this with multi-model critics (GPT + Claude), but inherent self-preference bias exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
+- **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. Each agent is scored by a **multi-dimension critic set** (several scoring rubrics per agent type, not a single number). When more than one provider key is present, the CLI also spreads those critics across model families — e.g. GPT for one, Claude for another — to blunt single-model self-preference; with one provider they all run on it. Inherent judge bias still exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
 - **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and **v0.7 ships proper always-valid sequential tests** — set `confidenceMethod: 'msprt'` (Mixture SPRT) or `'hoeffding'` (σ-free confidence sequence) on your `SafetyThresholds` to make the peeking-resistant gate statistically sound. The default path remains the simple threshold for zero-config use.
 - **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
 

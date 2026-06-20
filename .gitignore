@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .darwin/
+benchmark/results/
 *.log
 .env
 .env.local

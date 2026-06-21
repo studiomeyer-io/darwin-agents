@@ -14,6 +14,7 @@ import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
 import { resolveEvolutionEnabled, setEvolutionEnabled } from '../evolution/enabled-state.js';
+import { buildEvolutionLoop } from '../evolution/build-loop.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
   const agentName = args[0];
@@ -56,8 +57,25 @@ export async function evolveCommand(args: string[]): Promise<void> {
     await memory.saveState(state);
     console.log(`[darwin] Evolution RESET for ${agentName}. Back to v1.`);
   } else if (flags.includes('--force')) {
-    console.log(`[darwin] Force evolution is not yet available.`);
-    console.log(`[darwin] Run the agent normally — Darwin will evolve automatically after enough runs.`);
+    // On-demand manual trigger: run the loop's variant-generation + A/B-start
+    // path ONCE, bypassing the "enough runs / actionable patterns / data
+    // quality" gates of the automatic loop. Uses the experiments collected so
+    // far. Refuses cleanly when there is nothing to mutate from (no active
+    // prompt / no experiments) or a test is already running.
+    console.log(`[darwin] Forcing evolution for ${agentName}...`);
+    const loop = buildEvolutionLoop(agent, config, memory);
+    const evoResult = await loop.forceEvolve(agentName);
+    if (evoResult.abTestStarted) {
+      console.log(`[darwin] EVOLVED: ${evoResult.message}`);
+    } else {
+      console.log(`[darwin] ${evoResult.message}`);
+    }
+    if (evoResult.patternsFound.length > 0) {
+      console.log(`[darwin] Patterns detected:`);
+      for (const p of evoResult.patternsFound.slice(0, 5)) {
+        console.log(`  ${p.type}: ${p.description}`);
+      }
+    }
   } else {
     // Show current status
     const state = await memory.getState();

@@ -17,6 +17,7 @@ import type {
   DarwinPattern,
   MemoryProvider,
   PromptVersion,
+  PromptVersionStats,
 } from '../types.js';
 import type { ExperimentTracker } from './tracker.js';
 import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
@@ -271,6 +272,80 @@ export class DarwinLoop {
       return result;
     }
 
+    // Generate the challenger + start the A/B test (shared with forceEvolve()).
+    return this.generateAndStartABTest(agent, activePrompt, detectedPatterns, stats, result);
+  }
+
+  /**
+   * Manual / on-demand evolution trigger — the engine behind
+   * `darwin evolve <agent> --force`.
+   *
+   * Runs the SAME variant-generation + A/B-start path as the automatic loop's
+   * Step 5, but WITHOUT the "enough runs / actionable patterns / data-quality"
+   * gates. Use it to deliberately kick off an optimisation from the current
+   * best prompt using the experiments collected so far, instead of waiting for
+   * the loop to decide on its own.
+   *
+   * It still refuses the cases where evolution is genuinely impossible or
+   * unsafe:
+   *   - no active prompt seeded yet (nothing to mutate from),
+   *   - no recorded experiments (the optimizer has nothing to learn from),
+   *   - an A/B test already running (can't start a second concurrent test).
+   *
+   * Patterns are still DETECTED (so the change reason and the GEPA/legacy
+   * feedback are meaningful) — they are simply not used as a gate.
+   */
+  async forceEvolve(agentName: string): Promise<EvolutionResult> {
+    const result: EvolutionResult = {
+      patternsFound: [],
+      promptEvolved: false,
+      abTestStarted: false,
+      abTestCompleted: false,
+      rolledBack: false,
+      message: '',
+    };
+
+    const state = await this.memory.getState();
+    if (state.abTests[agentName]) {
+      result.message =
+        `An A/B test is already running for "${agentName}" — let it finish before forcing another.`;
+      return result;
+    }
+
+    const experiments = await this.memory.loadExperiments(agentName);
+    if (experiments.length === 0) {
+      result.message =
+        `No recorded experiments for "${agentName}" yet — run it at least once before forcing evolution.`;
+      return result;
+    }
+
+    const activePrompt = await this.memory.getActivePrompt(agentName);
+    if (!activePrompt) {
+      result.message = 'No active prompt found — cannot evolve.';
+      return result;
+    }
+
+    const stats = await this.tracker.getStats(agentName);
+    const detectedPatterns = await this.patterns.detectPatterns(agentName);
+    result.patternsFound = detectedPatterns;
+
+    return this.generateAndStartABTest(agentName, activePrompt, detectedPatterns, stats, result);
+  }
+
+  /**
+   * Shared tail of the evolution cycle: generate one challenger prompt (GEPA
+   * reflective path when opted in, else the legacy meta-prompt optimizer),
+   * persist it as a new version, and start an A/B test against the incumbent.
+   * Called by both the gated automatic loop ({@link afterRun}) and the
+   * on-demand {@link forceEvolve}. Mutates and returns the passed `result`.
+   */
+  private async generateAndStartABTest(
+    agent: string,
+    activePrompt: PromptVersion,
+    detectedPatterns: DarwinPattern[],
+    stats: PromptVersionStats,
+    result: EvolutionResult,
+  ): Promise<EvolutionResult> {
     // Build tool context (P0-2) and category stats (P2-5) for optimizer
     const toolContext: AgentToolContext | undefined = this.agent
       ? { mcp: this.agent.mcp, tools: this.agent.tools }

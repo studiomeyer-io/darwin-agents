@@ -38,6 +38,12 @@ const HELP = `
     darwin run analyst --path ./src
     darwin status researcher
     darwin evolve researcher --enable
+    darwin evolve researcher --force
+
+  Evolve flags:
+    --enable / --disable  Persistently turn self-evolution on/off for an agent
+    --reset               Reset the agent back to its v1 prompt
+    --force               Force one optimization cycle now (needs >=1 prior run)
 
   Options:
     --task-type <type>    Categorize the task (tech, webdesign, market, general)

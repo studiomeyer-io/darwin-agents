@@ -415,6 +415,31 @@ darwin evolve writer --force       # Force one optimization cycle now
 darwin create my-agent             # Scaffold a new agent
 ```
 
+### Advanced evolution flags
+
+The v0.6/v0.7 evolution strategies are reachable from the CLI. `darwin evolve`
+**persists** them onto the agent (they survive process exit); `darwin run`
+accepts the same flags as a one-off override for a single run.
+
+```bash
+# Persist: reflect with GEPA + a stronger reflection model, pick parents by coverage
+darwin evolve writer --gepa --reflection-model claude-opus-4-8 --coverage
+
+# One-off for a single run
+darwin run writer "Explain consensus" --gepa --pareto-gate
+```
+
+| Flag | What it does |
+|------|--------------|
+| `--gepa` / `--no-gepa` | GEPA-style reflective prompt mutation (vs. the legacy stats optimizer) |
+| `--merge` / `--no-merge` | GEPA system-aware merge of two Pareto-front prompts as a challenger source |
+| `--pareto-gate` / `--no-pareto-gate` | Reject an A/B winner that regressed on any objective |
+| `--coverage` / `--no-coverage` | Pick the reflection parent by per-task-type coverage breadth (GEPA Algorithm 2) |
+| `--reflection-model <id>` | Use a stronger model for GEPA reflection (the documented leverage point) |
+
+All default to **off** — the baseline single-objective evolution loop is
+unchanged unless you opt in.
+
 ## Storage: SQLite or PostgreSQL — both free, both MIT
 
 Darwin runs on SQLite by default (zero config, single file) and on PostgreSQL

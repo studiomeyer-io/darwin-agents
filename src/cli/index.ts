@@ -52,6 +52,13 @@ const HELP = `
     --model <model>       Override LLM model
     --verbose             Show detailed output
     --help                Show this help
+
+  Advanced evolution flags (run + evolve; persisted by evolve):
+    --gepa / --no-gepa            GEPA reflective optimizer
+    --merge / --no-merge          GEPA system-aware merge
+    --pareto-gate / --no-pareto-gate   multi-objective A/B activation gate
+    --coverage / --no-coverage    instance-wise coverage selection
+    --reflection-model <id>       stronger reflection model for GEPA
 `;
 
 async function main(): Promise<void> {

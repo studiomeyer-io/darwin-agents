@@ -35,6 +35,7 @@ export type {
   ExecutionTrace,
   ExperimentFeedback,
   EvolutionConfig,
+  EvolutionConfigOverride,
   Learning,
   McpServerConfig,
   MemoryProvider,

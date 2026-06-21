@@ -7,19 +7,35 @@
  *   darwin evolve researcher --enable
  *   darwin evolve researcher --disable
  *   darwin evolve researcher --reset
- *   darwin evolve researcher --force   (force optimization now)
+ *   darwin evolve researcher --force            (force one optimization now)
+ *   darwin evolve researcher --gepa --coverage  (persist advanced config flags)
+ *   darwin evolve researcher --reflection-model claude-opus-4-8
+ *
+ * Advanced flags (persisted, also accepted by `darwin run`):
+ *   --gepa / --no-gepa            GEPA reflective optimizer
+ *   --merge / --no-merge          GEPA system-aware merge
+ *   --pareto-gate / --no-pareto-gate   multi-objective A/B activation gate
+ *   --coverage / --no-coverage    instance-wise coverage selection
+ *   --reflection-model <id>       stronger reflection model for GEPA
  */
 
 import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
-import { resolveEvolutionEnabled, setEvolutionEnabled } from '../evolution/enabled-state.js';
+import {
+  resolveEvolutionEnabled,
+  resolveEvolutionConfig,
+  setEvolutionEnabled,
+  setEvolutionConfigOverrides,
+} from '../evolution/enabled-state.js';
 import { buildEvolutionLoop } from '../evolution/build-loop.js';
+import { parseEvolutionConfigFlags, hasAnyEvolutionFlag } from './evolution-flags.js';
+import type { AgentDefinition, EvolutionConfig } from '../types.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
   const agentName = args[0];
   if (!agentName) {
-    throw new Error('Usage: darwin evolve <agent> [--enable|--disable|--reset|--force]');
+    throw new Error('Usage: darwin evolve <agent> [--enable|--disable|--reset|--force|--gepa|--coverage|…]');
   }
 
   const agent = builtinAgents[agentName];
@@ -27,10 +43,18 @@ export async function evolveCommand(args: string[]): Promise<void> {
     throw new Error(`Unknown agent: "${agentName}". Available: ${Object.keys(builtinAgents).join(', ')}`);
   }
 
-  const flags = args.slice(1);
+  // Separate the advanced evolution-config flags from the action flags.
+  const { override, rest: flags } = parseEvolutionConfigFlags(args.slice(1));
   const config = await loadConfig();
   const memory = createMemory(config);
   await memory.init();
+
+  // Persist advanced-config flags FIRST (so e.g. `--force --gepa` forces with
+  // GEPA on, and `--gepa --coverage` alone just records the config).
+  if (hasAnyEvolutionFlag(override)) {
+    await setEvolutionConfigOverrides(memory, agentName, override);
+    console.log(`[darwin] Evolution config updated for ${agentName}: ${describeOverride(override)}`);
+  }
 
   if (flags.includes('--enable')) {
     // Persist the override into DarwinState so it survives process exit.
@@ -63,7 +87,15 @@ export async function evolveCommand(args: string[]): Promise<void> {
     // far. Refuses cleanly when there is nothing to mutate from (no active
     // prompt / no experiments) or a test is already running.
     console.log(`[darwin] Forcing evolution for ${agentName}...`);
-    const loop = buildEvolutionLoop(agent, config, memory);
+    // Build the loop with the resolved advanced config (persisted overrides +
+    // any flags passed on this command line) so `--force --gepa` etc. take
+    // effect for the forced cycle.
+    const state = await memory.getState();
+    const resolvedEvolution = resolveEvolutionConfig(agent, state);
+    const evolutionAgent: AgentDefinition = resolvedEvolution
+      ? { ...agent, evolution: resolvedEvolution }
+      : agent;
+    const loop = buildEvolutionLoop(evolutionAgent, config, memory);
     const evoResult = await loop.forceEvolve(agentName);
     if (evoResult.abTestStarted) {
       console.log(`[darwin] EVOLVED: ${evoResult.message}`);
@@ -76,8 +108,9 @@ export async function evolveCommand(args: string[]): Promise<void> {
         console.log(`  ${p.type}: ${p.description}`);
       }
     }
-  } else {
-    // Show current status
+  } else if (!hasAnyEvolutionFlag(override)) {
+    // Show current status (only when no config flag was the whole command —
+    // a bare `--gepa` already printed its confirmation above).
     const state = await memory.getState();
     const version = state.activeVersions[agentName] ?? 'v1';
     const runs = state.experimentCounts[agentName] ?? 0;
@@ -85,6 +118,7 @@ export async function evolveCommand(args: string[]): Promise<void> {
     // Reflect the PERSISTED override (set by --enable/--disable) so `darwin
     // evolve <agent>` reports the same enabled-state `darwin run` will act on.
     const enabled = resolveEvolutionEnabled(agent, state);
+    const evo = resolveEvolutionConfig(agent, state);
 
     console.log(`\n[darwin] Evolution for ${agentName}:`);
     console.log(`  Enabled:   ${enabled ? 'yes' : 'no'}`);
@@ -92,7 +126,32 @@ export async function evolveCommand(args: string[]): Promise<void> {
     console.log(`  Runs:      ${runs}`);
     console.log(`  A/B Test:  ${abTest ? `${abTest.versionA} vs ${abTest.versionB}` : 'none'}`);
     console.log(`  Min Runs:  ${agent.evolution?.minRuns ?? 5}`);
+    console.log(`  Advanced:  ${describeConfig(evo)}`);
   }
 
   await memory.close();
+}
+
+/** One-line summary of which advanced flags an override set (for confirmation). */
+function describeOverride(o: { useGepa?: boolean; useMerge?: boolean; paretoGate?: boolean; useCoverage?: boolean; reflectionModel?: string }): string {
+  const parts: string[] = [];
+  if (o.useGepa !== undefined) parts.push(`gepa=${o.useGepa}`);
+  if (o.useMerge !== undefined) parts.push(`merge=${o.useMerge}`);
+  if (o.paretoGate !== undefined) parts.push(`paretoGate=${o.paretoGate}`);
+  if (o.useCoverage !== undefined) parts.push(`coverage=${o.useCoverage}`);
+  if (o.reflectionModel !== undefined) parts.push(`reflectionModel=${o.reflectionModel}`);
+  return parts.length > 0 ? parts.join(', ') : '(none)';
+}
+
+/** One-line summary of the effective advanced config for the status view. */
+function describeConfig(evo: EvolutionConfig | undefined): string {
+  if (!evo) return '(no evolution config)';
+  const parts = [
+    `gepa=${evo.useGepa ?? false}`,
+    `merge=${evo.useMerge ?? false}`,
+    `paretoGate=${evo.paretoGate ?? false}`,
+    `coverage=${evo.useCoverage ?? false}`,
+  ];
+  if (evo.reflectionModel) parts.push(`reflectionModel=${evo.reflectionModel}`);
+  return parts.join(', ');
 }

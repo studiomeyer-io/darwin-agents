@@ -8,19 +8,16 @@ import { builtinAgents } from '../agents/index.js';
 import { createMemory } from '../memory/index.js';
 import { runAgent } from '../core/runner.js';
 import { loadConfig } from '../core/agent.js';
-import { DarwinLoop } from '../evolution/loop.js';
-import { ExperimentTracker } from '../evolution/tracker.js';
-import { PatternDetector } from '../evolution/patterns.js';
-import { PromptOptimizer } from '../evolution/optimizer.js';
-import { GepaOptimizer } from '../evolution/optimizer-gepa.js';
-import { SafetyGate } from '../evolution/safety.js';
 import { runMultiCritic, getCriticPrompts } from '../evolution/multi-critic.js';
-import { loadNotificationConfig } from '../evolution/notifications.js';
 import { createProvider } from '../providers/index.js';
 import type { LLMProvider, ProviderConfig } from '../providers/types.js';
 import type { AgentDefinition, DarwinConfig, MemoryProvider, PromptVersion } from '../types.js';
 import { resolveEvolutionEnabled } from '../evolution/enabled-state.js';
 import { parseCriticScore } from '../evolution/parse-score.js';
+import { resolveEvolutionConfig } from '../evolution/enabled-state.js';
+import { buildEvolutionLoop } from '../evolution/build-loop.js';
+import { isEvolutionConfigFlag, applyEvolutionFlag } from './evolution-flags.js';
+import type { EvolutionConfigOverride } from '../types.js';
 
 // ─── Multi-Model Critic Provider Resolution ─────────
 
@@ -95,6 +92,8 @@ interface RunFlags {
   provider?: ProviderConfig['type'];
   /** Base URL for OpenAI-compatible / Ollama endpoints */
   baseUrl?: string;
+  /** Advanced evolution-config toggles for this run (--gepa/--coverage/…) */
+  evolutionOverride: EvolutionConfigOverride;
 }
 
 function parseRunArgs(args: string[]): RunFlags {
@@ -105,6 +104,7 @@ function parseRunArgs(args: string[]): RunFlags {
     noEvolve: false,
     noCritic: false,
     verbose: false,
+    evolutionOverride: {},
   };
 
   const positional: string[] = [];
@@ -137,7 +137,11 @@ function parseRunArgs(args: string[]): RunFlags {
         flags.verbose = true;
         break;
       default:
-        positional.push(arg);
+        if (isEvolutionConfigFlag(arg)) {
+          i += applyEvolutionFlag(arg, args[i + 1], flags.evolutionOverride);
+        } else {
+          positional.push(arg);
+        }
     }
   }
 
@@ -389,63 +393,17 @@ async function runCommandInner(
 
   // Darwin evolution loop (unless skipped)
   if (!flags.noEvolve && evolutionEnabled) {
-    const tracker = new ExperimentTracker(memory);
-    const patterns = new PatternDetector(memory);
-    const safety = new SafetyGate();
+    // Resolve the advanced evolution config: static definition < persisted
+    // overrides (darwin evolve --gepa/…) < this run's CLI flags. The resulting
+    // config drives both the GEPA wiring and the loop. With no overrides set,
+    // resolvedEvolution === the static config, so the loop is wired exactly as
+    // before (default path unchanged).
+    const resolvedEvolution = resolveEvolutionConfig(agent, preState, flags.evolutionOverride);
+    const evolutionAgent: AgentDefinition = resolvedEvolution
+      ? { ...agent, evolution: resolvedEvolution }
+      : agent;
 
-    // The optimizer uses Claude CLI to generate improved prompts
-    const optimizer = new PromptOptimizer(async (metaPrompt: string) => {
-      const optimizerResult = await runAgent(
-        {
-          name: 'optimizer',
-          role: 'Prompt Optimizer',
-          description: 'Generates improved prompt variants',
-          type: 'llm',
-          systemPrompt: 'You are a prompt optimization expert. Return ONLY the improved prompt text.',
-          maxTurns: 3,
-          model: 'claude-sonnet-4-6',
-        },
-        metaPrompt,
-        { config, taskType: 'optimization', autonomous: true },
-      );
-      return optimizerResult.output;
-    });
-
-    // v0.6.0 — GEPA reflective optimizer (opt-in via agent.evolution.useGepa).
-    // Routes the reflection LLM call through a (ideally STRONGER) model: GEPA's
-    // published guidance + the Decagon production ablation both find the
-    // reflection model is the leverage point — a weak reflector can leave the
-    // prompt unchanged. Warn if useGepa is on but no reflectionModel is set.
-    let gepa: GepaOptimizer | undefined;
-    if (agent.evolution?.useGepa) {
-      const reflectionModel = agent.evolution.reflectionModel;
-      if (!reflectionModel) {
-        console.warn(
-          '[darwin] evolution.useGepa is on but no evolution.reflectionModel is set — ' +
-          'reflection will use the agent model. GEPA works best with a STRONGER reflection ' +
-          'model (e.g. claude-opus-4-8); set agent.evolution.reflectionModel to silence this.',
-        );
-      }
-      gepa = new GepaOptimizer(async (reflectionPrompt: string) => {
-        const reflectionResult = await runAgent(
-          {
-            name: 'reflector',
-            role: 'GEPA Reflector',
-            description: 'Reflective prompt mutator (GEPA smallest-possible-edit)',
-            type: 'llm',
-            systemPrompt: 'You are a prompt-engineering reflector. Return ONLY the mutated prompt text.',
-            maxTurns: 3,
-            model: reflectionModel ?? agent.model ?? 'claude-sonnet-4-6',
-          },
-          reflectionPrompt,
-          { config, taskType: 'reflection', autonomous: true },
-        );
-        return reflectionResult.output;
-      });
-    }
-
-    const notifications = loadNotificationConfig();
-    const loop = new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications, gepa });
+    const loop = buildEvolutionLoop(evolutionAgent, config, memory);
 
     console.log(`\n[darwin] Evolution: Running Darwin loop...`);
     const evoResult = await loop.afterRun(result.experiment);

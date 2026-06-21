@@ -144,6 +144,19 @@ export interface EvolutionConfig {
    * units. Default `0` (strict, byte-for-byte the v0.6.0 gate).
    */
   paretoEpsilon?: number;
+  /**
+   * v0.7.0 — Opt into GEPA Algorithm 2 instance-wise coverage selection in the
+   * evolution loop. Only consulted when `useGepa` is also `true` AND a
+   * `GepaOptimizer` is wired in. When `true`, the loop selects the prompt
+   * version it reflects the next challenger from by per-task-type coverage
+   * breadth (`GepaOptimizer.nextGeneration` with `useCoverage`), preferring the
+   * version that performs best across the MOST DIFFERENT task types rather than
+   * the single highest-average version — preserving the diversity GEPA's
+   * reflection loop depends on. Falls back to the plain reflective path when
+   * fewer than two prompt versions have per-task-type data. Default `false` —
+   * the single-challenger reflective path is unchanged.
+   */
+  useCoverage?: boolean;
 }
 
 // ─── Config ─────────────────────────────────────────
@@ -412,6 +425,30 @@ export interface DarwinState {
    * existed simply lack the key, in which case the static default applies.
    */
   evolutionEnabled?: Record<string, boolean>;
+  /**
+   * Persisted overrides for the advanced evolution-config flags
+   * (`useGepa` / `useMerge` / `paretoGate` / `useCoverage` /
+   * `reflectionModel`), set by `darwin evolve <agent> --gepa|--merge|…`. Merged
+   * OVER the agent definition's static `evolution` block when resolving the
+   * effective config, so these knobs are reachable from the CLI and survive
+   * process exit. Optional + read defensively (older state rows lack it).
+   */
+  evolutionConfigOverrides?: Record<string, EvolutionConfigOverride>;
+}
+
+/**
+ * The subset of {@link EvolutionConfig} that the CLI can toggle + persist via
+ * `darwin evolve <agent>` / `darwin run … --gepa …`. Stored per agent in
+ * {@link DarwinState.evolutionConfigOverrides} and merged over the static
+ * config. Every field is optional — only the flags the user actually set are
+ * recorded, so unset flags keep the agent definition's default.
+ */
+export interface EvolutionConfigOverride {
+  useGepa?: boolean;
+  useMerge?: boolean;
+  paretoGate?: boolean;
+  useCoverage?: boolean;
+  reflectionModel?: string;
 }
 
 // ─── Patterns ───────────────────────────────────────

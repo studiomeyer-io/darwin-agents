@@ -195,6 +195,33 @@ const loop = new DarwinLoop({
 - **Style-bias-free judging** (`normalizeForJudging`) — strip markdown before the
   critic scores, so it measures content not formatting.
 
+### Drift detection — validate-by-reproduce canary (v0.9)
+
+The A/B gate guards prompt *quality*. The canary guards *behaviour*: a model
+update or a broken tool can change *how* an agent reaches its answer (different
+tools, more turns, more errors) while the quality score stays flat. `darwin
+canary` re-checks recent runs against a frozen baseline and flags that drift.
+
+```bash
+darwin canary writer                 # Stable / drift / insufficient-data report
+darwin canary writer --json          # Machine-readable, for dashboards
+darwin canary writer --exit-on-drift # Non-zero exit on drift, for CI
+```
+
+It compares execution *trajectories* (captured opt-in since v0.5) with
+tolerance-based metrics — unordered tool-set Jaccard, ordered sequence
+similarity, turn-count ratio, error-rate delta — never an exact hash (LLM runs
+are non-deterministic). Drift has to be a *pattern* (≥2 of N runs), and the
+baseline is pinned to the active prompt version, so an intentional evolution
+reports `insufficient-data` (re-baseline), not a false alarm. The metrics and
+the `runCanaryOverExperiments` orchestrator are exported for your own pipelines.
+
+**Cross-family judging:** with more than one provider key present, Darwin
+already spreads the three critics across model families to cut LLM-as-judge
+bias. With only one key they collapse onto a single family (note: `claude-cli`
+and `anthropic-api` are the *same* family) — Darwin now warns, and hard-fails
+under `DARWIN_REQUIRE_CROSS_FAMILY=1` for strict / CI setups.
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -406,6 +433,8 @@ darwin run analyst --path ./src    # Analyze a codebase
 
 darwin status                      # Overview of all agents
 darwin status writer               # Detailed agent stats + evolution history
+
+darwin canary writer               # Behavioural drift vs a frozen baseline (--json, --exit-on-drift)
 
 darwin evolve writer --enable      # Enable self-evolution (persisted)
 darwin evolve writer --disable     # Disable self-evolution (persisted)

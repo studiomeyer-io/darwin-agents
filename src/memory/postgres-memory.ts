@@ -37,6 +37,7 @@ const DEFAULT_STATE: DarwinState = {
   lastKnownGood: {},
   consecutiveFailures: {},
   experimentCounts: {},
+  evolutionEnabled: {},
 };
 
 // ─── PostgreSQL Memory Provider ───────────────────────

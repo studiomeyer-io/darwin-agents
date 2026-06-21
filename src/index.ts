@@ -35,6 +35,7 @@ export type {
   ExecutionTrace,
   ExperimentFeedback,
   EvolutionConfig,
+  EvolutionConfigOverride,
   Learning,
   McpServerConfig,
   MemoryProvider,
@@ -115,6 +116,11 @@ export {
   type EmbedFn,
   type SemanticAlignmentOptions,
 } from './evolution/alignment.js';
+
+// Shared critic-score parser — turns a critic's free-text verdict into a
+// clamped 1–10 score. Used by the CLI run path and the benchmark so they
+// extract scores identically; exported for consumers writing their own loops.
+export { parseCriticScore, type ParsedCriticScore } from './evolution/parse-score.js';
 
 // V0.7.0 — multi-critic style-bias normalisation (judge content, not markdown).
 export {

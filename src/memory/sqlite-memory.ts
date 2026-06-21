@@ -89,6 +89,7 @@ const DEFAULT_STATE: DarwinState = {
   lastKnownGood: {},
   consecutiveFailures: {},
   experimentCounts: {},
+  evolutionEnabled: {},
 };
 
 // ─── SQLite Memory Provider ───────────────────────────

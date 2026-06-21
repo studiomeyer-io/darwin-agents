@@ -329,6 +329,11 @@ Actual numbers from **419 runs across 19 agents** in our internal `darwin_db` �
 not synthetic benchmarks. "Success" means the run completed and produced valid
 output (100% across 419 runs); "quality" is the critic's separate 1–10 score.
 
+> Those 19 are our own internal + custom agents; the package ships **8 built-in
+> agents** by default (`writer`, `researcher`, `critic`, `analyst`,
+> `investigator`, `investigator-critic`, `marketing`, `blog-writer`) — the table
+> below shows the four with enough runs to report.
+
 ```
 Agent          Runs   Avg quality
 writer          172   6.94 / 10
@@ -402,11 +407,38 @@ darwin run analyst --path ./src    # Analyze a codebase
 darwin status                      # Overview of all agents
 darwin status writer               # Detailed agent stats + evolution history
 
-darwin evolve writer --enable      # Enable self-evolution
+darwin evolve writer --enable      # Enable self-evolution (persisted)
+darwin evolve writer --disable     # Disable self-evolution (persisted)
 darwin evolve writer --reset       # Reset to v1
+darwin evolve writer --force       # Force one optimization cycle now
 
 darwin create my-agent             # Scaffold a new agent
 ```
+
+### Advanced evolution flags
+
+The v0.6/v0.7 evolution strategies are reachable from the CLI. `darwin evolve`
+**persists** them onto the agent (they survive process exit); `darwin run`
+accepts the same flags as a one-off override for a single run.
+
+```bash
+# Persist: reflect with GEPA + a stronger reflection model, pick parents by coverage
+darwin evolve writer --gepa --reflection-model claude-opus-4-8 --coverage
+
+# One-off for a single run
+darwin run writer "Explain consensus" --gepa --pareto-gate
+```
+
+| Flag | What it does |
+|------|--------------|
+| `--gepa` / `--no-gepa` | GEPA-style reflective prompt mutation (vs. the legacy stats optimizer) |
+| `--merge` / `--no-merge` | GEPA system-aware merge of two Pareto-front prompts as a challenger source |
+| `--pareto-gate` / `--no-pareto-gate` | Reject an A/B winner that regressed on any objective |
+| `--coverage` / `--no-coverage` | Pick the reflection parent by per-task-type coverage breadth (GEPA Algorithm 2) |
+| `--reflection-model <id>` | Use a stronger model for GEPA reflection (the documented leverage point) |
+
+All default to **off** — the baseline single-objective evolution loop is
+unchanged unless you opt in.
 
 ## Storage: SQLite or PostgreSQL — both free, both MIT
 

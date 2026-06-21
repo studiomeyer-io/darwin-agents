@@ -32,7 +32,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { runAgent, loadConfig, writer, critic } from '../src/index.js';
+import { runAgent, loadConfig, writer, critic, parseCriticScore } from '../src/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
 import type { AgentDefinition, DarwinConfig } from '../src/index.js';
 
@@ -63,15 +63,13 @@ const v2Prompt = readFileSync(join(HERE, 'prompts/writer-v2-evolved.txt'), 'utf-
 const allTasks = JSON.parse(readFileSync(join(HERE, 'seed-tasks.json'), 'utf-8')) as SeedTask[];
 const tasks = QUICK ? allTasks.slice(0, 1) : allTasks;
 
-/** Parse a 1–10 critic score from its output (mirrors the CLI's run command). */
+/**
+ * Parse a 1–10 critic score from its output. Delegates to the shared
+ * {@link parseCriticScore} so the benchmark and the CLI's run command extract
+ * scores identically (===SCORE===, N/10, "N out of 10", "rating: N", …).
+ */
 function parseScore(out: string): number | null {
-  const primary = out.match(/===SCORE===\s*(\d+(?:\.\d+)?)/);
-  let score = primary ? parseFloat(primary[1]!) : null;
-  if (score === null) {
-    const fallback = out.match(/\b(\d+(?:\.\d+)?)\s*\/\s*10\b/);
-    if (fallback) score = parseFloat(fallback[1]!);
-  }
-  return score === null ? null : Math.max(1, Math.min(10, score));
+  return parseCriticScore(out);
 }
 
 /** Run the writer with `promptText` on `task` once, then score the output with the built-in critic. */

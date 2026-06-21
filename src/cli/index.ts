@@ -38,6 +38,12 @@ const HELP = `
     darwin run analyst --path ./src
     darwin status researcher
     darwin evolve researcher --enable
+    darwin evolve researcher --force
+
+  Evolve flags:
+    --enable / --disable  Persistently turn self-evolution on/off for an agent
+    --reset               Reset the agent back to its v1 prompt
+    --force               Force one optimization cycle now (needs >=1 prior run)
 
   Options:
     --task-type <type>    Categorize the task (tech, webdesign, market, general)
@@ -46,6 +52,13 @@ const HELP = `
     --model <model>       Override LLM model
     --verbose             Show detailed output
     --help                Show this help
+
+  Advanced evolution flags (run + evolve; persisted by evolve):
+    --gepa / --no-gepa            GEPA reflective optimizer
+    --merge / --no-merge          GEPA system-aware merge
+    --pareto-gate / --no-pareto-gate   multi-objective A/B activation gate
+    --coverage / --no-coverage    instance-wise coverage selection
+    --reflection-model <id>       stronger reflection model for GEPA
 `;
 
 async function main(): Promise<void> {

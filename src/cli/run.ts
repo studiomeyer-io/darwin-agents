@@ -14,6 +14,7 @@ import type { LLMProvider, ProviderConfig } from '../providers/types.js';
 import type { AgentDefinition, DarwinConfig, MemoryProvider, PromptVersion } from '../types.js';
 import { resolveEvolutionEnabled } from '../evolution/enabled-state.js';
 import { parseCriticScore } from '../evolution/parse-score.js';
+import { checkCriticFamilies, crossFamilyRequired, singleFamilyHint } from '../evolution/critic-families.js';
 import { resolveEvolutionConfig } from '../evolution/enabled-state.js';
 import { buildEvolutionLoop } from '../evolution/build-loop.js';
 import { isEvolutionConfigFlag, applyEvolutionFlag } from './evolution-flags.js';
@@ -25,6 +26,8 @@ interface CriticProviderInfo {
   provider?: LLMProvider;
   model: string;
   label: string;
+  /** Model family (e.g. 'anthropic', 'openai') — drives the cross-family bias check. */
+  family: string;
 }
 
 /**
@@ -43,7 +46,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
 
   // Initialize all critics with CLI default
   for (const { name } of prompts) {
-    defaults[name] = { model: 'claude-sonnet-4-6', label: 'claude-cli' };
+    defaults[name] = { model: 'claude-sonnet-4-6', label: 'claude-cli', family: 'anthropic' };
   }
 
   const criticNames = prompts.map(p => p.name);
@@ -56,6 +59,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
         provider: openaiProvider,
         model: 'gpt-5.4',
         label: 'openai/gpt-5.4',
+        family: 'openai',
       };
     } catch {
       // No valid key — stay on Claude CLI
@@ -70,6 +74,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
         provider: anthropicProvider,
         model: 'claude-sonnet-4-6',
         label: 'anthropic-api',
+        family: 'anthropic',
       };
     } catch {
       // No valid key — stay on CLI
@@ -311,6 +316,20 @@ async function runCommandInner(
     if (evaluatorName === 'multi-critic') {
       // ── Multi-Critic Mode — Multi-Model ───────────
       const criticProviders = resolveCriticProviders(agent.name);
+
+      // Cross-family bias check: if every critic collapsed onto a single model
+      // family (e.g. only a Claude key present, so claude-cli + anthropic-api),
+      // the LLM-as-judge diversity guarantee is gone. Warn by default; hard-fail
+      // when DARWIN_REQUIRE_CROSS_FAMILY is set (CI / strict setups).
+      const familyCheck = checkCriticFamilies(criticProviders);
+      if (familyCheck.singleFamily) {
+        const hint = singleFamilyHint(familyCheck);
+        if (crossFamilyRequired()) {
+          throw new Error(`[darwin] DARWIN_REQUIRE_CROSS_FAMILY is set. ${hint}`);
+        }
+        console.warn(`[darwin] ⚠  ${hint}`);
+      }
+
       const providerLabels = Object.entries(criticProviders)
         .map(([name, info]) => `${name}→${info.label}`)
         .join(', ');

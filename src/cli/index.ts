@@ -15,6 +15,7 @@ import { statusCommand } from './status.js';
 import { evolveCommand } from './evolve.js';
 import { initCommand } from './init.js';
 import { createCommand } from './create.js';
+import { canaryCommand } from './canary.js';
 
 const HELP = `
   darwin — AI agents that improve themselves.
@@ -22,6 +23,7 @@ const HELP = `
   Usage:
     darwin run <agent> "task"     Run an agent on a task
     darwin status [agent]        Show evolution status & metrics
+    darwin canary <agent>        Check for behavioural drift vs a frozen baseline
     darwin evolve <agent>        Manage evolution settings
     darwin create <name>         Scaffold a new agent
     darwin init                  Initialize darwin in current project
@@ -78,6 +80,9 @@ async function main(): Promise<void> {
         break;
       case 'status':
         await statusCommand(args.slice(1));
+        break;
+      case 'canary':
+        await canaryCommand(args.slice(1));
         break;
       case 'evolve':
         await evolveCommand(args.slice(1));

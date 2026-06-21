@@ -148,3 +148,26 @@ export {
   type MsprtOptions,
   type HoeffdingOptions,
 } from './evolution/sequential.js';
+
+// V0.9.0 — Validate-by-Reproduce drift-detection canary (S1376 Phase 2 A5).
+// Pure, tolerance-based trajectory comparison (unordered tool-set Jaccard +
+// ordered sequence similarity + turn-ratio + error-rate). Catches behavioural
+// drift the A/B quality gate misses. Exported so consumers can run the same
+// drift check on their own captured trajectories.
+export {
+  toolSequence,
+  toolSet,
+  jaccard,
+  sequenceSimilarity,
+  errorRate,
+  compareTrajectory,
+  evaluateCanary,
+  runCanaryOverExperiments,
+  type CanaryThresholds,
+  type TrajectoryComparison,
+  type CanaryOptions,
+  type CanaryResult,
+  type CanaryStatus,
+  type CanaryReport,
+  type RunCanaryOptions,
+} from './evolution/canary.js';

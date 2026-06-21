@@ -2,6 +2,68 @@
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-21
+
+### Added
+
+- **Validate-by-reproduce drift-detection canary** (Phase 2 A5) — new
+  `src/evolution/canary.ts` + a `darwin canary <agent>` command. The A/B gate
+  guards prompt *quality*; the canary guards *behaviour*. It compares an agent's
+  recent execution trajectories (captured in A1) against a frozen baseline using
+  tolerance-based metrics — unordered tool-set Jaccard, ordered tool-sequence
+  similarity, turn-count ratio, error-rate delta — and flags drift the score can
+  miss (a model update or a broken tool changing *how* the agent works while the
+  quality score stays flat). Exact-hash equivalence is deliberately avoided (LLM
+  runs are non-deterministic). Drift requires a *pattern* (default ≥2 of N runs),
+  and the baseline is pinned to the active prompt version so an intentional
+  evolution reports `insufficient-data` (re-baseline) rather than a false alarm.
+  Pure and zero-dep; `--json` + `--exit-on-drift` for CI. The metrics and the
+  `runCanaryOverExperiments` orchestrator are exported from the package root so
+  consumers can run the same check on their own captured trajectories.
+
+- **Cross-family critic diversity check** (`src/evolution/critic-families.ts`).
+  Multi-critic evaluation spreads critics across model families to reduce
+  LLM-as-judge bias — but only when more than one provider key is present.
+  Otherwise all three critics collapse onto a single family (`claude-cli` and
+  `anthropic-api` are the *same* family, differing only in latency) with no
+  signal to the operator. The run path now warns when the critics share one
+  family, and hard-fails when `DARWIN_REQUIRE_CROSS_FAMILY` is set (CI / strict
+  setups). Default behaviour is unchanged apart from the new warning.
+
+## [0.8.0] — 2026-06-21
+
+**Evolution wired end-to-end through the CLI, plus three correctness fixes.** The
+v0.7 evolution surfaces existed but the `darwin evolve` command couldn't fully
+drive them; this release closes that gap and hardens score parsing. The
+automatic loop is behaviour-preserving — the gated path still passes the
+existing loop/GEPA suites unchanged.
+
+### Added
+
+- **`darwin evolve <agent> --force`** now runs the loop's real
+  variant-generation + A/B-start path on demand (`DarwinLoop.forceEvolve()`),
+  bypassing the automatic "enough runs / actionable patterns / data quality"
+  gates while still refusing the impossible cases (no active prompt, no recorded
+  experiments, an A/B test already running). It was previously a stub that
+  printed "not yet available" while the help text advertised it.
+- **`src/evolution/build-loop.ts`** — shared loop wiring (legacy optimizer +
+  opt-in GEPA) used by both `cli/run.ts` and the new `--force` command.
+
+### Fixed
+
+- **`darwin evolve <agent> --enable|--disable` now persists.** The flag mutated
+  only the in-memory agent singleton, so it was lost on process exit and `darwin
+  run` read the static source default again. A new `DarwinState.evolutionEnabled`
+  override map (round-tripped by every backend's existing JSON state blob) is set
+  atomically by the evolve command and wins over the static default in the run
+  path. Persisting an enable on an agent with no evolution config is a no-op, not
+  a crash; the field is read defensively so pre-existing state rows keep their
+  prior behaviour. New shared helper `src/evolution/enabled-state.ts`.
+- **Robust critic-score parsing** via a shared `parseCriticScore` helper —
+  handles `===SCORE===`, `N/10`, "N out of 10", "rating: N", "I'd rate this N", …
+  (clamped 1–10). Previously only `===SCORE===` and a bare `N/10` were read,
+  silently dropping every other phrasing from evolution.
+
 ## [0.7.1] — 2026-06-20
 
 **Documentation honesty + a reproducible evolution benchmark.** No library code

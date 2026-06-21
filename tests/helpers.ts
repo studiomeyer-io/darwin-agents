@@ -63,6 +63,7 @@ export function createMockMemory(): MemoryProvider & {
       lastKnownGood: {} as Record<string, string>,
       consecutiveFailures: {} as Record<string, number>,
       experimentCounts: {} as Record<string, number>,
+      evolutionEnabled: {} as Record<string, boolean>,
     } as DarwinState,
     _learnings: [] as Learning[],
   };

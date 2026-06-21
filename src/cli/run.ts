@@ -19,6 +19,7 @@ import { loadNotificationConfig } from '../evolution/notifications.js';
 import { createProvider } from '../providers/index.js';
 import type { LLMProvider, ProviderConfig } from '../providers/types.js';
 import type { AgentDefinition, DarwinConfig, MemoryProvider, PromptVersion } from '../types.js';
+import { resolveEvolutionEnabled } from '../evolution/enabled-state.js';
 
 // ─── Multi-Model Critic Provider Resolution ─────────
 
@@ -207,11 +208,18 @@ async function runCommandInner(
   if (provider) console.log(`[darwin] Provider: ${provider.name}`);
   console.log('');
 
+  // Resolve the effective evolution-enabled flag ONCE from persisted state.
+  // `darwin evolve --enable/--disable` records the override in DarwinState; a
+  // persisted value wins over the agent definition's static default. Reading
+  // the static `agent.evolution?.enabled` directly (the v0.7.1 behaviour) lost
+  // the toggle across processes.
+  const preState = await memory.getState();
+  const evolutionEnabled = resolveEvolutionEnabled(agent, preState);
+
   // A/B test routing: check if there's an active test and pick a version
   let activePromptVersion = 'v1';
   let agentToRun = agent;
   {
-    const preState = await memory.getState();
     const abTest = preState.abTests[agent.name] ?? null;
     if (abTest) {
       // Round-robin: pick whichever version has fewer runs
@@ -280,7 +288,7 @@ async function runCommandInner(
 
   // Save experiment — tracker.recordExperiment() handles this for evolution-enabled agents.
   // Only save here for non-evolution agents to avoid double-save.
-  if (!agent.evolution?.enabled) {
+  if (!evolutionEnabled) {
     await memory.saveExperiment(result.experiment);
     await memory.updateState((state) => {
       state.experimentCounts[agent.name] = (state.experimentCounts[agent.name] ?? 0) + 1;
@@ -292,8 +300,8 @@ async function runCommandInner(
   }
 
   // Run critic evaluation (unless skipped)
-  if (!flags.noCritic && agent.name !== 'critic' && agent.name !== 'investigator-critic' && agent.name !== 'multi-critic' && agent.evolution?.enabled) {
-    const evaluatorName = agent.evolution.evaluator ?? 'critic';
+  if (!flags.noCritic && agent.name !== 'critic' && agent.name !== 'investigator-critic' && agent.name !== 'multi-critic' && evolutionEnabled) {
+    const evaluatorName = agent.evolution?.evaluator ?? 'critic';
 
     if (evaluatorName === 'multi-critic') {
       // ── Multi-Critic Mode — Multi-Model ───────────
@@ -386,7 +394,7 @@ async function runCommandInner(
   }
 
   // Darwin evolution loop (unless skipped)
-  if (!flags.noEvolve && agent.evolution?.enabled) {
+  if (!flags.noEvolve && evolutionEnabled) {
     const tracker = new ExperimentTracker(memory);
     const patterns = new PatternDetector(memory);
     const safety = new SafetyGate();

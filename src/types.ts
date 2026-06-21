@@ -403,6 +403,15 @@ export interface DarwinState {
   consecutiveFailures: Record<string, number>;
   /** Total experiment count per agent */
   experimentCounts: Record<string, number>;
+  /**
+   * Persisted enable/disable override per agent, set by `darwin evolve
+   * <agent> --enable|--disable`. When an entry exists it WINS over the
+   * agent definition's static `evolution.enabled` default, so the flag
+   * survives across processes (the in-memory agent singleton does not).
+   * Optional + read defensively: state rows written before this field
+   * existed simply lack the key, in which case the static default applies.
+   */
+  evolutionEnabled?: Record<string, boolean>;
 }
 
 // ─── Patterns ───────────────────────────────────────

@@ -13,6 +13,7 @@
 import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
+import { resolveEvolutionEnabled, setEvolutionEnabled } from '../evolution/enabled-state.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
   const agentName = args[0];
@@ -31,15 +32,21 @@ export async function evolveCommand(args: string[]): Promise<void> {
   await memory.init();
 
   if (flags.includes('--enable')) {
+    // Persist the override into DarwinState so it survives process exit.
+    // (Mutating the in-memory singleton alone was the v0.7.1 bug — the flag
+    // was gone the moment the CLI process ended and `darwin run` read the
+    // static source default again.)
     if (agent.evolution) {
       agent.evolution.enabled = true;
     }
+    await setEvolutionEnabled(memory, agentName, true);
     console.log(`[darwin] Evolution ENABLED for ${agentName}`);
     console.log(`[darwin] The critic will evaluate runs and Darwin will optimize prompts automatically.`);
   } else if (flags.includes('--disable')) {
     if (agent.evolution) {
       agent.evolution.enabled = false;
     }
+    await setEvolutionEnabled(memory, agentName, false);
     console.log(`[darwin] Evolution DISABLED for ${agentName}`);
   } else if (flags.includes('--reset')) {
     const state = await memory.getState();
@@ -57,7 +64,9 @@ export async function evolveCommand(args: string[]): Promise<void> {
     const version = state.activeVersions[agentName] ?? 'v1';
     const runs = state.experimentCounts[agentName] ?? 0;
     const abTest = state.abTests[agentName];
-    const enabled = agent.evolution?.enabled ?? false;
+    // Reflect the PERSISTED override (set by --enable/--disable) so `darwin
+    // evolve <agent>` reports the same enabled-state `darwin run` will act on.
+    const enabled = resolveEvolutionEnabled(agent, state);
 
     console.log(`\n[darwin] Evolution for ${agentName}:`);
     console.log(`  Enabled:   ${enabled ? 'yes' : 'no'}`);

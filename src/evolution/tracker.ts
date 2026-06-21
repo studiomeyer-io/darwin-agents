@@ -298,4 +298,48 @@ export class ExperimentTracker {
       durationMs: filtered.reduce((s, e) => s + e.metrics.durationMs, 0) / n,
     };
   }
+
+  /**
+   * v0.7.0 — Per-task-type composite scores for a specific agent + prompt
+   * version, keyed by `taskType`. This is the `perKeyScores` map GEPA Algorithm
+   * 2 coverage selection consumes (one "key" per task type, higher is better):
+   * it lets the loop prefer the prompt version that performs best across the
+   * MOST DIFFERENT task types, not just the highest single average.
+   *
+   * Each value is the mean composite (same {@link getCompositeScore} used
+   * everywhere else) over that version's experiments of that task type. Returns
+   * `{}` when the version has no experiments. `since` filters to a time window
+   * exactly like the sibling helpers.
+   */
+  async getPerKeyScoresByCategory(
+    agentName: string,
+    version: string,
+    weights: MetricWeights = DEFAULT_WEIGHTS,
+    since?: string,
+  ): Promise<Record<string, number>> {
+    const experiments = await this.memory.loadExperiments(agentName);
+    let filtered = experiments.filter((e) => e.promptVersion === version);
+
+    if (since) {
+      filtered = filtered.filter((e) => e.startedAt >= since);
+    }
+
+    if (filtered.length === 0) {
+      return {};
+    }
+
+    const sum = new Map<string, number>();
+    const count = new Map<string, number>();
+    for (const exp of filtered) {
+      const key = exp.taskType || 'general';
+      sum.set(key, (sum.get(key) ?? 0) + this.getCompositeScore(exp, weights));
+      count.set(key, (count.get(key) ?? 0) + 1);
+    }
+
+    const perKey: Record<string, number> = {};
+    for (const [key, total] of sum) {
+      perKey[key] = total / (count.get(key) ?? 1);
+    }
+    return perKey;
+  }
 }

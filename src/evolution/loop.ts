@@ -750,6 +750,20 @@ export class DarwinLoop {
       }
     }
 
+    // v0.7.0: GEPA Algorithm 2 instance-wise coverage selection (opt-in via
+    // evolution.useCoverage). Pick the prompt VERSION to reflect from by
+    // per-task-type coverage breadth — the version that wins on the most
+    // DIFFERENT task types — instead of always reflecting from the single
+    // currently-active prompt. Falls back to the active prompt when fewer than
+    // two versions carry per-task-type data (selectCoverageParent → null).
+    let parentPrompt = currentPrompt;
+    if (this.agent?.evolution?.useCoverage === true) {
+      const coverageParent = await this.selectCoverageParent(agentName);
+      if (coverageParent !== null) {
+        parentPrompt = coverageParent;
+      }
+    }
+
     // v0.7.0: pull the configurable feedback window (default 15, was 5).
     let feedbacks = await this.getReflectiveFeedback(agentName, this.feedbackWindow());
     // v0.7.0: optional epoch-shuffled minibatch — reflect on a focused, rotating
@@ -768,7 +782,7 @@ export class DarwinLoop {
 
     let mutated: string;
     try {
-      const variants = await this.gepa.generate(currentPrompt, feedbacks, {
+      const variants = await this.gepa.generate(parentPrompt, feedbacks, {
         numVariants: 1,
         feedbackStrategy: 'single',
       });
@@ -876,6 +890,48 @@ export class DarwinLoop {
       console.warn(`[darwin] GEPA merge failed for "${agentName}", falling back to reflective: ${reason}`);
       return null;
     }
+  }
+
+  /**
+   * v0.7.0 — GEPA Algorithm 2 instance-wise coverage selection.
+   *
+   * Builds a {@link ScoredVariant} per RUN prompt-version (its averaged
+   * objective vector + its per-task-type composite map from {@link
+   * ExperimentTracker.getPerKeyScoresByCategory}), then asks the
+   * {@link GepaOptimizer#nextGeneration} coverage path to pick the survivor
+   * that wins on the MOST DIFFERENT task types. Returns that survivor's prompt
+   * text — the version to reflect the next challenger from.
+   *
+   * Returns `null` (→ caller reflects from the active prompt as before) when no
+   * optimizer is wired or fewer than two versions carry per-task-type data —
+   * coverage selection is meaningless with a single covered version. This is
+   * the ONLINE adaptation: it selects the reflection PARENT among already-run
+   * versions by their real per-task-type scores. (Per-challenger coverage of
+   * unrun candidates needs the offline scored-pool path and is out of scope.)
+   */
+  private async selectCoverageParent(agentName: string): Promise<string | null> {
+    if (!this.gepa) return null;
+
+    const versions = await this.memory.getAllPromptVersions(agentName);
+    const scored: ScoredVariant[] = [];
+    for (const v of versions) {
+      if (!v.promptText) continue;
+      const metrics = await this.tracker.getAverageMetrics(agentName, v.version);
+      if (Object.keys(metrics).length === 0) continue; // no runs for this version
+      const perKeyScores = await this.tracker.getPerKeyScoresByCategory(agentName, v.version);
+      if (Object.keys(perKeyScores).length === 0) continue;
+      scored.push({ id: v.version, prompt: v.promptText, metrics, perKeyScores });
+    }
+    // Coverage selection needs ≥2 covered versions to be meaningful.
+    if (scored.length < 2) return null;
+
+    const survivors = this.gepa.nextGeneration(scored, {
+      objectives: DARWIN_DEFAULT_OBJECTIVES as ReadonlyArray<ParetoObjective<Record<string, number>>>,
+      maxCarry: 1,
+      useCoverage: true,
+    });
+    const winner = survivors[0];
+    return winner && winner.prompt.length > 0 ? winner.prompt : null;
   }
 
   /**

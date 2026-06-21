@@ -20,6 +20,7 @@ import { createProvider } from '../providers/index.js';
 import type { LLMProvider, ProviderConfig } from '../providers/types.js';
 import type { AgentDefinition, DarwinConfig, MemoryProvider, PromptVersion } from '../types.js';
 import { resolveEvolutionEnabled } from '../evolution/enabled-state.js';
+import { parseCriticScore } from '../evolution/parse-score.js';
 
 // ─── Multi-Model Critic Provider Resolution ─────────
 
@@ -367,18 +368,11 @@ async function runCommandInner(
         autonomous: true,
       });
 
-      // Parse critic score (primary: ===SCORE=== format, fallback: "X/10" pattern)
-      const scoreMatch = criticResult.output.match(/===SCORE===\s*(\d+(?:\.\d+)?)/);
-      let score = scoreMatch ? parseFloat(scoreMatch[1]) : null;
-      if (score === null) {
-        const fallback = criticResult.output.match(/\b(\d+(?:\.\d+)?)\s*\/\s*10\b/);
-        if (fallback) {
-          score = parseFloat(fallback[1]);
-        }
-      }
-      if (score !== null) {
-        score = Math.max(1, Math.min(10, score));
-      }
+      // Parse critic score with the shared robust extractor (handles
+      // ===SCORE===, N/10, "N out of 10", "rating: N", "I'd rate this N", …;
+      // already clamped to 1–10). Previously only ===SCORE=== + a bare N/10
+      // were handled, silently dropping every other phrasing from evolution.
+      const score = parseCriticScore(criticResult.output);
 
       if (score !== null) {
         result.experiment.metrics.qualityScore = score;

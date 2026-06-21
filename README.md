@@ -329,6 +329,11 @@ Actual numbers from **419 runs across 19 agents** in our internal `darwin_db` �
 not synthetic benchmarks. "Success" means the run completed and produced valid
 output (100% across 419 runs); "quality" is the critic's separate 1–10 score.
 
+> Those 19 are our own internal + custom agents; the package ships **8 built-in
+> agents** by default (`writer`, `researcher`, `critic`, `analyst`,
+> `investigator`, `investigator-critic`, `marketing`, `blog-writer`) — the table
+> below shows the four with enough runs to report.
+
 ```
 Agent          Runs   Avg quality
 writer          172   6.94 / 10
@@ -402,8 +407,10 @@ darwin run analyst --path ./src    # Analyze a codebase
 darwin status                      # Overview of all agents
 darwin status writer               # Detailed agent stats + evolution history
 
-darwin evolve writer --enable      # Enable self-evolution
+darwin evolve writer --enable      # Enable self-evolution (persisted)
+darwin evolve writer --disable     # Disable self-evolution (persisted)
 darwin evolve writer --reset       # Reset to v1
+darwin evolve writer --force       # Force one optimization cycle now
 
 darwin create my-agent             # Scaffold a new agent
 ```

@@ -28,11 +28,17 @@ provider the runs go through your Claude subscription (no per-token billing).
 Set `DARWIN_USE_API_KEY=1` to bill against an `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`
 instead.
 
+This harness is an intentional batch, so for its own run it disables Darwin's
+per-process budget caps (the default 100-run / 1-hour guard, sized for a single
+agent session) via `setMaxRunsPerProcess(0)` / `setMaxRunWallMs(0)`. Your own
+agents keep the caps.
+
 ## Honest caveats
 
-- **Small samples are noisy.** Five tasks is a harness, not a significance test.
-  For a rigorous comparison run the real loop with `confidenceMethod: 'msprt'`
-  on a `SafetyGate` (see the main README) and many more runs.
+- **Small samples are noisy.** Ten tasks averaged over a few runs each is a
+  harness, not a significance test. For a rigorous comparison run the real loop
+  with `confidenceMethod: 'msprt'` on a `SafetyGate` (see the main README) and
+  many more runs.
 - **The critic is an LLM judge.** It carries self-preference bias; that's a known
   limitation, not a benchmark artifact. Point the critic at a different model
   family for a cleaner read.

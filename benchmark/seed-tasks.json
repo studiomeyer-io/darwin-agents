@@ -23,5 +23,30 @@
     "id": "market-linkedin-hooks",
     "type": "market",
     "task": "Write three distinct LinkedIn opening lines for a post about why most AI agents never improve after they ship. Each a different angle. No emojis."
+  },
+  {
+    "id": "tech-indexing",
+    "type": "tech",
+    "task": "Explain the trade-off of adding a database index: what it speeds up, what it slows down, and one sign you have too many. Concrete, under 220 words."
+  },
+  {
+    "id": "market-cold-email",
+    "type": "market",
+    "task": "Write a short cold email to a SaaS founder offering a one-page audit of their onboarding flow. Specific, no flattery, one clear ask. Max 120 words."
+  },
+  {
+    "id": "webdesign-404",
+    "type": "webdesign",
+    "task": "Write the copy for a 404 page on a small studio's website. One headline, one or two lines, and a link label back to safety. Warm, not cute-overload."
+  },
+  {
+    "id": "business-explain-exec",
+    "type": "general",
+    "task": "Explain what an API rate limit is to a non-technical executive deciding a budget, using one everyday analogy and why it matters for cost. Under 180 words."
+  },
+  {
+    "id": "tech-cache-invalidation",
+    "type": "tech",
+    "task": "Explain cache invalidation: why it is hard, two common strategies (TTL vs event-based), and when to pick each. One concrete example. Under 230 words."
   }
 ]

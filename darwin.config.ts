@@ -18,23 +18,18 @@ const config: Partial<DarwinConfig> = {
     safetyGate: true,
   },
 
+  // Every entry here must be a real, npx-resolvable MCP server. Code analysis
+  // (symbols, callers) is handled by Claude Code's built-in Read/Glob/Grep
+  // tools, so no extra server is needed for it — add your own below as required.
   mcp: {
     'tavily': {
       command: 'npx',
-      args: ['-y', '@tavily/mcp'],
+      args: ['-y', 'tavily-mcp@latest'],
       env: { TAVILY_API_KEY: process.env.TAVILY_API_KEY ?? '' },
-    },
-    'code-pathfinder': {
-      command: 'npx',
-      args: ['-y', '@anthropic/code-pathfinder-mcp'],
     },
     'context7': {
       command: 'npx',
       args: ['-y', '@upstash/context7-mcp'],
-    },
-    'context': {
-      command: 'npx',
-      args: ['-y', '@nicholasarner/context-mcp'],
     },
   },
 };

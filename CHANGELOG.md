@@ -2,6 +2,57 @@
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-03
+
+Two research-driven, opt-in evolution surfaces — a new challenger *source*
+(demo injection) and a new parent-*selection* strategy for the existing
+reflective challenger — both validated against the current state of the field
+(GEPA upstream docs, DSPy SIMBA) before a line was written. Default behaviour
+is byte-for-byte unchanged with the flags off.
+
+### Added
+
+- **SIMBA-style demo injection** (`src/evolution/demos.ts` + `evolution.useDemos`).
+  DSPy's SIMBA optimizer improves programs two ways: appending self-reflective
+  *rules* (Darwin's reflector already covers that ground) and appending
+  successful past examples as *demonstrations*. This release adapts the second
+  strategy to the online loop: on every `demoEveryK`-th evolution cycle (default
+  4) the loop harvests the agent's own highest-scoring past runs (score ≥
+  `demoScoreThreshold`, default 8; at most one demo per task type for
+  diversity; `maxDemos` cap, default 2) and appends them as a marker-delimited
+  "Demonstrations" section. The demo-augmented prompt is a normal challenger —
+  same alignment guard, same A/B test, same safety gate; if demos don't help
+  this agent, the incumbent wins. **Zero LLM cost** (pure selection +
+  rendering on data Darwin already persists), works with or without `useGepa`,
+  idempotent via `<!-- darwin:demos:start/end -->` markers (a later cycle
+  *refreshes* the section, never stacks a second one). Pure helpers
+  (`selectDemoCandidates` / `buildDemoSection` / `applyDemoSection` /
+  `stripDemoSection`) are exported from the package root. CLI: `--demos` /
+  `--no-demos`.
+
+- **Parent-selection strategies** (`src/evolution/selection.ts` +
+  `evolution.candidateSelection`) — GEPA `candidate_selection_strategy` parity
+  for the online loop. Historically the loop always reflected from the
+  currently-active prompt (a hill-climb that can sit on a local optimum).
+  Opt-in strategies pick the reflection parent from the agent's *scored
+  version history* instead: `'best'` (GEPA `current_best` — highest
+  scalarised composite), `'pareto'` (GEPA default — uniform sample from the
+  non-dominated front, keeping lineages alive that win on different
+  objectives), `'epsilon-greedy'` (explore with probability
+  `explorationEpsilon`, default 0.1, exploit otherwise). The RNG is
+  injectable via the new `DarwinLoopDeps.rng` for deterministic tests.
+  Precedence: `useCoverage` (GEPA Algorithm 2, the more specific selector)
+  wins when it finds a coverage parent. Only consulted when `useGepa` is on.
+  CLI: `--candidate-selection <active|best|pareto|epsilon-greedy>`.
+
+### Internal
+
+- `tryMergeVariant`'s version-history scoring extracted into a shared
+  `buildScoredHistory` (used by merge *and* parent selection) — behaviour
+  unchanged.
+- `package.json` now lists Claude (Anthropic) as a contributor — see the
+  README's new **Credits** section for how this project is actually built.
+
 ## [0.9.0] — 2026-06-21
 
 ### Added

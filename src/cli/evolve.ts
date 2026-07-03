@@ -17,6 +17,8 @@
  *   --pareto-gate / --no-pareto-gate   multi-objective A/B activation gate
  *   --coverage / --no-coverage    instance-wise coverage selection
  *   --reflection-model <id>       stronger reflection model for GEPA
+ *   --demos / --no-demos          SIMBA-style demo injection (v0.10)
+ *   --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
  */
 
 import { createMemory } from '../memory/index.js';
@@ -30,7 +32,7 @@ import {
 } from '../evolution/enabled-state.js';
 import { buildEvolutionLoop } from '../evolution/build-loop.js';
 import { parseEvolutionConfigFlags, hasAnyEvolutionFlag } from './evolution-flags.js';
-import type { AgentDefinition, EvolutionConfig } from '../types.js';
+import type { AgentDefinition, EvolutionConfig, EvolutionConfigOverride } from '../types.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
   const agentName = args[0];
@@ -133,13 +135,15 @@ export async function evolveCommand(args: string[]): Promise<void> {
 }
 
 /** One-line summary of which advanced flags an override set (for confirmation). */
-function describeOverride(o: { useGepa?: boolean; useMerge?: boolean; paretoGate?: boolean; useCoverage?: boolean; reflectionModel?: string }): string {
+function describeOverride(o: EvolutionConfigOverride): string {
   const parts: string[] = [];
   if (o.useGepa !== undefined) parts.push(`gepa=${o.useGepa}`);
   if (o.useMerge !== undefined) parts.push(`merge=${o.useMerge}`);
   if (o.paretoGate !== undefined) parts.push(`paretoGate=${o.paretoGate}`);
   if (o.useCoverage !== undefined) parts.push(`coverage=${o.useCoverage}`);
   if (o.reflectionModel !== undefined) parts.push(`reflectionModel=${o.reflectionModel}`);
+  if (o.useDemos !== undefined) parts.push(`demos=${o.useDemos}`);
+  if (o.candidateSelection !== undefined) parts.push(`candidateSelection=${o.candidateSelection}`);
   return parts.length > 0 ? parts.join(', ') : '(none)';
 }
 
@@ -151,7 +155,11 @@ function describeConfig(evo: EvolutionConfig | undefined): string {
     `merge=${evo.useMerge ?? false}`,
     `paretoGate=${evo.paretoGate ?? false}`,
     `coverage=${evo.useCoverage ?? false}`,
+    `demos=${evo.useDemos ?? false}`,
   ];
   if (evo.reflectionModel) parts.push(`reflectionModel=${evo.reflectionModel}`);
+  if (evo.candidateSelection && evo.candidateSelection !== 'active') {
+    parts.push(`candidateSelection=${evo.candidateSelection}`);
+  }
   return parts.join(', ');
 }

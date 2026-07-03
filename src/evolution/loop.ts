@@ -30,6 +30,8 @@ import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
 import { checkAlignmentPreservation, checkAlignmentPreservationSemantic, type EmbedFn } from './alignment.js';
 import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
+import { selectDemoCandidates, buildDemoSection, applyDemoSection } from './demos.js';
+import { selectParentVariant } from './selection.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -77,6 +79,13 @@ interface DarwinLoopDeps {
    * (only used when `embed` is set). Default 0.82.
    */
   alignmentSimilarityThreshold?: number;
+  /**
+   * v0.10.0 — Random source in [0, 1) for the stochastic parent-selection
+   * strategies (`candidateSelection: 'pareto' | 'epsilon-greedy'`). Injected
+   * for deterministic tests; default `Math.random`. Never consulted on the
+   * default `'active'` path.
+   */
+  rng?: () => number;
 }
 
 // ─── Validation Constants ─────────────────────────────
@@ -100,6 +109,7 @@ export class DarwinLoop {
   private gepa?: GepaOptimizer;
   private embed?: EmbedFn;
   private alignmentSimilarityThreshold?: number;
+  private rng?: () => number;
 
   constructor(deps: DarwinLoopDeps) {
     this.memory = deps.memory;
@@ -112,6 +122,7 @@ export class DarwinLoop {
     this.gepa = deps.gepa;
     this.embed = deps.embed;
     this.alignmentSimilarityThreshold = deps.alignmentSimilarityThreshold;
+    this.rng = deps.rng;
   }
 
   /**
@@ -366,8 +377,37 @@ export class DarwinLoop {
     // guard — in either case we fall back to the legacy meta-prompt
     // optimizer so the loop never stalls.
     let newPromptText: string | null = null;
-    let generatedBy: 'gepa' | 'merge' | 'legacy' = 'legacy';
-    if (this.agent?.evolution?.useGepa === true && this.gepa) {
+    let generatedBy: 'gepa' | 'merge' | 'demos' | 'legacy' = 'legacy';
+
+    // ── v0.10.0: SIMBA-style demo injection (opt-in, zero LLM cost) ──
+    // On every demoEveryK-th cycle, build a challenger by appending (or
+    // refreshing) a "Demonstrations" section harvested from the agent's own
+    // highest-scoring past runs. Independent of useGepa — no reflector is
+    // involved. The demo prompt runs the same alignment guard and enters the
+    // same A/B test as any mutation; when demos don't help, the incumbent
+    // wins. When the demo set is unchanged since the last injection the path
+    // yields no challenger (no-op) and falls through to GEPA/legacy.
+    if (this.agent?.evolution?.useDemos === true) {
+      const epoch = this.versionInt(activePrompt.version);
+      if (epoch > 0 && epoch % this.demoEveryK() === 0) {
+        const demoPrompt = await this.tryDemoVariant(agent, activePrompt.promptText);
+        if (demoPrompt !== null) {
+          const guarded = await this.runAlignmentGuard(activePrompt.promptText, demoPrompt);
+          if (guarded !== null) {
+            newPromptText = guarded;
+            generatedBy = 'demos';
+          } else {
+            // Mirrors the merge-path breadcrumb: a consistently guard-failing
+            // demo section should be visible, not silently skipped forever.
+            console.warn(
+              `[darwin] demo variant for "${agent}" failed the alignment guard, falling through.`,
+            );
+          }
+        }
+      }
+    }
+
+    if (newPromptText === null && this.agent?.evolution?.useGepa === true && this.gepa) {
       // Epoch = the integer of the active prompt version (v1→1, v12→12). It
       // advances by one each evolution cycle, so the epoch-shuffled minibatch
       // rotates which feedback subset the reflector sees per cycle, and the
@@ -398,10 +438,11 @@ export class DarwinLoop {
       promptText: newPromptText,
       createdAt: new Date().toISOString(),
       parentVersion: activePrompt.version,
-      // Only tag the change reason with the generator when GEPA was opted in —
-      // keeps the stored `changeReason` byte-for-byte identical for legacy-only
+      // Only tag the change reason with the generator when a non-legacy
+      // challenger source was opted in (GEPA v0.6.0 / demos v0.10.0) — keeps
+      // the stored `changeReason` byte-for-byte identical for legacy-only
       // agents (v0.6.0 review Finding 8).
-      changeReason: this.agent?.evolution?.useGepa
+      changeReason: this.agent?.evolution?.useGepa || this.agent?.evolution?.useDemos
         ? `[${generatedBy}] ${this.buildChangeReason(detectedPatterns)}`
         : this.buildChangeReason(detectedPatterns),
       active: false, // Not active yet — going into A/B test
@@ -435,7 +476,9 @@ export class DarwinLoop {
     result.promptEvolved = true;
     result.abTestStarted = true;
     result.newVersion = newVersion;
-    const genLabel = this.agent?.evolution?.useGepa ? ` via ${generatedBy}` : '';
+    const genLabel = this.agent?.evolution?.useGepa || this.agent?.evolution?.useDemos
+      ? ` via ${generatedBy}`
+      : '';
     result.message = `New prompt ${newVersion} generated${genLabel}. A/B test started: ${activePrompt.version} vs ${newVersion} (minRuns: ${dynamicMinRuns}).`;
 
     // Notify via Telegram (non-blocking)
@@ -757,10 +800,32 @@ export class DarwinLoop {
     // currently-active prompt. Falls back to the active prompt when fewer than
     // two versions carry per-task-type data (selectCoverageParent → null).
     let parentPrompt = currentPrompt;
+    let parentChosen = false;
     if (this.agent?.evolution?.useCoverage === true) {
       const coverageParent = await this.selectCoverageParent(agentName);
       if (coverageParent !== null) {
         parentPrompt = coverageParent;
+        parentChosen = true;
+      }
+    }
+
+    // v0.10.0: GEPA candidate_selection_strategy parity (opt-in via
+    // evolution.candidateSelection). Pick the reflection parent from the
+    // agent's SCORED version history — 'best' (current_best), 'pareto'
+    // (uniform sample from the non-dominated front), or 'epsilon-greedy'
+    // (explore/exploit). Coverage selection (the more specific GEPA
+    // Algorithm 2 selector) takes precedence when it found a parent; this
+    // strategy is the fallback for that cycle. 'active'/unset keeps the
+    // historical reflect-from-active-prompt behaviour byte-for-byte.
+    const strategy = this.agent?.evolution?.candidateSelection;
+    if (!parentChosen && strategy !== undefined && strategy !== 'active') {
+      const scored = await this.buildScoredHistory(agentName);
+      const chosen = selectParentVariant(scored, strategy, {
+        epsilon: this.agent?.evolution?.explorationEpsilon,
+        rng: this.rng,
+      });
+      if (chosen !== null) {
+        parentPrompt = chosen.prompt;
       }
     }
 
@@ -837,6 +902,62 @@ export class DarwinLoop {
   }
 
   /**
+   * v0.10.0 — Demo-injection cadence (every K-th cycle). Default 4, clamped
+   * ≥ 1. Deliberately offset from the merge default (3) so the two
+   * non-reflective challenger sources don't collide on the same cycles.
+   */
+  private demoEveryK(): number {
+    const k = this.agent?.evolution?.demoEveryK;
+    if (typeof k === 'number' && Number.isFinite(k) && k >= 1) return Math.floor(k);
+    return 4;
+  }
+
+  /**
+   * v0.10.0 — Build a SIMBA-style demo challenger: current prompt + a
+   * marker-delimited "Demonstrations" section harvested from this agent's
+   * highest-scoring past runs. Pure selection + rendering — no LLM call.
+   *
+   * Returns `null` (→ caller falls through to GEPA/legacy generation) when
+   * no run qualifies (score/threshold/length filters) or when the rendered
+   * demo set is byte-identical to what the prompt already carries — an A/B
+   * test of a version against itself would be pointless.
+   */
+  private async tryDemoVariant(agentName: string, currentPrompt: string): Promise<string | null> {
+    const experiments = await this.memory.loadExperiments(agentName);
+    const demos = selectDemoCandidates(experiments, {
+      maxDemos: this.agent?.evolution?.maxDemos,
+      scoreThreshold: this.agent?.evolution?.demoScoreThreshold,
+    });
+    if (demos.length === 0) return null;
+    const section = buildDemoSection(demos);
+    const withDemos = applyDemoSection(currentPrompt, section);
+    if (withDemos === currentPrompt) return null;
+    return withDemos;
+  }
+
+  /**
+   * v0.10.0 — Scored version history for parent selection AND merge: every
+   * prompt version that has text and at least one run's worth of averaged
+   * metrics, as {@link ScoredVariant}s. One getAverageMetrics
+   * (→ loadExperiments) call per version. O(N) backend round-trips, but N is
+   * the agent's prompt-version count (≤ ~20 in practice) and this only runs
+   * on selection/merge cadences, so it is cheap — same pattern handleABTest
+   * already uses for the Pareto gate. (Extracted from tryMergeVariant,
+   * behaviour unchanged.)
+   */
+  private async buildScoredHistory(agentName: string): Promise<ScoredVariant[]> {
+    const versions = await this.memory.getAllPromptVersions(agentName);
+    const scored: ScoredVariant[] = [];
+    for (const v of versions) {
+      if (!v.promptText) continue;
+      const metrics = await this.tracker.getAverageMetrics(agentName, v.version);
+      if (Object.keys(metrics).length === 0) continue; // no runs for this version
+      scored.push({ id: v.version, prompt: v.promptText, metrics });
+    }
+    return scored;
+  }
+
+  /**
    * v0.7.0 — GEPA system-aware MERGE (paper Appendix-D). Builds scored
    * variants from this agent's prompt-version history (each version's prompt
    * text + its averaged objective vector), takes the two best Pareto-front
@@ -852,18 +973,7 @@ export class DarwinLoop {
   private async tryMergeVariant(agentName: string): Promise<string | null> {
     if (!this.gepa) return null;
 
-    const versions = await this.memory.getAllPromptVersions(agentName);
-    const scored: ScoredVariant[] = [];
-    // One getAverageMetrics (→ loadExperiments) call per version. O(N) backend
-    // round-trips, but N is the agent's prompt-version count (≤ ~20 in
-    // practice) and this only runs on the merge cadence, so it is cheap — same
-    // pattern handleABTest already uses for the Pareto gate.
-    for (const v of versions) {
-      if (!v.promptText) continue;
-      const metrics = await this.tracker.getAverageMetrics(agentName, v.version);
-      if (Object.keys(metrics).length === 0) continue; // no runs for this version
-      scored.push({ id: v.version, prompt: v.promptText, metrics });
-    }
+    const scored = await this.buildScoredHistory(agentName);
     if (scored.length < 2) return null; // need two parents to merge
 
     // Two best Pareto-front members (distinct versions, scalarised tie-break).

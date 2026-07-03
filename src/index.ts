@@ -171,3 +171,36 @@ export {
   type CanaryReport,
   type RunCanaryOptions,
 } from './evolution/canary.js';
+
+// V0.10.0 — SIMBA-style demo injection (DSPy SIMBA "append_a_demo", adapted
+// to the online loop). Pure selection + rendering over the agent's own
+// highest-scoring past runs; the demo-augmented prompt is a normal challenger
+// (alignment guard + A/B test + safety gate). Zero LLM cost.
+export {
+  selectDemoCandidates,
+  buildDemoSection,
+  applyDemoSection,
+  stripDemoSection,
+  DEMO_SECTION_START,
+  DEMO_SECTION_END,
+  DEFAULT_MAX_DEMOS,
+  DEFAULT_DEMO_SCORE_THRESHOLD,
+  DEFAULT_DEMO_MIN_OUTPUT_CHARS,
+  DEFAULT_DEMO_TASK_CHARS,
+  DEFAULT_DEMO_OUTPUT_CHARS,
+  type DemoCandidate,
+  type DemoSelectionOptions,
+  type DemoRenderOptions,
+} from './evolution/demos.js';
+
+// V0.10.0 — GEPA candidate_selection_strategy parity for the online loop:
+// pick the reflection parent from the scored version history ('best' |
+// 'pareto' | 'epsilon-greedy') instead of always mutating the active prompt.
+// Injectable RNG for deterministic tests.
+export {
+  selectParentVariant,
+  DEFAULT_EXPLORATION_EPSILON,
+  type CandidateSelectionStrategy,
+  type SelectableVariant,
+  type ParentSelectionOptions,
+} from './evolution/selection.js';

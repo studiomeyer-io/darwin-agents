@@ -61,6 +61,8 @@ const HELP = `
     --pareto-gate / --no-pareto-gate   multi-objective A/B activation gate
     --coverage / --no-coverage    instance-wise coverage selection
     --reflection-model <id>       stronger reflection model for GEPA
+    --demos / --no-demos          SIMBA-style demo injection (v0.10)
+    --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
 `;
 
 async function main(): Promise<void> {

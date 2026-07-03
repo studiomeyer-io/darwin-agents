@@ -77,6 +77,8 @@ const OVERRIDE_KEYS = [
   'paretoGate',
   'useCoverage',
   'reflectionModel',
+  'useDemos',
+  'candidateSelection',
 ] as const;
 
 /**
@@ -85,11 +87,11 @@ const OVERRIDE_KEYS = [
  * ({@link DarwinState.evolutionConfigOverrides}) merged ON TOP, then any
  * in-this-process CLI override merged last (e.g. `darwin run … --gepa`).
  *
- * Only the five advanced flags are overridable; every other field
- * (`enabled`, `metrics`, `minRuns`, …) is taken verbatim from the static
- * config. Returns `undefined` when the agent has no `evolution` block AND no
- * persisted/CLI override would create one — overriding a flag on an agent that
- * never opted into evolution is meaningless.
+ * Only the advanced flags in {@link OVERRIDE_KEYS} are overridable; every
+ * other field (`enabled`, `metrics`, `minRuns`, …) is taken verbatim from the
+ * static config. Returns `undefined` when the agent has no `evolution` block
+ * AND no persisted/CLI override would create one — overriding a flag on an
+ * agent that never opted into evolution is meaningless.
  *
  * Read defensively: undefined override values are skipped so they never clobber
  * a static default with `undefined`.
@@ -120,6 +122,8 @@ export function resolveEvolutionConfig(
         // keep `any` out of the codebase.
         if (key === 'reflectionModel') {
           resolved.reflectionModel = value as string;
+        } else if (key === 'candidateSelection') {
+          resolved.candidateSelection = value as EvolutionConfig['candidateSelection'];
         } else {
           resolved[key] = value as boolean;
         }

@@ -12,9 +12,19 @@
  *   --pareto-gate / --no-pareto-gate
  *   --coverage / --no-coverage
  *   --reflection-model <model-id>
+ *   --demos / --no-demos                                       (v0.10.0)
+ *   --candidate-selection <active|best|pareto|epsilon-greedy>  (v0.10.0)
  */
 
 import type { EvolutionConfigOverride } from '../types.js';
+
+/** Valid values for `--candidate-selection` (v0.10.0). */
+const CANDIDATE_SELECTION_VALUES: ReadonlySet<string> = new Set([
+  'active',
+  'best',
+  'pareto',
+  'epsilon-greedy',
+]);
 
 /** True when `arg` is one of the evolution-config flags this module handles. */
 export function isEvolutionConfigFlag(arg: string): boolean {
@@ -28,6 +38,9 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--coverage':
     case '--no-coverage':
     case '--reflection-model':
+    case '--demos':
+    case '--no-demos':
+    case '--candidate-selection':
       return true;
     default:
       return false;
@@ -78,6 +91,28 @@ export function applyEvolutionFlag(
         return 1;
       }
       return 0;
+    case '--demos':
+      target.useDemos = true;
+      return 0;
+    case '--no-demos':
+      target.useDemos = false;
+      return 0;
+    case '--candidate-selection':
+      // Value is consumed either way (it was clearly meant as this flag's
+      // argument); it is only APPLIED when it names a known strategy — an
+      // unknown value warns instead of silently persisting a config the loop
+      // would then silently treat as 'active'.
+      if (nextArg !== undefined) {
+        if (CANDIDATE_SELECTION_VALUES.has(nextArg)) {
+          target.candidateSelection = nextArg as EvolutionConfigOverride['candidateSelection'];
+        } else {
+          console.warn(
+            `[darwin] --candidate-selection "${nextArg}" is not one of: ${[...CANDIDATE_SELECTION_VALUES].join(', ')} — ignored.`,
+          );
+        }
+        return 1;
+      }
+      return 0;
     default:
       return 0;
   }
@@ -114,6 +149,8 @@ export function hasAnyEvolutionFlag(override: EvolutionConfigOverride): boolean 
     override.useMerge !== undefined ||
     override.paretoGate !== undefined ||
     override.useCoverage !== undefined ||
-    override.reflectionModel !== undefined
+    override.reflectionModel !== undefined ||
+    override.useDemos !== undefined ||
+    override.candidateSelection !== undefined
   );
 }

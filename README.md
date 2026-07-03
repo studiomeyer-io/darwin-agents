@@ -222,6 +222,39 @@ bias. With only one key they collapse onto a single family (note: `claude-cli`
 and `anthropic-api` are the *same* family) — Darwin now warns, and hard-fails
 under `DARWIN_REQUIRE_CROSS_FAMILY=1` for strict / CI setups.
 
+### Demo injection + parent selection (v0.10, opt-in)
+
+Two more challenger surfaces, both borrowed from the strongest ideas in the
+field and adapted to the online loop. Both are off by default.
+
+**Demo injection** (`useDemos`) is DSPy SIMBA's `append_a_demo` strategy: on
+every `demoEveryK`-th cycle (default 4) the loop harvests the agent's *own
+highest-scoring past runs* (score ≥ 8, one per task type, capped at
+`maxDemos`) and appends them to the prompt as a marker-delimited
+"Demonstrations" section. Zero LLM cost — pure selection over data Darwin
+already stores — and the demo-augmented prompt is a normal challenger: same
+alignment guard, same A/B test, same rollback. If showing the agent its own
+best work doesn't measurably help, the incumbent wins and nothing changes.
+
+**Parent selection** (`candidateSelection`) is GEPA's
+`candidate_selection_strategy`: instead of always mutating the currently-active
+prompt (a hill-climb), reflect from `'best'` (highest composite in the version
+history), `'pareto'` (uniform sample from the history's Pareto front — keeps
+lineages alive that win on *different* objectives), or `'epsilon-greedy'`
+(explore with probability `explorationEpsilon`). Requires `useGepa`.
+
+```typescript
+evolution: {
+  enabled: true,
+  useDemos: true,                    // SIMBA-style demos as a challenger source
+  demoEveryK: 4,                     // cadence (offset from mergeEveryK: 3)
+  maxDemos: 2,
+  useGepa: true,
+  candidateSelection: 'pareto',      // or 'best' | 'epsilon-greedy' | 'active'
+  explorationEpsilon: 0.1,           // only for 'epsilon-greedy'
+},
+```
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -465,6 +498,8 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--pareto-gate` / `--no-pareto-gate` | Reject an A/B winner that regressed on any objective |
 | `--coverage` / `--no-coverage` | Pick the reflection parent by per-task-type coverage breadth (GEPA Algorithm 2) |
 | `--reflection-model <id>` | Use a stronger model for GEPA reflection (the documented leverage point) |
+| `--demos` / `--no-demos` | SIMBA-style demo injection: the agent's best past runs as a challenger (v0.10) |
+| `--candidate-selection <s>` | Reflection parent strategy: `active` \| `best` \| `pareto` \| `epsilon-greedy` (v0.10) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.
@@ -525,6 +560,19 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 ## Contributing
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Credits
+
+Darwin is pair-built by a human and an AI, and we think that should be said
+plainly rather than hidden. Matthias Meyer (StudioMeyer) sets direction, makes
+the calls and reviews everything; most of the code is written by
+[Claude](https://www.anthropic.com/claude) — currently **Claude Fable 5** —
+working from research against the primary sources (the GEPA paper and
+reference implementation, DSPy, the MCP spec) and gated by multi-agent code
+review plus this repo's own test suite before anything ships. Claude is listed
+as a contributor in `package.json`, and the commits it co-writes carry a
+`Co-Authored-By` trailer. A framework about agents that improve themselves,
+built with an agent — we find that fitting.
 
 ## About StudioMeyer
 

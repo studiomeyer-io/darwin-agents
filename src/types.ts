@@ -157,6 +157,69 @@ export interface EvolutionConfig {
    * the single-challenger reflective path is unchanged.
    */
   useCoverage?: boolean;
+  /**
+   * v0.10.0 — Strategy for picking WHICH prompt version the next challenger
+   * is derived from (GEPA `candidate_selection_strategy` parity). Only
+   * consulted when `useGepa` is `true` AND a `GepaOptimizer` is wired in:
+   *
+   *   - `'active'` (default): reflect from the currently-active prompt —
+   *     byte-for-byte the historical behaviour.
+   *   - `'best'`: reflect from the highest scalarised-composite version in
+   *     the history (GEPA `current_best`).
+   *   - `'pareto'`: reflect from a uniformly-sampled member of the version
+   *     history's Pareto front (GEPA default) — keeps lineages alive that
+   *     win on different objectives instead of hill-climbing one line.
+   *   - `'epsilon-greedy'`: with probability {@link explorationEpsilon} pick
+   *     a random version (explore), otherwise the best (exploit).
+   *
+   * Precedence: `useCoverage` (GEPA Algorithm 2, the more specific
+   * selector) wins when it finds a coverage parent; `candidateSelection`
+   * is the fallback selector for that cycle. Versions without any run
+   * metrics are never candidates. Default `'active'`.
+   */
+  candidateSelection?: 'active' | 'best' | 'pareto' | 'epsilon-greedy';
+  /**
+   * v0.10.0 — Exploration probability for
+   * `candidateSelection: 'epsilon-greedy'` (clamped to [0, 1], non-finite
+   * → default). Default `0.1`.
+   */
+  explorationEpsilon?: number;
+  /**
+   * v0.10.0 — Opt into SIMBA-style DEMO INJECTION as a challenger source.
+   * On every {@link demoEveryK}-th evolution cycle, instead of an LLM
+   * mutation the loop appends (or refreshes) a marker-delimited
+   * "Demonstrations" section built from the agent's own highest-scoring
+   * past runs (DSPy SIMBA's `append_a_demo` strategy, adapted to the
+   * online loop). The demo-augmented prompt is a normal challenger: same
+   * alignment guard, same A/B test, same safety gate — if demos don't
+   * help, the incumbent wins. Zero LLM cost (pure selection + rendering).
+   *
+   * Works WITHOUT `useGepa` (no reflector involved). When both `useDemos`
+   * and `useMerge` would fire on the same cycle, demos win — staggering
+   * `demoEveryK` / `mergeEveryK` (e.g. 4 / 3) reduces the overlap to the
+   * LCM cycles (every 12th with 4/3), where the demos-win precedence
+   * resolves the collision. Default `false`.
+   */
+  useDemos?: boolean;
+  /**
+   * v0.10.0 — Demo-injection cadence: attempt a demo challenger on every
+   * K-th evolution cycle (cycle index = active prompt version integer).
+   * Only consulted when `useDemos` is `true`. Default 4, clamped ≥ 1.
+   */
+  demoEveryK?: number;
+  /**
+   * v0.10.0 — Maximum demonstrations to inject (default 2). Kept
+   * deliberately below SIMBA's per-predictor 4 because the online loop
+   * appends demos to one system prompt and prompt length correlates
+   * negatively with reliability (documented v2-prompt incident).
+   */
+  maxDemos?: number;
+  /**
+   * v0.10.0 — Minimum critic score (1-10) for a past run to qualify as a
+   * demonstration. Default 8 — mirrors the closed-loop feedback convention
+   * where ≥ 8 marks a high-quality pattern.
+   */
+  demoScoreThreshold?: number;
 }
 
 // ─── Config ─────────────────────────────────────────
@@ -449,6 +512,10 @@ export interface EvolutionConfigOverride {
   paretoGate?: boolean;
   useCoverage?: boolean;
   reflectionModel?: string;
+  /** v0.10.0 — SIMBA-style demo injection (`--demos` / `--no-demos`). */
+  useDemos?: boolean;
+  /** v0.10.0 — parent-selection strategy (`--candidate-selection <s>`). */
+  candidateSelection?: 'active' | 'best' | 'pareto' | 'epsilon-greedy';
 }
 
 // ─── Patterns ───────────────────────────────────────

@@ -32,6 +32,7 @@ import { checkAlignmentPreservation, checkAlignmentPreservationSemantic, type Em
 import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
 import { selectDemoCandidates, buildDemoSection, applyDemoSection } from './demos.js';
 import { selectParentVariant } from './selection.js';
+import { isPerfectScore, resolvePerfectFeedbackScore } from './feedback-filter.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -725,17 +726,32 @@ export class DarwinLoop {
    */
   private async getRecentFeedback(agentName: string, limit: number): Promise<string[]> {
     const experiments = await this.memory.loadExperiments(agentName);
+    const skipPerfect = this.agent?.evolution?.skipPerfectFeedback === true;
+    const perfectScore = this.perfectFeedbackScore();
 
     const feedback: string[] = [];
     for (const exp of experiments) {
       if (feedback.length >= limit) break;
       if (exp.feedback?.report) {
+        // v0.11.0: skip already-perfect runs (GEPA skip_perfect_score) — a
+        // 10/10 report gives the optimizer no gradient. Skipped items do NOT
+        // count toward `limit`, so the window fills with actionable reports.
+        if (skipPerfect && isPerfectScore(exp.feedback.score, perfectScore)) continue;
         const header = `Score: ${exp.feedback.score}/10 | Task: "${exp.task}" | Version: ${exp.promptVersion}`;
         feedback.push(`${header}\n${exp.feedback.report}`);
       }
     }
 
     return feedback;
+  }
+
+  /**
+   * v0.11.0 — Resolved perfect-score threshold for {@link
+   * EvolutionConfig.skipPerfectFeedback} (finite, within the critic 1–10
+   * scale, else default 10).
+   */
+  private perfectFeedbackScore(): number {
+    return resolvePerfectFeedbackScore(this.agent?.evolution?.perfectFeedbackScore);
   }
 
   /**
@@ -775,12 +791,19 @@ export class DarwinLoop {
     if (
       this.agent?.evolution?.useMerge === true &&
       epoch > 0 &&
-      epoch % this.mergeEveryK() === 0
+      epoch % this.mergeEveryK() === 0 &&
+      (await this.mergeBudgetAvailable(agentName))
     ) {
       const merged = await this.tryMergeVariant(agentName);
       if (merged !== null) {
         const guarded = await this.runAlignmentGuard(currentPrompt, merged);
         if (guarded !== null) {
+          // v0.11.0: count this merge challenger against the lifetime cap
+          // (GEPA max_merge_invocations). Only accepted merges are counted —
+          // one that failed the guard below consumed no A/B slot. The counter
+          // is written ONLY when a cap is configured, so an uncapped useMerge
+          // agent's persisted state stays byte-for-byte v0.10 (no stray key).
+          await this.recordMergeInvocation(agentName);
           return { prompt: guarded, via: 'merge' };
         }
         // Merge produced a prompt that eroded a safety constraint — reject it
@@ -899,6 +922,54 @@ export class DarwinLoop {
     const k = this.agent?.evolution?.mergeEveryK;
     if (typeof k === 'number' && Number.isFinite(k) && k >= 1) return Math.floor(k);
     return 3;
+  }
+
+  /**
+   * v0.11.0 — Resolved lifetime merge cap (GEPA `max_merge_invocations`), or
+   * `null` when uncapped. A non-finite / negative value is treated as "no cap"
+   * rather than silently disabling merge; a non-integer cap is floored (mirrors
+   * `mergeEveryK`) so a hand-edited `2.5` behaves as 2, not 3.
+   */
+  private mergeCap(): number | null {
+    const cap = this.agent?.evolution?.maxMergeInvocations;
+    if (typeof cap !== 'number' || !Number.isFinite(cap) || cap < 0) return null;
+    return Math.floor(cap);
+  }
+
+  /**
+   * v0.11.0 — Lifetime merge budget check (GEPA `max_merge_invocations`).
+   * Returns `true` (merge may fire) when no cap is configured, or when the
+   * per-agent count of merge-derived challengers is still below the cap.
+   */
+  private async mergeBudgetAvailable(agentName: string): Promise<boolean> {
+    const cap = this.mergeCap();
+    if (cap === null) return true;
+    const state = await this.memory.getState();
+    const used = state.mergeInvocations?.[agentName] ?? 0;
+    return used < cap;
+  }
+
+  /**
+   * v0.11.0 — Increment this agent's lifetime merge-invocation count. Called
+   * once per merge challenger that passes the alignment guard and is carried
+   * into an A/B test, and ONLY when a cap is configured — an uncapped useMerge
+   * agent never writes the counter, so its persisted state is unchanged from
+   * v0.10. Initialises the map lazily for state rows that predate the field.
+   *
+   * The check (`mergeBudgetAvailable`) and this increment are separate state
+   * reads, so two cycles running concurrently for the SAME agent could each
+   * observe `used = cap-1` and overshoot by one. The overshoot is bounded by
+   * the concurrency and sits inside the pre-existing concurrent-A/B-start
+   * envelope (afterRun's "an A/B test is already running" guard is likewise
+   * check-then-act) — acceptable for a soft lifetime budget, not a hard limit.
+   */
+  private async recordMergeInvocation(agentName: string): Promise<void> {
+    if (this.mergeCap() === null) return; // uncapped → leave state untouched
+    await this.memory.updateState((s) => {
+      if (!s.mergeInvocations) s.mergeInvocations = {};
+      s.mergeInvocations[agentName] = (s.mergeInvocations[agentName] ?? 0) + 1;
+      return s;
+    });
   }
 
   /**
@@ -1056,11 +1127,17 @@ export class DarwinLoop {
     limit: number,
   ): Promise<ReflectiveFeedback[]> {
     const experiments = await this.memory.loadExperiments(agentName);
+    const skipPerfect = this.agent?.evolution?.skipPerfectFeedback === true;
+    const perfectScore = this.perfectFeedbackScore();
 
     const feedbacks: ReflectiveFeedback[] = [];
     for (const exp of experiments) {
       if (feedbacks.length >= limit) break;
       if (exp.feedback?.report) {
+        // v0.11.0: skip already-perfect runs (GEPA skip_perfect_score) so the
+        // reflector concentrates on runs with an actual improvement gradient.
+        // Skipped items do NOT count toward `limit`.
+        if (skipPerfect && isPerfectScore(exp.feedback.score, perfectScore)) continue;
         feedbacks.push({
           variantId: exp.promptVersion,
           score: exp.feedback.score,

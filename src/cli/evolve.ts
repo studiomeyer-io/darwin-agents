@@ -19,6 +19,8 @@
  *   --reflection-model <id>       stronger reflection model for GEPA
  *   --demos / --no-demos          SIMBA-style demo injection (v0.10)
  *   --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
+ *   --skip-perfect / --no-skip-perfect   drop perfect-score runs from optimizer feedback (v0.11)
+ *   --max-merge <n>               lifetime cap on merge-derived challengers (v0.11)
  */
 
 import { createMemory } from '../memory/index.js';
@@ -144,6 +146,8 @@ function describeOverride(o: EvolutionConfigOverride): string {
   if (o.reflectionModel !== undefined) parts.push(`reflectionModel=${o.reflectionModel}`);
   if (o.useDemos !== undefined) parts.push(`demos=${o.useDemos}`);
   if (o.candidateSelection !== undefined) parts.push(`candidateSelection=${o.candidateSelection}`);
+  if (o.skipPerfectFeedback !== undefined) parts.push(`skipPerfect=${o.skipPerfectFeedback}`);
+  if (o.maxMergeInvocations !== undefined) parts.push(`maxMerge=${o.maxMergeInvocations}`);
   return parts.length > 0 ? parts.join(', ') : '(none)';
 }
 
@@ -156,10 +160,14 @@ function describeConfig(evo: EvolutionConfig | undefined): string {
     `paretoGate=${evo.paretoGate ?? false}`,
     `coverage=${evo.useCoverage ?? false}`,
     `demos=${evo.useDemos ?? false}`,
+    `skipPerfect=${evo.skipPerfectFeedback ?? false}`,
   ];
   if (evo.reflectionModel) parts.push(`reflectionModel=${evo.reflectionModel}`);
   if (evo.candidateSelection && evo.candidateSelection !== 'active') {
     parts.push(`candidateSelection=${evo.candidateSelection}`);
   }
+  // maxMerge is genuinely optional (unset = uncapped), so it is shown only when
+  // set — unlike the always-shown booleans above.
+  if (evo.maxMergeInvocations !== undefined) parts.push(`maxMerge=${evo.maxMergeInvocations}`);
   return parts.join(', ');
 }

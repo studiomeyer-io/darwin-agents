@@ -79,6 +79,8 @@ const OVERRIDE_KEYS = [
   'reflectionModel',
   'useDemos',
   'candidateSelection',
+  'skipPerfectFeedback',
+  'maxMergeInvocations',
 ] as const;
 
 /**
@@ -124,7 +126,11 @@ export function resolveEvolutionConfig(
           resolved.reflectionModel = value as string;
         } else if (key === 'candidateSelection') {
           resolved.candidateSelection = value as EvolutionConfig['candidateSelection'];
+        } else if (key === 'maxMergeInvocations') {
+          resolved.maxMergeInvocations = value as number;
         } else {
+          // Remaining override keys are all boolean flags (useGepa / useMerge /
+          // paretoGate / useCoverage / useDemos / skipPerfectFeedback).
           resolved[key] = value as boolean;
         }
       }

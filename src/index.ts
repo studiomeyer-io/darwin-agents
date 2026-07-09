@@ -204,3 +204,14 @@ export {
   type SelectableVariant,
   type ParentSelectionOptions,
 } from './evolution/selection.js';
+
+// V0.11.0 — perfect-score feedback filtering (adapted from GEPA's
+// `skip_perfect_score`): drop already-perfect runs from the optimizer /
+// reflector feedback so it focuses on runs with an actual improvement gradient.
+// Pure + generic over `{ score }`.
+export {
+  isPerfectScore,
+  resolvePerfectFeedbackScore,
+  filterPerfectFeedback,
+  DEFAULT_PERFECT_FEEDBACK_SCORE,
+} from './evolution/feedback-filter.js';

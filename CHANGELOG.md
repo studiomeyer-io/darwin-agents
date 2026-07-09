@@ -2,6 +2,60 @@
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-07-09
+
+Two opt-in "budget discipline" knobs adapted from GEPA (verified against the
+DSPy GEPA API and the gepa-ai engine source) to Darwin's forever-online loop.
+The values mirror upstream's defaults; the mechanisms are Darwin's own
+adaptation. Default behaviour is unchanged with the flags off.
+
+### Added
+
+- **`skipPerfectFeedback`** (adapted from GEPA's `skip_perfect_score`,
+  `src/evolution/feedback-filter.ts`). Upstream skips a whole reflection
+  iteration when an entire sampled minibatch is perfect; Darwin generalizes it
+  to per-report filtering, which it can afford because the critic scores on real
+  runs are already paid for. A run that already scored a perfect critic score
+  carries no improvement gradient — its "nothing to fix" report only dilutes the
+  pool. When `true`, such reports are dropped from **both** the legacy optimizer
+  feedback (`getRecentFeedback`) and the GEPA reflective feedback
+  (`getReflectiveFeedback`); skipped items do not count toward the feedback
+  window, so it fills with actionable reports. `perfectFeedbackScore` (default
+  10, the critic-scale max) sets the threshold — lower it to also skip
+  near-perfect runs. A non-finite score is never treated as perfect, so a
+  genuinely broken run still surfaces. If every recent run is perfect the
+  reflective path falls back to the legacy stats optimizer and the legacy path
+  proceeds on aggregate stats (so the loop keeps exploring). With `useDemos` on,
+  perfect runs are still used — harvested as demonstrations. CLI: `--skip-perfect`
+  / `--no-skip-perfect`. Pure helpers (`isPerfectScore` /
+  `resolvePerfectFeedbackScore` / `filterPerfectFeedback`) are exported from the
+  package root.
+- **`maxMergeInvocations`** (adapted from GEPA's `max_merge_invocations`, default
+  5 upstream). A per-agent **lifetime** cap on merge-derived challengers,
+  persisted in `DarwinState.mergeInvocations` (a process-scoped counter would
+  reset every cron tick and never trigger). The GEPA paper leaves merge-budget
+  allocation as open research; the reason Darwin needs a cap is its own — an
+  uncapped `mergeEveryK` cadence would merge forever and crowd out reflective
+  exploration late in an agent's life. The count is the number of merge
+  challengers actually **created** — a merge that fails the alignment guard is
+  not counted (it consumed no A/B slot) — and is written **only when a cap is
+  set**, so an uncapped `useMerge` agent's persisted state is unchanged from
+  v0.10. Once the cap is reached the merge branch is skipped and the loop falls
+  back to the reflective path for the rest of the agent's life (the budget does
+  not re-arm). Only consulted when `useMerge` is on. Left unset it is uncapped
+  (v0.10 behaviour); set it to `5` to match GEPA's default. CLI: `--max-merge <n>`
+  (non-negative integer; `0` disables merge).
+
+### Notes
+
+- Both knobs flow through the existing override machinery
+  (`EvolutionConfigOverride` + `OVERRIDE_KEYS` + `resolveEvolutionConfig` +
+  `describeOverride`/`describeConfig`), so they are CLI-settable, persist across
+  processes, and CLI overrides win over persisted ones.
+- +24 tests (610 total, 609 pass / 1 pre-existing skip). `tsc`, `typecheck:tests`
+  and `build` clean. Default-path decisions unchanged; an uncapped agent writes
+  no new state.
+
 ## [0.10.0] — 2026-07-03
 
 Two research-driven, opt-in evolution surfaces — a new challenger *source*

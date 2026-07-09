@@ -255,6 +255,43 @@ evolution: {
 },
 ```
 
+### Budget discipline (v0.11, opt-in)
+
+Two more knobs adapted from GEPA (the values mirror upstream; upstream ships
+both on, here they are off unless you turn them on).
+
+**Skip perfect feedback** (`skipPerfectFeedback`) adapts GEPA's
+`skip_perfect_score`. Upstream skips a whole reflection iteration when an entire
+sampled minibatch is perfect; Darwin generalizes it to per-report filtering,
+which it can afford because the critic scores on real runs are already paid for.
+A run that already scored a perfect critic score carries no improvement
+gradient, so its "nothing to fix" report just dilutes the pool. When on,
+perfect-score reports are dropped from *both* the legacy optimizer feedback and
+the GEPA reflection minibatch (lower `perfectFeedbackScore` from the default 10
+to also skip near-perfect runs). With `useDemos` on, those perfect runs still
+get used — harvested as demonstrations instead.
+
+**Merge budget** (`maxMergeInvocations`) adapts GEPA's `max_merge_invocations`
+(default 5 upstream): a per-agent *lifetime* cap on how many merge-derived
+challengers an agent may produce. The GEPA paper leaves merge-budget allocation
+as open research; the reason Darwin needs a cap is its own — an uncapped
+`mergeEveryK` cadence would merge forever, so late in an agent's life merges
+would crowd out the reflective exploration that finds genuinely new strategies.
+Once the cap is hit the loop falls back to the reflective path for good. Left
+unset it is uncapped (the v0.10 behaviour); set it to `5` to match GEPA's
+protective default.
+
+```typescript
+evolution: {
+  enabled: true,
+  useGepa: true,
+  skipPerfectFeedback: true,         // GEPA skip_perfect_score — focus feedback on failures
+  perfectFeedbackScore: 10,          // score (1-10) counted as "perfect" (default 10)
+  useMerge: true,
+  maxMergeInvocations: 5,            // GEPA max_merge_invocations — cap merge over the agent's life
+},
+```
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -500,6 +537,8 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--reflection-model <id>` | Use a stronger model for GEPA reflection (the documented leverage point) |
 | `--demos` / `--no-demos` | SIMBA-style demo injection: the agent's best past runs as a challenger (v0.10) |
 | `--candidate-selection <s>` | Reflection parent strategy: `active` \| `best` \| `pareto` \| `epsilon-greedy` (v0.10) |
+| `--skip-perfect` / `--no-skip-perfect` | Drop perfect-score runs from optimizer feedback — GEPA `skip_perfect_score` (v0.11) |
+| `--max-merge <n>` | Lifetime cap on merge-derived challengers — GEPA `max_merge_invocations` (v0.11) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.

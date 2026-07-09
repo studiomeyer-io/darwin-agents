@@ -14,6 +14,8 @@
  *   --reflection-model <model-id>
  *   --demos / --no-demos                                       (v0.10.0)
  *   --candidate-selection <active|best|pareto|epsilon-greedy>  (v0.10.0)
+ *   --skip-perfect / --no-skip-perfect                         (v0.11.0)
+ *   --max-merge <n>                                            (v0.11.0)
  */
 
 import type { EvolutionConfigOverride } from '../types.js';
@@ -41,6 +43,9 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--demos':
     case '--no-demos':
     case '--candidate-selection':
+    case '--skip-perfect':
+    case '--no-skip-perfect':
+    case '--max-merge':
       return true;
     default:
       return false;
@@ -113,6 +118,33 @@ export function applyEvolutionFlag(
         return 1;
       }
       return 0;
+    case '--skip-perfect':
+      target.skipPerfectFeedback = true;
+      return 0;
+    case '--no-skip-perfect':
+      target.skipPerfectFeedback = false;
+      return 0;
+    case '--max-merge': {
+      // A missing value (end of argv) or a following FLAG (`--max-merge
+      // --force`) is a missing value, not this flag's argument — warn and do
+      // NOT consume the next token, so a following action flag still runs.
+      if (nextArg === undefined || nextArg.startsWith('--')) {
+        console.warn('[darwin] --max-merge needs a non-negative integer value — ignored.');
+        return 0;
+      }
+      // Strict non-negative-integer match rejects '', ' ', '-3', '2.5', '0x10',
+      // '1e3', 'abc' (Number() would coerce several of those, e.g. Number('')
+      // === 0, silently disabling merge for the agent's life). The value token
+      // is consumed either way — it was clearly meant as this flag's argument.
+      if (/^\d+$/.test(nextArg.trim())) {
+        target.maxMergeInvocations = Number(nextArg.trim());
+      } else {
+        console.warn(
+          `[darwin] --max-merge "${nextArg}" is not a non-negative integer — ignored.`,
+        );
+      }
+      return 1;
+    }
     default:
       return 0;
   }
@@ -151,6 +183,8 @@ export function hasAnyEvolutionFlag(override: EvolutionConfigOverride): boolean 
     override.useCoverage !== undefined ||
     override.reflectionModel !== undefined ||
     override.useDemos !== undefined ||
-    override.candidateSelection !== undefined
+    override.candidateSelection !== undefined ||
+    override.skipPerfectFeedback !== undefined ||
+    override.maxMergeInvocations !== undefined
   );
 }

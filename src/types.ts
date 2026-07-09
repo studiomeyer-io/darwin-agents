@@ -220,6 +220,53 @@ export interface EvolutionConfig {
    * where ≥ 8 marks a high-quality pattern.
    */
   demoScoreThreshold?: number;
+  /**
+   * v0.11.0 — Skip already-PERFECT past runs when assembling the critic
+   * feedback the optimizer / GEPA reflector learns from. Adapted from GEPA's
+   * `skip_perfect_score`: upstream skips the whole reflection iteration when an
+   * entire sampled minibatch is perfect; Darwin generalizes it to per-report
+   * filtering because the critic scores on real runs are already paid for (no
+   * eval-budget reason to keep "nothing to fix" reports in the pool). A run
+   * scored at or above {@link perfectFeedbackScore} carries no improvement
+   * gradient, so dropping it concentrates the feedback on runs that went wrong.
+   * When `true`, such reports are dropped from BOTH the reflective feedback and
+   * the legacy optimizer feedback. If EVERY recent report is perfect the filter
+   * yields an empty feedback set — the reflective path then falls back to the
+   * legacy stats optimizer and the legacy path proceeds on aggregate stats as
+   * it did before feedback reports existed (so the loop keeps exploring; it
+   * does not, like upstream, leave a perfect candidate untouched). Default
+   * `false` — every report is included, byte-for-byte the historical behaviour.
+   */
+  skipPerfectFeedback?: boolean;
+  /**
+   * v0.11.0 — Critic score (1-10) at or above which a run counts as PERFECT
+   * for {@link skipPerfectFeedback}. Only consulted when `skipPerfectFeedback`
+   * is `true`. Default 10 (only a literal top score is skipped); lower it
+   * (e.g. 9) to also skip near-perfect runs. Non-finite / out-of-range values
+   * fall back to the default.
+   */
+  perfectFeedbackScore?: number;
+  /**
+   * v0.11.0 — Lifetime cap on how many merge-derived challengers this agent
+   * may produce. Adapted from GEPA's `max_merge_invocations` (default 5
+   * upstream, per-`optimize()`-run); Darwin mirrors the value but makes the cap
+   * a per-agent LIFETIME budget persisted in {@link
+   * DarwinState.mergeInvocations}, because a process-scoped counter would reset
+   * every cron tick and never trigger. Only consulted when `useMerge` is
+   * `true`. The GEPA paper leaves merge-budget allocation as open research; the
+   * reason Darwin needs a cap is its own: an uncapped `mergeEveryK` cadence
+   * would merge forever, so late in an agent's life merges would crowd out the
+   * reflective exploration that finds genuinely new strategies. Once the cap is
+   * reached the merge branch is skipped and the loop falls back to the
+   * reflective path for the rest of the agent's life (unlike upstream, the
+   * budget does not re-arm — a future `--reset`-clears-it option is a candidate).
+   * The count is the number of merge challengers actually CREATED (a merge that
+   * failed the alignment guard is not counted — it consumed no A/B slot), and
+   * it is written ONLY when a cap is set, so an uncapped `useMerge` agent's
+   * state is unchanged from v0.10. Default `undefined` — uncapped, byte-for-byte
+   * the v0.10 behaviour; set it to 5 to match GEPA's protective default.
+   */
+  maxMergeInvocations?: number;
 }
 
 // ─── Config ─────────────────────────────────────────
@@ -480,6 +527,13 @@ export interface DarwinState {
   /** Total experiment count per agent */
   experimentCounts: Record<string, number>;
   /**
+   * v0.11.0 — Lifetime count of merge-derived challengers created per agent,
+   * used to enforce {@link EvolutionConfig.maxMergeInvocations} (GEPA's
+   * `max_merge_invocations`). Optional + read defensively (`?? 0`): state
+   * rows written before this field existed simply lack the key.
+   */
+  mergeInvocations?: Record<string, number>;
+  /**
    * Persisted enable/disable override per agent, set by `darwin evolve
    * <agent> --enable|--disable`. When an entry exists it WINS over the
    * agent definition's static `evolution.enabled` default, so the flag
@@ -489,12 +543,13 @@ export interface DarwinState {
    */
   evolutionEnabled?: Record<string, boolean>;
   /**
-   * Persisted overrides for the advanced evolution-config flags
-   * (`useGepa` / `useMerge` / `paretoGate` / `useCoverage` /
-   * `reflectionModel`), set by `darwin evolve <agent> --gepa|--merge|…`. Merged
-   * OVER the agent definition's static `evolution` block when resolving the
-   * effective config, so these knobs are reachable from the CLI and survive
-   * process exit. Optional + read defensively (older state rows lack it).
+   * Persisted overrides for the advanced evolution-config flags (the keys in
+   * `OVERRIDE_KEYS`, enabled-state.ts — kept as the single list so this comment
+   * never drifts as new flags are added), set by `darwin evolve <agent>
+   * --gepa|--merge|…`. Merged OVER the agent definition's static `evolution`
+   * block when resolving the effective config, so these knobs are reachable
+   * from the CLI and survive process exit. Optional + read defensively (older
+   * state rows lack it).
    */
   evolutionConfigOverrides?: Record<string, EvolutionConfigOverride>;
 }
@@ -516,6 +571,10 @@ export interface EvolutionConfigOverride {
   useDemos?: boolean;
   /** v0.10.0 — parent-selection strategy (`--candidate-selection <s>`). */
   candidateSelection?: 'active' | 'best' | 'pareto' | 'epsilon-greedy';
+  /** v0.11.0 — skip perfect-score feedback (`--skip-perfect` / `--no-skip-perfect`). */
+  skipPerfectFeedback?: boolean;
+  /** v0.11.0 — lifetime merge cap (`--max-merge <n>`). */
+  maxMergeInvocations?: number;
 }
 
 // ─── Patterns ───────────────────────────────────────

@@ -35,6 +35,14 @@ export function buildEvolutionLoop(
   const safety = new SafetyGate();
 
   // The optimizer uses the configured provider to generate improved prompts.
+  //
+  // SECURITY (v0.12.2): optimizer + reflector are pure TEXT mutators — they
+  // never need tools. `autonomous: false` keeps the spawned CLI in its
+  // deny-by-default permission mode instead of `bypassPermissions`, so a
+  // prompt-injection smuggled in via critic feedback (which quotes untrusted
+  // agent output, including scraped web content) cannot make the subprocess
+  // execute tool calls. Legitimate runs are unaffected: the templates demand
+  // "return ONLY the prompt text".
   const optimizer = new PromptOptimizer(async (metaPrompt: string) => {
     const optimizerResult = await runAgent(
       {
@@ -47,7 +55,7 @@ export function buildEvolutionLoop(
         model: 'claude-sonnet-4-6',
       },
       metaPrompt,
-      { config, taskType: 'optimization', autonomous: true },
+      { config, taskType: 'optimization', autonomous: false },
     );
     return optimizerResult.output;
   });
@@ -75,7 +83,8 @@ export function buildEvolutionLoop(
           model: reflectionModel ?? agent.model ?? 'claude-sonnet-4-6',
         },
         reflectionPrompt,
-        { config, taskType: 'reflection', autonomous: true },
+        // Same deny-by-default posture as the optimizer above (v0.12.2).
+        { config, taskType: 'reflection', autonomous: false },
       );
       return reflectionResult.output;
     });

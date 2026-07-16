@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-07-17
+
+### Security
+
+- **Evolution-loop optimizer/reflector subprocesses no longer run with
+  `bypassPermissions`.** `buildEvolutionLoop`'s two LLM closures (legacy
+  optimizer meta-prompt + GEPA reflector) are pure text mutators, but they
+  passed `autonomous: true` to `runAgent`, which spawns the Claude CLI with
+  `--permission-mode bypassPermissions` — and since neither agent definition
+  declares tools/MCP servers, no `--allowedTools` restriction was emitted
+  either. Their input quotes untrusted agent output (critic feedback reports
+  can contain scraped web content), so a prompt injection could in principle
+  have steered an unrestricted subprocess into tool calls. Both closures now
+  run `autonomous: false` (the CLI's deny-by-default permission mode);
+  legitimate runs are unaffected because the templates demand "return ONLY
+  the prompt text". Found by an adversarial review of the first external
+  consumer wiring `buildEvolutionLoop` (severity: plausible, low
+  probability, real surface). `tests/build-loop-security.test.ts` is the
+  regression tripwire.
+
 ## [0.12.1] — 2026-07-16
 
 Export patch — no behavioural change. Completes the v0.12.0

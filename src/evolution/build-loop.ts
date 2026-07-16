@@ -37,8 +37,8 @@ export function buildEvolutionLoop(
   // The optimizer uses the configured provider to generate improved prompts.
   //
   // SECURITY (v0.12.2): optimizer + reflector are pure TEXT mutators — they
-  // never need tools. `autonomous: false` keeps the spawned CLI in its
-  // deny-by-default permission mode instead of `bypassPermissions`, so a
+  // never need tools. Running them non-autonomously keeps the spawned CLI in
+  // its deny-by-default permission mode instead of bypassPermissions, so a
   // prompt-injection smuggled in via critic feedback (which quotes untrusted
   // agent output, including scraped web content) cannot make the subprocess
   // execute tool calls. Legitimate runs are unaffected: the templates demand

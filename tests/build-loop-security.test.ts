@@ -30,7 +30,11 @@ describe('build-loop security posture (v0.12.2)', () => {
   });
 
   it('both LLM closures explicitly pin autonomous: false', () => {
-    const count = (src.match(/autonomous:\s*false/g) ?? []).length;
-    assert.strictEqual(count, 2, 'expected exactly 2 explicit autonomous: false (optimizer + reflector)');
+    // Match only the CODE form `autonomous: false` followed by `}` or `,`
+    // (an options-object member), so prose in comments cannot inflate the
+    // count. Both closures pass it as the last member of a run-options
+    // object literal: `{ config, taskType: '…', autonomous: false }`.
+    const count = (src.match(/autonomous:\s*false\s*[},]/g) ?? []).length;
+    assert.strictEqual(count, 2, 'expected exactly 2 code occurrences of autonomous: false (optimizer + reflector)');
   });
 });

@@ -29,3 +29,10 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+      # Fails when this package's version escapes the published
+      # darwin-langgraph peer range — publishing such a version breaks every
+      # fresh paired install (happened twice: 0.9.0, 0.11.0). Network-tolerant:
+      # registry hiccups warn + pass instead of flaking the build.
+      - name: Adapter peer-compat guard (darwin-langgraph)
+        run: npm run check:adapter-compat

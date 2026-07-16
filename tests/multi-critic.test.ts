@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { runMultiCritic, getCriticPrompts, stripMarkdownForJudging } from '../src/evolution/multi-critic.js';
-import type { RunCriticFn } from '../src/evolution/multi-critic.js';
+import type { CriticPromptDef, RunCriticFn } from '../src/evolution/multi-critic.js';
 
 describe('runMultiCritic', () => {
   it('passes criticName to RunCriticFn callback', async () => {
@@ -270,5 +270,172 @@ describe('stripMarkdownForJudging — hardening (v0.7.0 R1 fixes)', () => {
     const out = stripMarkdownForJudging('This is ***very important*** text.');
     assert.ok(!out.includes('*'));
     assert.ok(out.includes('very important'));
+  });
+});
+
+describe('runMultiCritic — custom critic sets + output label (v0.12.0)', () => {
+  const OK = (score: number) => `===SCORE===\n${score}\n===ASSESSMENT===\nok\n===END===`;
+
+  it('uses caller-supplied criticPrompts instead of the built-in lookup', async () => {
+    const receivedNames: string[] = [];
+    const receivedPrompts: string[] = [];
+    const mockCritic: RunCriticFn = async (prompt, _task, criticName) => {
+      receivedNames.push(criticName);
+      receivedPrompts.push(prompt);
+      return OK(8);
+    };
+
+    const result = await runMultiCritic('domain output', 'task', mockCritic, 'polis-haendler', {
+      criticPrompts: [
+        { name: 'action-quality', prompt: 'Judge action quality.' },
+        { name: 'social-awareness', prompt: 'Judge social awareness.' },
+        { name: 'game-fitness', prompt: 'Judge game fitness.' },
+      ],
+    });
+
+    assert.deepStrictEqual(receivedNames.sort(), [
+      'action-quality',
+      'game-fitness',
+      'social-awareness',
+    ]);
+    assert.ok(receivedPrompts.includes('Judge action quality.'));
+    assert.strictEqual(result.medianScore, 8);
+  });
+
+  it('supports critic counts other than 3 (median over even count)', async () => {
+    const scores = [6, 8];
+    let idx = 0;
+    const mockCritic: RunCriticFn = async () => OK(scores[idx++]);
+
+    const result = await runMultiCritic('out', 'task', mockCritic, undefined, {
+      criticPrompts: [
+        { name: 'a', prompt: 'A' },
+        { name: 'b', prompt: 'B' },
+      ],
+    });
+
+    assert.strictEqual(result.medianScore, 7);
+    assert.strictEqual(result.critics.length, 2);
+  });
+
+  it('drops invalid entries (holes, missing fields) instead of crashing — R1 Finding 3', async () => {
+    const receivedNames: string[] = [];
+    const mockCritic: RunCriticFn = async (_p, _t, criticName) => {
+      receivedNames.push(criticName);
+      return OK(8);
+    };
+
+    const holey = [
+      undefined,
+      { name: 'valid-judge', prompt: 'Judge it.' },
+      { name: '', prompt: 'nameless' },
+      { name: 'promptless' },
+      null,
+    ] as unknown as CriticPromptDef[];
+
+    const result = await runMultiCritic('out', 'task', mockCritic, undefined, {
+      criticPrompts: holey,
+    });
+
+    assert.deepStrictEqual(receivedNames, ['valid-judge']);
+    assert.strictEqual(result.medianScore, 8);
+  });
+
+  it('falls back to the built-in lookup when NO entry is usable (all holes)', async () => {
+    const receivedNames: string[] = [];
+    const mockCritic: RunCriticFn = async (_p, _t, criticName) => {
+      receivedNames.push(criticName);
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'writer', {
+      criticPrompts: [undefined, null] as unknown as CriticPromptDef[],
+    });
+
+    assert.deepStrictEqual(receivedNames.sort(), getCriticPrompts('writer').map((p) => p.name).sort());
+  });
+
+  it('falls back to the built-in lookup on a non-array criticPrompts value', async () => {
+    const receivedNames: string[] = [];
+    const mockCritic: RunCriticFn = async (_p, _t, criticName) => {
+      receivedNames.push(criticName);
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'writer', {
+      criticPrompts: 'not-an-array' as unknown as CriticPromptDef[],
+    });
+
+    assert.strictEqual(receivedNames.length, 3);
+  });
+
+  it('falls back to the built-in lookup on an EMPTY criticPrompts array', async () => {
+    const receivedNames: string[] = [];
+    const mockCritic: RunCriticFn = async (_p, _t, criticName) => {
+      receivedNames.push(criticName);
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'writer', { criticPrompts: [] });
+
+    // writer's built-in set, not zero critics
+    assert.strictEqual(receivedNames.length, 3);
+    assert.deepStrictEqual(receivedNames.sort(), getCriticPrompts('writer').map((p) => p.name).sort());
+  });
+
+  it('default path is unchanged when criticPrompts is not passed (v0.11 behaviour)', async () => {
+    const receivedNames: string[] = [];
+    const mockCritic: RunCriticFn = async (_p, _t, criticName) => {
+      receivedNames.push(criticName);
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'unknown-domain-agent');
+
+    // unknown names still fall back to the investigator set
+    assert.deepStrictEqual(receivedNames.sort(), getCriticPrompts('investigator').map((p) => p.name).sort());
+  });
+
+  it('outputLabel override lands in the evaluation preamble', async () => {
+    let receivedTask = '';
+    const mockCritic: RunCriticFn = async (_p, task) => {
+      receivedTask = task;
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'polis-haendler', {
+      criticPrompts: [{ name: 'a', prompt: 'A' }],
+      outputLabel: 'simulation turn',
+    });
+
+    assert.ok(receivedTask.startsWith('Evaluate the following simulation turn for the task'));
+  });
+
+  it('whitespace-only outputLabel is ignored (falls back to built-in/default label)', async () => {
+    let receivedTask = '';
+    const mockCritic: RunCriticFn = async (_p, task) => {
+      receivedTask = task;
+      return OK(7);
+    };
+
+    await runMultiCritic('out', 'task', mockCritic, 'writer', { outputLabel: '   ' });
+
+    assert.ok(receivedTask.startsWith('Evaluate the following written content for the task'));
+  });
+
+  it('composes with normalizeForJudging (custom judges see stripped output)', async () => {
+    let receivedTask = '';
+    const mockCritic: RunCriticFn = async (_p, task) => {
+      receivedTask = task;
+      return OK(7);
+    };
+
+    await runMultiCritic('# H\n\n**bold**', 'task', mockCritic, undefined, {
+      criticPrompts: [{ name: 'a', prompt: 'A' }],
+      normalizeForJudging: true,
+    });
+
+    assert.ok(!receivedTask.includes('**'));
+    assert.ok(receivedTask.includes('bold'));
   });
 });

@@ -2,6 +2,61 @@
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-16
+
+Bring-your-own-judges: the multi-critic runner accepts caller-supplied critic
+sets, closing the gap that forced fleets with domain agents to fork this file.
+Plus a CI release-guard against the adapter peer-range breakage that has now
+happened twice. Default behaviour is unchanged.
+
+### Added
+
+- **`RunMultiCriticOptions.criticPrompts`** — an explicit critic-prompt set
+  for a single `runMultiCritic` call, bypassing the built-in
+  `getCriticPrompts` name lookup. The built-in `AGENT_CRITIC_MAP` covers a
+  handful of generic archetypes (investigator / writer / research / critic /
+  analyst / …); any agent name outside it silently falls back to the
+  investigator judges, which mis-score domain output (a game-simulation turn
+  judged as an investigative report). Until now the only way to register
+  domain judges was to fork `multi-critic.ts` — our own agent fleet did
+  exactly that, and the fork promptly fell behind the engine. With this
+  option the caller keeps critic sets in its own codebase and passes the
+  right set per call. Any count ≥ 1 works (the median handles even counts).
+  Entries that are not a `{ name, prompt }` pair of non-empty strings are
+  dropped (a config-loaded judge list with holes degrades instead of
+  crashing), and an **empty array, a non-array, or an all-invalid array falls
+  back to the built-in lookup** so a misconfigured caller gets v0.11
+  behaviour instead of judging with zero critics. Judge contract: each prompt
+  must instruct the critic to emit `===SCORE=== N` (or an `X/10` figure) —
+  outputs without either count as a failed critic.
+- **`RunMultiCriticOptions.outputLabel`** — overrides the evaluation-preamble
+  label ("Evaluate the following *{label}* for the task …") for agents
+  outside the built-in `AGENT_OUTPUT_LABELS` map. Whitespace-only values are
+  ignored. Composes with `normalizeForJudging` and `criticPrompts`.
+- **Release-guard `check:adapter-compat`**
+  (`scripts/check-adapter-compat.mjs`, wired into **both** the CI workflow
+  and `prepublishOnly` — publish-first workflows are covered, not just
+  push-first): fails the build when this package's version escapes the
+  published `darwin-langgraph@latest` peer range for `darwin-agents`. Both
+  0.9.0 and 0.11.0 escaped the adapter's then-current cap the day they
+  shipped — explicit paired installs failed with `ERESOLVE`, unpinned
+  installs silently downgraded darwin-agents. The guard turns the third
+  recurrence into a red build before `npm publish`. Prerelease-aware: it
+  judges the **release counterpart** (`1.0.0-alpha.1` → `1.0.0`), matching
+  what the prerelease becomes — an exact-prerelease mismatch under npm's
+  plain-prerelease rules is a WARN, not a FAIL (prereleases ship on a
+  dist-tag and never affect default installs). Network-tolerant (registry
+  hiccups warn and pass). Release ordering note: publish the adapter's
+  widened-peer release (`darwin-langgraph@0.5.4`, peer `<1.0.0`) **before**
+  pushing/publishing this version, or the guard fires exactly as designed.
+
+### Notes
+
+- No behavioural change without the new options: `criticPrompts` unset/empty
+  and `outputLabel` unset/blank reproduce v0.11 byte-for-byte.
+- `semver` + `@types/semver` added as devDependencies (guard script only —
+  the runtime stays zero-dependency).
+
 ## [0.11.0] — 2026-07-09
 
 Two opt-in "budget discipline" knobs adapted from GEPA (verified against the

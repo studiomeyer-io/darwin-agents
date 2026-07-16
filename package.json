@@ -1,6 +1,6 @@
 {
   "name": "darwin-agents",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "AI agents that improve themselves. Self-evolving prompts via A/B testing, multi-model critics, safety gates, and pattern detection.",
   "type": "module",
   "bin": {
@@ -55,9 +55,9 @@
     "benchmark": "tsx benchmark/evolution-benchmark.ts",
     "test": "tsx --test tests/*.test.ts",
     "typecheck:tests": "tsc -p tsconfig.test.json",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test && npm run check:adapter-compat",
+    "check:adapter-compat": "node scripts/check-adapter-compat.mjs"
   },
-  "dependencies": {},
   "peerDependencies": {
     "better-sqlite3": "^11.0.0 || ^12.0.0",
     "pg": "^8.0.0"
@@ -72,9 +72,11 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "better-sqlite3": "^12.10.0",
     "@types/node": "^25.6.0",
     "@types/pg": "^8.11.0",
+    "@types/semver": "^7.7.1",
+    "better-sqlite3": "^12.10.0",
+    "semver": "^7.8.5",
     "tsx": "^4.19.0",
     "typescript": "^6.0.3"
   },

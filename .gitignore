@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .darwin/
+.codegraph/
 benchmark/results/
 *.log
 .env

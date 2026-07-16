@@ -301,7 +301,24 @@ evolution: {
 | **critic** | Evaluates other agents' output (1-10) | Nothing |
 | **analyst** | Code quality analysis | Filesystem access |
 
-Each agent ships with a dedicated **multi-critic set** that scores the output by the right criteria for that agent type (research = source quality + analytical depth + completeness, analyst = technical accuracy with file:line refs + pattern recognition + recommendation quality, etc.). Custom agents can register their own critic sets — see `examples/custom-agent.ts` and `src/evolution/multi-critic.ts`.
+Each agent ships with a dedicated **multi-critic set** that scores the output by the right criteria for that agent type (research = source quality + analytical depth + completeness, analyst = technical accuracy with file:line refs + pattern recognition + recommendation quality, etc.).
+
+**Bring your own judges (v0.12.0):** agents outside the built-in archetypes used to silently fall back to the investigator judges — the only way to register domain critic sets was to fork `multi-critic.ts`. Now `runMultiCritic` accepts them per call, so your critic sets live in *your* codebase:
+
+```typescript
+import { runMultiCritic, type CriticPromptDef } from 'darwin-agents';
+
+const SIMULATION_JUDGES: CriticPromptDef[] = [
+  { name: 'action-quality',   prompt: 'You judge the quality of a game action… ===SCORE=== N' },
+  { name: 'social-awareness', prompt: 'You judge how the actor used social context… ===SCORE=== N' },
+  { name: 'game-fitness',     prompt: 'You judge fitness toward the win condition… ===SCORE=== N' },
+];
+
+const result = await runMultiCritic(turnOutput, task, runCritic, 'sim-trader', {
+  criticPrompts: SIMULATION_JUDGES,      // any count ≥ 1; empty array → built-in lookup
+  outputLabel: 'simulation turn',        // "Evaluate the following simulation turn for…"
+});
+```
 
 ## Closed-Loop & Observability (v0.4.6)
 

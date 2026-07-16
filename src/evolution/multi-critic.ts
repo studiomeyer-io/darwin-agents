@@ -63,6 +63,41 @@ export interface RunMultiCriticOptions {
    * (e.g. an agent that must "produce a markdown table").
    */
   normalizeForJudging?: boolean;
+
+  /**
+   * v0.12.0 — Bring your own judges: an explicit critic-prompt set for THIS
+   * call, bypassing the built-in {@link getCriticPrompts} name lookup.
+   *
+   * Why: the built-in `AGENT_CRITIC_MAP` covers a handful of generic agent
+   * archetypes (investigator / writer / research / critic / analyst / …).
+   * Any fleet with domain agents beyond those archetypes previously had to
+   * FORK this file to register its own judges — unknown names silently fall
+   * back to `INVESTIGATOR_PROMPTS`, which mis-scores domain output (e.g. a
+   * game-simulation turn judged as an investigative report). With this
+   * option the caller keeps its critic sets in its own codebase and passes
+   * the right set per call.
+   *
+   * Semantics: any count ≥ 1 works (the median handles even counts). Entries
+   * that are not a `{ name, prompt }` pair of non-empty strings are dropped —
+   * a config-loaded judge list with holes degrades instead of crashing. An
+   * empty array, a non-array, or an array with no usable entry falls back to
+   * the built-in lookup, so misconfigured callers get v0.11 behaviour instead
+   * of judging with zero critics.
+   *
+   * Judge contract: each prompt must instruct the critic to emit
+   * `===SCORE=== N` (or an `X/10` figure) — outputs without either count as
+   * a failed critic, and if ALL critics fail the result is `medianScore: 0`.
+   */
+  criticPrompts?: CriticPromptDef[];
+
+  /**
+   * v0.12.0 — Override the output label used in the evaluation preamble
+   * ("Evaluate the following {label} for the task …"). Pairs with
+   * {@link RunMultiCriticOptions.criticPrompts} for agents outside the
+   * built-in `AGENT_OUTPUT_LABELS` map, whose label would otherwise be the
+   * generic "output". Ignored when empty/whitespace-only.
+   */
+  outputLabel?: string;
 }
 
 /**
@@ -614,16 +649,31 @@ export async function runMultiCritic(
   agentName?: string,
   options: RunMultiCriticOptions = {},
 ): Promise<MultiCriticResult> {
-  const outputLabel = AGENT_OUTPUT_LABELS[agentName ?? ''] ?? 'output';
+  // v0.12.0: explicit label override wins; then the built-in map; then generic.
+  const labelOverride = options.outputLabel?.trim();
+  const outputLabel = labelOverride || (AGENT_OUTPUT_LABELS[agentName ?? ''] ?? 'output');
   // v0.7.0: optional style-bias normalisation — judge content, not markdown.
   const judgedOutput = options.normalizeForJudging
     ? stripMarkdownForJudging(agentOutput)
     : agentOutput;
   const evaluationTask = `Evaluate the following ${outputLabel} for the task "${task}":\n\n${judgedOutput}`;
 
-  const prompts = getCriticPrompts(agentName ?? '');
+  // v0.12.0: caller-supplied critic set wins. Entries without a usable
+  // name+prompt are dropped (a JS caller's config-loaded list with holes must
+  // degrade, not crash the run); empty/invalid input falls back to the
+  // built-in name lookup so the runner never judges with zero critics.
+  const suppliedPrompts = Array.isArray(options.criticPrompts)
+    ? options.criticPrompts.filter(
+        (p): p is CriticPromptDef =>
+          typeof p?.name === 'string' && p.name.length > 0 &&
+          typeof p?.prompt === 'string' && p.prompt.length > 0,
+      )
+    : [];
+  const prompts = suppliedPrompts.length > 0
+    ? suppliedPrompts
+    : getCriticPrompts(agentName ?? '');
 
-  // Run all 3 critics in parallel
+  // Run all critics in parallel
   const promises = prompts.map(async ({ name, prompt }) => {
     try {
       const output = await runCritic(prompt, evaluationTask, name);

@@ -70,6 +70,20 @@ export { createMemory, SqliteMemoryProvider, PostgresMemoryProvider } from './me
 export { loadNotificationConfig } from './evolution/notifications.js';
 export type { NotificationConfig } from './evolution/notifications.js';
 
+// V0.12.1 — the production-loop composition surface. `buildEvolutionLoop`
+// wires tracker/patterns/safety/legacy-optimizer/opt-in-GEPA/notifications
+// around a DarwinLoop exactly the way the CLI run path does — external
+// post-run hooks (score with your own judges via `runMultiCritic`'s
+// `criticPrompts`, then drive the same evolution cycle) previously had to
+// deep-import these from `dist/`, which the package `exports` map blocks.
+// The individual classes are exported for consumers composing custom loops.
+export { buildEvolutionLoop } from './evolution/build-loop.js';
+export { DarwinLoop, type EvolutionResult } from './evolution/loop.js';
+export { ExperimentTracker } from './evolution/tracker.js';
+export { PatternDetector } from './evolution/patterns.js';
+export { PromptOptimizer, type AgentToolContext } from './evolution/optimizer.js';
+export { SafetyGate } from './evolution/safety.js';
+
 // V0.5.0-alpha.2 — GEPA-Style Reflective Optimizer (S1185 Phase 2 A2)
 // V0.5.1 — crowdingDistance + ParetoTruncationStrategy + GepaOptimizer.merge + reflectionRunPrompt
 export {

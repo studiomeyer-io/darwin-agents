@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-07-16
+
+Export patch — no behavioural change. Completes the v0.12.0
+"bring-your-own-judges" story: custom judges were usable, but an external
+post-run hook still could not *drive the evolution loop* from the published
+package, because the loop-composition surface was internal and the package
+`exports` map (correctly) blocks deep imports from `dist/`.
+
+### Added
+
+- **Root exports for the loop-composition surface:** `buildEvolutionLoop`
+  (wires tracker/patterns/safety/legacy-optimizer/opt-in-GEPA/notifications
+  around a `DarwinLoop` exactly like the CLI run path — GEPA activates via
+  `agent.evolution.useGepa`), plus the individual classes `DarwinLoop`,
+  `ExperimentTracker`, `PatternDetector`, `PromptOptimizer`, `SafetyGate`
+  and the types `EvolutionResult` / `AgentToolContext` for consumers
+  composing custom loops. New `tests/root-exports.test.ts` locks the surface.
+
 ## [0.12.0] — 2026-07-16
 
 Bring-your-own-judges: the multi-critic runner accepts caller-supplied critic

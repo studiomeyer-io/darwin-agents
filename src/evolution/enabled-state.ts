@@ -81,6 +81,7 @@ const OVERRIDE_KEYS = [
   'candidateSelection',
   'skipPerfectFeedback',
   'maxMergeInvocations',
+  'maxTestDays',
 ] as const;
 
 /**
@@ -128,6 +129,8 @@ export function resolveEvolutionConfig(
           resolved.candidateSelection = value as EvolutionConfig['candidateSelection'];
         } else if (key === 'maxMergeInvocations') {
           resolved.maxMergeInvocations = value as number;
+        } else if (key === 'maxTestDays') {
+          resolved.maxTestDays = value as number;
         } else {
           // Remaining override keys are all boolean flags (useGepa / useMerge /
           // paretoGate / useCoverage / useDemos / skipPerfectFeedback).

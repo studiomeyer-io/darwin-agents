@@ -24,7 +24,7 @@ import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
 import type { SafetyGate, ABTestSamples } from './safety.js';
 import type { PatternDetector } from './patterns.js';
 import type { NotificationConfig } from './notifications.js';
-import { notifyABTestComplete, notifyEvolutionStarted, notifyRollback } from './notifications.js';
+import { notifyABTestComplete, notifyABTestTimeout, notifyEvolutionStarted, notifyRollback } from './notifications.js';
 import type { GepaOptimizer, ScoredVariant } from './optimizer-gepa.js';
 import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
@@ -96,6 +96,15 @@ const DEFAULT_MIN_VALID_OUTPUT = 2000;
 
 /** Minimum % of runs with sources needed before evolution triggers */
 const MIN_SOURCE_COVERAGE = 0.5;
+
+/**
+ * Upper bound on the probe walk in `nextFreeVersion`. Numeric "vN" histories
+ * are free after a single step; the walk only iterates for non-numeric labels,
+ * where `nextVersion` appends rather than increments. Purely a termination
+ * guard — exhausting it returns a possibly-taken label, which is no worse than
+ * the pre-fix behaviour.
+ */
+const MAX_VERSION_PROBES = 100;
 
 // ─── Loop ──────────────────────────────────────────────
 
@@ -196,6 +205,21 @@ export class DarwinLoop {
 
           result.abTestCompleted = true;
           result.message = `A/B test auto-ended: ${loser} too unreliable. ${winner} wins.`;
+          return result;
+        }
+
+        // The wall-clock budget must also apply here. An agent whose runs are
+        // consistently too short never reaches Step 3, so without this check
+        // its test would stay open past the budget — and a low-throughput
+        // agent is exactly the case the budget exists for.
+        if (this.isTestExpired(currentTest)) {
+          await this.concludeInconclusive(agent, currentTest);
+          result.abTestCompleted = true;
+          result.newVersion = currentTest.versionA;
+          result.message =
+            `A/B test timed out after ${this.agent?.evolution?.maxTestDays}d without reaching ` +
+            `minRuns (${currentTest.runsA}/${currentTest.runsB} of ${currentTest.minRuns}). ` +
+            `Keeping ${currentTest.versionA}; ${currentTest.versionB} was not promoted.`;
           return result;
         }
       }
@@ -318,9 +342,24 @@ export class DarwinLoop {
     };
 
     const state = await this.memory.getState();
-    if (state.abTests[agentName]) {
-      result.message =
-        `An A/B test is already running for "${agentName}" — let it finish before forcing another.`;
+    const runningTest = state.abTests[agentName];
+    if (runningTest) {
+      // "Let it finish" is bad advice for a test that is already past its
+      // wall-clock budget — nothing will finish it until a run comes through
+      // the loop and trips the expiry check, and a low-throughput agent may
+      // not produce one for a while. Say what actually unblocks it, and name
+      // the cost of the shortcut: `--reset` also points `activeVersions` back
+      // at v1 (evolve.ts), which throws away an evolved incumbent.
+      result.message = this.isTestExpired(runningTest)
+        ? `An A/B test for "${agentName}" is past its ${this.agent?.evolution?.maxTestDays}d budget ` +
+          `(${runningTest.runsA}/${runningTest.runsB} of ${runningTest.minRuns} per arm) but is still open. ` +
+          // Deliberately stops at "closes it": a timeout keeps the incumbent,
+          // but the same run could instead cross the unreliability threshold
+          // and close the test conclusively. Promising the outcome here would
+          // be wrong in that (narrow) case; promising the close is always true.
+          `The next run through the loop closes it. ` +
+          `("darwin evolve ${agentName} --reset" clears it immediately, but also resets the active version to v1.)`
+        : `An A/B test is already running for "${agentName}" — let it finish before forcing another.`;
       return result;
     }
 
@@ -431,8 +470,12 @@ export class DarwinLoop {
       );
     }
 
-    // Create a new prompt version
-    const newVersion = this.nextVersion(activePrompt.version);
+    // Create a new prompt version. The label must clear the WHOLE version
+    // history, not just the active version — a rejected challenger keeps its
+    // label, and reusing it would upsert over that record (see
+    // `nextFreeVersion`).
+    const existingVersions = await this.memory.getAllPromptVersions(agent);
+    const newVersion = this.nextFreeVersion(activePrompt.version, existingVersions);
     const newPromptVersion: PromptVersion = {
       version: newVersion,
       agentName: agent,
@@ -558,8 +601,29 @@ export class DarwinLoop {
       abSamples,
     );
 
-    if (outcome === 'continue') {
+    // v0.13.0 — wall-clock budget. `minRuns` is a sample budget and knows
+    // nothing about throughput: a low-variance test correctly demands ~30 runs
+    // per arm, which a twice-a-week agent cannot pay inside a year — and the
+    // agent cannot evolve at all while its test is open. When the budget is
+    // exhausted, close the test WITHOUT promoting: inconclusive evidence must
+    // never activate a challenger (judge variance dwarfs the real lift), but
+    // the slot is freed so a later cycle can try a different one. Off by
+    // default, so the untimed path stays exactly as it was.
+    const expired = this.isTestExpired(currentTest);
+    if (outcome === 'continue' && !expired) {
       return { completed: false, message: 'A/B test continues.' };
+    }
+
+    if (outcome === 'continue' && expired) {
+      await this.concludeInconclusive(agentName, currentTest);
+      return {
+        completed: true,
+        winner: currentTest.versionA,
+        message:
+          `A/B test timed out after ${this.agent?.evolution?.maxTestDays}d without reaching ` +
+          `minRuns (${currentTest.runsA}/${currentTest.runsB} of ${currentTest.minRuns}). ` +
+          `Keeping ${currentTest.versionA}; ${currentTest.versionB} was not promoted.`,
+      };
     }
 
     // Test is complete — determine winner
@@ -641,6 +705,57 @@ export class DarwinLoop {
       winner,
       message: `A/B test complete: ${winner} wins over ${loser} ${scoreMsg}.`,
     };
+  }
+
+  /**
+   * Has this A/B test outlived `evolution.maxTestDays`?
+   *
+   * Unset / non-positive / non-finite budget → never expires (the default).
+   * An unparsable `startedAt` also never expires: a clock we cannot read is no
+   * reason to abandon a test that may be collecting good data.
+   */
+  private isTestExpired(test: ABTest, now: number = Date.now()): boolean {
+    const maxDays = this.agent?.evolution?.maxTestDays;
+    if (typeof maxDays !== 'number' || !Number.isFinite(maxDays) || maxDays <= 0) {
+      return false;
+    }
+    const started = Date.parse(test.startedAt);
+    if (!Number.isFinite(started)) {
+      return false;
+    }
+    return now - started > maxDays * 24 * 60 * 60 * 1000;
+  }
+
+  /**
+   * Close a timed-out A/B test in favour of the incumbent.
+   *
+   * Deliberately NOT a `rollback()`: nothing failed, and the incumbent is
+   * already the active version — re-activating it keeps the persisted state
+   * self-consistent for callers that read `activeVersions` without re-deriving
+   * it. `lastKnownGood` is left untouched, since a timeout produced no new
+   * evidence about which version is good.
+   */
+  private async concludeInconclusive(agentName: string, test: ABTest): Promise<void> {
+    await this.activateVersion(agentName, test.versionA);
+    await this.memory.updateState((s) => {
+      s.abTests[agentName] = null;
+      s.activeVersions[agentName] = test.versionA;
+      return s;
+    });
+
+    // Best-effort, like every other notification on this path — a test that
+    // disappears from `abTests` without a word is invisible to anyone watching
+    // the alert channel.
+    notifyABTestTimeout(
+      this.notifications,
+      agentName,
+      test.versionA,
+      test.versionB,
+      test.runsA,
+      test.runsB,
+      test.minRuns,
+      this.agent?.evolution?.maxTestDays ?? 0,
+    ).catch(() => {/* swallow — notification is best-effort */});
   }
 
   // ─── Rollback ──────────────────────────────────────
@@ -1160,6 +1275,50 @@ export class DarwinLoop {
     }
     // Fallback: append a version number
     return `${current}-v2`;
+  }
+
+  /**
+   * Pick a label for a new challenger that collides with NOTHING already in
+   * the agent's version history.
+   *
+   * `nextVersion(active)` on its own is unsafe. When a challenger LOSES its
+   * A/B test the incumbent stays active, so the next evolution cycle derives
+   * the very same label again ("v1" active -> "v2", twice).
+   * `savePromptVersion` upserts on (agentName, version), so the second
+   * challenger overwrites the first one's row: its prompt text is gone, and
+   * `createdAt`/`parentVersion` are left describing a prompt that no longer
+   * exists. Every reader of the archive — merge-parent selection, Pareto
+   * candidate selection, `darwin status` — then works off a fabricated
+   * history of two versions instead of the N challengers actually tried.
+   *
+   * Numbering therefore continues above the HIGHEST version in history rather
+   * than above the active one. When the active version already IS the highest
+   * (the healthy case, and the only case the pre-existing suite constructs)
+   * this returns exactly what `nextVersion(active)` returned.
+   */
+  private nextFreeVersion(active: string, existing: readonly PromptVersion[]): string {
+    const taken = new Set(existing.map((v) => v.version));
+
+    // Anchor on the highest "vN" in history; fall back to the active label so
+    // agents whose history is entirely non-numeric behave as before.
+    let anchor = active;
+    let anchorInt = /^v\d+$/.test(active) ? this.versionInt(active) : -1;
+    for (const v of existing) {
+      if (!/^v\d+$/.test(v.version)) continue;
+      const n = this.versionInt(v.version);
+      if (n > anchorInt) {
+        anchorInt = n;
+        anchor = v.version;
+      }
+    }
+
+    // Non-numeric labels fall through nextVersion's `${current}-v2` branch,
+    // which can itself collide — walk until free so the upsert never clobbers.
+    let candidate = this.nextVersion(anchor);
+    for (let i = 0; taken.has(candidate) && i < MAX_VERSION_PROBES; i++) {
+      candidate = this.nextVersion(candidate);
+    }
+    return candidate;
   }
 
   // ─── Input Validation (P0-1) ─────────────────────

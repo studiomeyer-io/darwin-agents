@@ -16,6 +16,7 @@
  *   --candidate-selection <active|best|pareto|epsilon-greedy>  (v0.10.0)
  *   --skip-perfect / --no-skip-perfect                         (v0.11.0)
  *   --max-merge <n>                                            (v0.11.0)
+ *   --max-test-days <n>                                        (v0.13.0)
  */
 
 import type { EvolutionConfigOverride } from '../types.js';
@@ -46,6 +47,7 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--skip-perfect':
     case '--no-skip-perfect':
     case '--max-merge':
+    case '--max-test-days':
       return true;
     default:
       return false;
@@ -145,6 +147,29 @@ export function applyEvolutionFlag(
       }
       return 1;
     }
+    case '--max-test-days': {
+      // Same footguns as --max-merge: a missing value or a following flag is
+      // not this flag's argument, and Number() would coerce '' to 0.
+      if (nextArg === undefined || nextArg.startsWith('--')) {
+        console.warn('[darwin] --max-test-days needs a non-negative integer value — ignored.');
+        return 0;
+      }
+      // `0` is the OFF switch, mirroring `--max-merge 0`. Overrides are merged,
+      // never deleted (`setEvolutionConfigOverrides`), and `--reset` does not
+      // touch them — so without an in-band "no budget" value a once-persisted
+      // budget could never be removed except by hand-editing the state blob.
+      // `isTestExpired` already reads 0 as "no budget", so this needs no
+      // special case downstream. Strict digits-only rejects '', '-3', '2.5',
+      // '1e3', 'abc', which Number() would otherwise coerce.
+      if (/^\d+$/.test(nextArg.trim())) {
+        target.maxTestDays = Number(nextArg.trim());
+      } else {
+        console.warn(
+          `[darwin] --max-test-days "${nextArg}" is not a non-negative integer — ignored.`,
+        );
+      }
+      return 1;
+    }
     default:
       return 0;
   }
@@ -185,6 +210,7 @@ export function hasAnyEvolutionFlag(override: EvolutionConfigOverride): boolean 
     override.useDemos !== undefined ||
     override.candidateSelection !== undefined ||
     override.skipPerfectFeedback !== undefined ||
-    override.maxMergeInvocations !== undefined
+    override.maxMergeInvocations !== undefined ||
+    override.maxTestDays !== undefined
   );
 }

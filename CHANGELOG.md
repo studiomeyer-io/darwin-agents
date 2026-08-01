@@ -2,6 +2,77 @@
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-08-01
+
+### Fixed
+
+- **A rejected challenger is no longer overwritten by the next one.** The
+  challenger's version label was derived from the *active* version
+  (`nextVersion(activePrompt.version)`). That is only unique while the active
+  version is also the newest: when an A/B test concludes in favour of the
+  incumbent, the loser keeps its label and the incumbent stays active, so the
+  next evolution cycle produced the loser's label a second time.
+  `savePromptVersion` upserts on (agentName, version), so the new challenger
+  overwrote the old row in place — its prompt text was destroyed, and
+  `createdAt`/`parentVersion` were left describing a prompt that no longer
+  existed.
+
+  Observed on a live agent: a version row still dated to its first challenger
+  while carrying text generated two weeks later, with `totalRuns` reset to 0 on
+  every cycle. The damage is not limited to bookkeeping — merge-parent
+  selection, Pareto candidate selection and `darwin status` all read the
+  version archive through `getAllPromptVersions`, so GEPA was choosing parents
+  from a history that had been silently collapsed to two entries.
+
+  Numbering now continues above the highest version in history rather than
+  above the active one. When the active version already is the highest — the
+  healthy case, and the only case the previous suite constructed — the label is
+  unchanged. `tests/version-collision.test.ts` asserts the contract ("generating
+  a challenger must not rewrite an existing version") rather than a named
+  victim.
+
+  Note for anyone reading the old tests: `loop-integration-v07.ts` deliberately
+  seeds v1/v2 as history with v3 active, commented "no name clash with the
+  existing versions". The suite routed around this defect instead of covering
+  it.
+
+### Added
+
+- **`evolution.maxTestDays` — an optional wall-clock budget per A/B test**
+  (CLI `--max-test-days <n>`, persisted like the other advanced flags).
+  `minRuns` is a sample budget with no notion of throughput:
+  `computeDynamicMinRuns` correctly raises the bar to the 30-run ceiling when
+  scores cluster tightly, but a low-frequency agent cannot pay 30 runs per arm
+  in any useful timeframe — and it cannot evolve at all while its test is open.
+
+  When the budget is exhausted without both arms reaching `minRuns`, the test
+  closes as inconclusive: the incumbent stays active and the slot is freed for
+  a later challenger. A timeout **never** promotes the challenger. Lowering
+  `minRuns` instead would trade the deadlock for promotions on noise, which is
+  worse — measured judge variance (±1 on a 10-point scale) dwarfs the real
+  evolution lift (~+0.1–0.2, `benchmark/results/`).
+
+  Unset is the default and leaves the untimed path exactly as it was. Non-
+  positive, non-finite, and unparsable-`startedAt` cases never expire a test.
+  `--max-test-days 0` is the explicit off switch. Overrides are merged rather
+  than deleted and `--reset` does not clear them, so without an in-band "no
+  budget" value a persisted budget would have been irreversible short of
+  editing the state blob. (`--max-merge 0` likewise accepts an in-band zero,
+  though there it means "cap at zero merges" rather than "no cap".)
+
+  The budget is also enforced on the incomplete-run path inside
+  `DarwinLoop.afterRun`, which returns before the normal A/B handling — an
+  agent whose runs are consistently too short to score is precisely the
+  low-throughput case the budget targets. Note this covers SDK and
+  `buildEvolutionLoop` callers: the `darwin run` CLI already returns on a
+  short output *before* reaching the loop at all, so that path is unchanged.
+
+  Closing a test this way emits its own `notifyABTestTimeout` alert rather than
+  reusing the completion notification, which announces a winner and a score
+  delta that a timeout does not have. The elapsed time it reports is the
+  configured budget; the actual close happens on the first run the loop
+  processes after the budget expires, so real elapsed time is at least that.
+
 ## [0.12.2] — 2026-07-17
 
 ### Security

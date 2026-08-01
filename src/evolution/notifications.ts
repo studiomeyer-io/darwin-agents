@@ -58,6 +58,39 @@ export async function notifyABTestComplete(
 }
 
 /**
+ * Notify that an A/B test was closed by its wall-clock budget
+ * (`evolution.maxTestDays`) without ever reaching `minRuns`.
+ *
+ * Deliberately NOT routed through {@link notifyABTestComplete}: that message
+ * announces a winner and a score delta, and a timeout produced neither. The
+ * incumbent kept its slot because nothing beat it, not because it won.
+ */
+export async function notifyABTestTimeout(
+  config: NotificationConfig,
+  agentName: string,
+  incumbent: string,
+  challenger: string,
+  runsA: number,
+  runsB: number,
+  minRuns: number,
+  maxTestDays: number,
+): Promise<void> {
+  const msg = [
+    `⏱ *Darwin A/B Test Timed Out*`,
+    ``,
+    `Agent: \`${agentName}\``,
+    // "past its Nd budget", not "ran exactly Nd" — the close happens on the
+    // first recorded run after expiry, so real elapsed time is at least N.
+    `Past its ${maxTestDays}d budget without reaching minRuns (${runsA}/${runsB} of ${minRuns} per arm).`,
+    ``,
+    `Inconclusive — keeping *${incumbent}*. ${challenger} was NOT promoted.`,
+    `The slot is free again for a different challenger.`,
+  ].join('\n');
+
+  await sendTelegram(config, msg);
+}
+
+/**
  * Notify that a new prompt version was generated and A/B test started.
  */
 export async function notifyEvolutionStarted(

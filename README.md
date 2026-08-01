@@ -281,6 +281,21 @@ Once the cap is hit the loop falls back to the reflective path for good. Left
 unset it is uncapped (the v0.10 behaviour); set it to `5` to match GEPA's
 protective default.
 
+**A/B time budget** (`maxTestDays`, v0.13) bounds how long a single A/B test may
+stay open. `minRuns` is a *sample* budget and knows nothing about throughput:
+when scores cluster tightly the dynamic gate correctly raises the bar to 30 runs
+per arm, but an agent that runs a few times a week cannot pay that inside a
+year — and it cannot evolve at all while a test is open. When the budget runs
+out before both arms reach `minRuns`, the test closes as inconclusive: the
+incumbent keeps the slot and a later cycle is free to try a different
+challenger.
+
+A timeout never promotes the challenger. Lowering `minRuns` instead would trade
+the deadlock for promotions on noise, which is the worse failure — judge
+variance (±1 on a 10-point scale) is larger than the real evolution lift
+(~+0.1–0.2, see `benchmark/results/`). Unset means tests run until they conclude
+on their own; `0` also means "no budget", so a persisted budget can be removed.
+
 ```typescript
 evolution: {
   enabled: true,
@@ -289,6 +304,7 @@ evolution: {
   perfectFeedbackScore: 10,          // score (1-10) counted as "perfect" (default 10)
   useMerge: true,
   maxMergeInvocations: 5,            // GEPA max_merge_invocations — cap merge over the agent's life
+  maxTestDays: 30,                   // close an A/B test after 30d if it cannot reach minRuns
 },
 ```
 
@@ -556,6 +572,7 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--candidate-selection <s>` | Reflection parent strategy: `active` \| `best` \| `pareto` \| `epsilon-greedy` (v0.10) |
 | `--skip-perfect` / `--no-skip-perfect` | Drop perfect-score runs from optimizer feedback — GEPA `skip_perfect_score` (v0.11) |
 | `--max-merge <n>` | Lifetime cap on merge-derived challengers — GEPA `max_merge_invocations` (v0.11) |
+| `--max-test-days <n>` | Close an A/B test after n days if it cannot reach `minRuns`; keeps the incumbent, never promotes. `0` = no budget (v0.13) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.

@@ -21,6 +21,7 @@
  *   --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
  *   --skip-perfect / --no-skip-perfect   drop perfect-score runs from optimizer feedback (v0.11)
  *   --max-merge <n>               lifetime cap on merge-derived challengers (v0.11)
+ *   --max-test-days <n>           wall-clock budget per A/B test in days (v0.13)
  */
 
 import { createMemory } from '../memory/index.js';
@@ -148,6 +149,7 @@ function describeOverride(o: EvolutionConfigOverride): string {
   if (o.candidateSelection !== undefined) parts.push(`candidateSelection=${o.candidateSelection}`);
   if (o.skipPerfectFeedback !== undefined) parts.push(`skipPerfect=${o.skipPerfectFeedback}`);
   if (o.maxMergeInvocations !== undefined) parts.push(`maxMerge=${o.maxMergeInvocations}`);
+  if (o.maxTestDays !== undefined) parts.push(`maxTestDays=${o.maxTestDays}`);
   return parts.length > 0 ? parts.join(', ') : '(none)';
 }
 
@@ -169,5 +171,8 @@ function describeConfig(evo: EvolutionConfig | undefined): string {
   // maxMerge is genuinely optional (unset = uncapped), so it is shown only when
   // set — unlike the always-shown booleans above.
   if (evo.maxMergeInvocations !== undefined) parts.push(`maxMerge=${evo.maxMergeInvocations}`);
+  // Same rule as maxMerge — unset means "no wall-clock budget", so it is only
+  // worth a slot in the summary once someone has set it.
+  if (evo.maxTestDays !== undefined) parts.push(`maxTestDays=${evo.maxTestDays}`);
   return parts.join(', ');
 }

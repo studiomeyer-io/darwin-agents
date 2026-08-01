@@ -54,6 +54,25 @@ export interface EvolutionConfig {
   normalizeForJudging?: boolean;
   /** Minimum runs before first optimization */
   minRuns?: number;
+  /**
+   * Wall-clock budget for a single A/B test, in days. When a test has been
+   * running longer than this WITHOUT reaching `minRuns` on both arms, it is
+   * closed as inconclusive: the incumbent (A) stays active and the slot is
+   * freed so a later cycle can try a different challenger.
+   *
+   * This exists because `minRuns` is a SAMPLE budget with no notion of
+   * throughput. `computeDynamicMinRuns` correctly raises the bar to 30 when
+   * scores cluster tightly — but an agent that runs a few times per week needs
+   * months of wall-clock to pay that, and the agent cannot evolve at all while
+   * a test is open. Lowering `minRuns` instead would trade the deadlock for
+   * promotions on noise, which is worse: measured judge variance (±1 on a
+   * 10-point scale) dwarfs the real evolution lift (~+0.1–0.2).
+   *
+   * A timeout therefore NEVER promotes the challenger — inconclusive evidence
+   * is not evidence. Unset (the default) means tests run until they conclude
+   * on their own, exactly as before.
+   */
+  maxTestDays?: number;
   /** Minimum output length to save (default: 2000). Lower for short-form agents like marketing. */
   minOutputLength?: number;
   /**
@@ -575,6 +594,8 @@ export interface EvolutionConfigOverride {
   skipPerfectFeedback?: boolean;
   /** v0.11.0 — lifetime merge cap (`--max-merge <n>`). */
   maxMergeInvocations?: number;
+  /** v0.13.0 — wall-clock budget per A/B test in days (`--max-test-days <n>`). */
+  maxTestDays?: number;
 }
 
 // ─── Patterns ───────────────────────────────────────

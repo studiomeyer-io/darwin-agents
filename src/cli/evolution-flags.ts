@@ -139,10 +139,13 @@ export function applyEvolutionFlag(
         console.warn('[darwin] --max-merge needs a non-negative integer value — ignored.');
         return 0;
       }
-      // Strict non-negative-integer match rejects '', ' ', '-3', '2.5', '0x10',
+      // Strict non-negative-integer match rejects '', ' ', '2.5', '0x10',
       // '1e3', 'abc' (Number() would coerce several of those, e.g. Number('')
-      // === 0, silently disabling merge for the agent's life). The value token
-      // is consumed either way — it was clearly meant as this flag's argument.
+      // === 0, silently disabling merge for the agent's life). Such a value
+      // token is consumed — it was clearly meant as this flag's argument.
+      // `-`-prefixed tokens (`-3`, `-v`) never reach this point: the guard
+      // above treats them as a missing value and leaves them unconsumed
+      // (v0.13.2 — `-v` is a real CLI flag).
       if (/^\d+$/.test(nextArg.trim())) {
         target.maxMergeInvocations = Number(nextArg.trim());
       } else {

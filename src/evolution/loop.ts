@@ -1332,12 +1332,14 @@ export class DarwinLoop {
     // Non-numeric labels fall through nextVersion's `${current}-v2` branch,
     // which can itself collide — walk until free so the upsert never clobbers.
     //
-    // The bound is the history size, not an arbitrary constant: every step
-    // strictly progresses (numeric "vN" strictly increments; anything else,
-    // including the progressStep fallback below, strictly grows in length),
-    // so the candidate sequence never revisits a label, each collision
-    // consumes a distinct member of `taken`, and after `taken.size`
-    // collisions the next candidate MUST be free — unconditionally.
+    // The bound is the history size, not an arbitrary constant: the candidate
+    // sequence is injective. Numeric "vN" either advances, or (above 2^53,
+    // where parseInt loses precision and can even step down once, e.g.
+    // v…93 → v…92) reaches a label whose next step self-maps and enters the
+    // append path; appended labels strictly grow in length. A sequence that
+    // never revisits a label means each collision consumes a distinct member
+    // of `taken`, so after `taken.size` collisions the next candidate MUST be
+    // free — unconditionally.
     let candidate = this.progressStep(anchor);
     for (let i = 0; taken.has(candidate) && i <= taken.size; i++) {
       candidate = this.progressStep(candidate);

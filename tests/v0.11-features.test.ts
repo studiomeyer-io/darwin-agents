@@ -108,11 +108,18 @@ describe('v0.11 CLI flags', () => {
     assert.equal(parseEvolutionConfigFlags(['--max-merge', '0']).override.maxMergeInvocations, 0);
   });
 
-  it('ignores a non-integer / negative --max-merge value but still consumes it', () => {
+  it('ignores a non-integer --max-merge value (consumed); dash-prefixed tokens stay unconsumed', () => {
     const { override, rest } = parseEvolutionConfigFlags(['--max-merge', 'abc', 'researcher']);
     assert.equal(override.maxMergeInvocations, undefined);
     assert.deepEqual(rest, ['researcher']); // value consumed, not left as a positional
-    assert.equal(parseEvolutionConfigFlags(['--max-merge', '-3']).override.maxMergeInvocations, undefined);
+    // '-3' is treated as a missing value since v0.13.2 (the guard covers all
+    // '-'-prefixed tokens because '-v' is a real CLI flag) — it is NOT
+    // consumed and survives into rest.
+    {
+      const r = parseEvolutionConfigFlags(['--max-merge', '-3']);
+      assert.equal(r.override.maxMergeInvocations, undefined);
+      assert.deepEqual(r.rest, ['-3']);
+    }
     assert.equal(parseEvolutionConfigFlags(['--max-merge', '2.5']).override.maxMergeInvocations, undefined);
   });
 

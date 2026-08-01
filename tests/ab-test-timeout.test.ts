@@ -223,6 +223,83 @@ describe('maxTestDays config plumbing', () => {
   });
 });
 
+describe('maxTestDays is snapshotted onto the test at start (v0.13.1)', () => {
+  // Third-model-review finding (Codex R1 F5): expiry used to read the
+  // CURRENT invocation's config, so a test started via a one-off CLI
+  // `--max-test-days 7` silently lost its budget on the next plain run.
+  // A deadline is a property of the test — snapshot it at start.
+
+  async function startTestWithBudget(maxTestDays: number | undefined) {
+    const memory = createMockMemory();
+    memory._versions.push(makePromptVersion({ version: 'v1', active: true, promptText: 'incumbent' }));
+    for (let i = 0; i < 20; i++) {
+      const e = makeExperiment({
+        agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+        metrics: metrics({ qualityScore: 4.0 }),
+      });
+      e.feedback = { score: 4.0, report: `weak ${i}`, evaluator: 'multi-critic' };
+      memory._experiments.push(e);
+    }
+    const loop = new DarwinLoop({
+      memory,
+      tracker: new ExperimentTracker(memory),
+      optimizer: new PromptOptimizer(async () => 'challenger text'),
+      safety: new SafetyGate(),
+      patterns: new PatternDetector(memory),
+      agent: {
+        name: 'researcher', role: 'Researcher', description: 'test agent', type: 'llm',
+        systemPrompt: 'prompt', model: 'claude-sonnet-4-6',
+        evolution: { enabled: true, minRuns: 5, maxTestDays },
+      },
+    });
+    await loop.afterRun(makeExperiment({
+      agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+      metrics: metrics({ qualityScore: 4.0 }),
+      feedback: { score: 4.0, report: 'trigger', evaluator: 'multi-critic' },
+    }));
+    return memory;
+  }
+
+  it('writes the budget onto the started test, and omits it when unset', async () => {
+    const withBudget = await startTestWithBudget(7);
+    assert.equal(withBudget._state.abTests['researcher']?.maxTestDays, 7);
+
+    const without = await startTestWithBudget(undefined);
+    assert.ok(without._state.abTests['researcher'], 'test should have started');
+    assert.equal(without._state.abTests['researcher']?.maxTestDays, undefined);
+  });
+
+  it('a later invocation WITHOUT the budget flag still expires the test', async () => {
+    const memory = await startTestWithBudget(7);
+    // Age the snapshotted test beyond its budget.
+    memory._state.abTests['researcher']!.startedAt = new Date(Date.now() - 8 * DAY_MS).toISOString();
+
+    // The "next plain invocation": a loop whose agent config has NO budget.
+    const plainLoop = new DarwinLoop({
+      memory,
+      tracker: new ExperimentTracker(memory),
+      optimizer: new PromptOptimizer(async () => 'unused'),
+      safety: new SafetyGate(),
+      patterns: new PatternDetector(memory),
+      agent: {
+        name: 'researcher', role: 'Researcher', description: 'test agent', type: 'llm',
+        systemPrompt: 'prompt', model: 'claude-sonnet-4-6',
+        evolution: { enabled: true, minRuns: 5 },
+      },
+    });
+
+    const result = await plainLoop.afterRun(makeExperiment({
+      agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+      metrics: metrics(),
+      feedback: { score: 7, report: 'later run', evaluator: 'multi-critic' },
+    }));
+
+    assert.equal(result.abTestCompleted, true, 'snapshot must survive the flag being absent');
+    assert.equal((await memory.getState()).abTests['researcher'], null);
+    assert.equal((await memory.getState()).activeVersions['researcher'], 'v1');
+  });
+});
+
 describe('forceEvolve against an expired-but-open test', () => {
   it('still refuses, and leaves the test untouched', async () => {
     // `forceEvolve` reads the A/B test to decide whether to refuse. Since the

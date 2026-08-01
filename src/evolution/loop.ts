@@ -97,15 +97,6 @@ const DEFAULT_MIN_VALID_OUTPUT = 2000;
 /** Minimum % of runs with sources needed before evolution triggers */
 const MIN_SOURCE_COVERAGE = 0.5;
 
-/**
- * Upper bound on the probe walk in `nextFreeVersion`. Numeric "vN" histories
- * are free after a single step; the walk only iterates for non-numeric labels,
- * where `nextVersion` appends rather than increments. Purely a termination
- * guard — exhausting it returns a possibly-taken label, which is no worse than
- * the pre-fix behaviour.
- */
-const MAX_VERSION_PROBES = 100;
-
 // ─── Loop ──────────────────────────────────────────────
 
 export class DarwinLoop {
@@ -217,7 +208,7 @@ export class DarwinLoop {
           result.abTestCompleted = true;
           result.newVersion = currentTest.versionA;
           result.message =
-            `A/B test timed out after ${this.agent?.evolution?.maxTestDays}d without reaching ` +
+            `A/B test timed out after ${this.effectiveTestBudget(currentTest)}d without reaching ` +
             `minRuns (${currentTest.runsA}/${currentTest.runsB} of ${currentTest.minRuns}). ` +
             `Keeping ${currentTest.versionA}; ${currentTest.versionB} was not promoted.`;
           return result;
@@ -351,7 +342,7 @@ export class DarwinLoop {
       // the cost of the shortcut: `--reset` also points `activeVersions` back
       // at v1 (evolve.ts), which throws away an evolved incumbent.
       result.message = this.isTestExpired(runningTest)
-        ? `An A/B test for "${agentName}" is past its ${this.agent?.evolution?.maxTestDays}d budget ` +
+        ? `An A/B test for "${agentName}" is past its ${this.effectiveTestBudget(runningTest)}d budget ` +
           `(${runningTest.runsA}/${runningTest.runsB} of ${runningTest.minRuns} per arm) but is still open. ` +
           // Deliberately stops at "closes it": a timeout keeps the incumbent,
           // but the same run could instead cross the unreliability threshold
@@ -500,7 +491,11 @@ export class DarwinLoop {
     const agentMinRuns = this.agent?.evolution?.minRuns;
     const dynamicMinRuns = this.safety.computeDynamicMinRuns(allExperiments, agentMinRuns);
 
-    // Start A/B test
+    // Start A/B test. The wall-clock budget is snapshotted onto the test —
+    // a deadline belongs to the test, not to whichever invocation later
+    // evaluates it (a one-off CLI `--max-test-days` would otherwise evaporate
+    // on the next plain run).
+    const budget = this.agent?.evolution?.maxTestDays;
     const newTest: ABTest = {
       versionA: activePrompt.version,
       versionB: newVersion,
@@ -510,6 +505,9 @@ export class DarwinLoop {
       failsB: 0,
       minRuns: dynamicMinRuns,
       startedAt: new Date().toISOString(),
+      ...(typeof budget === 'number' && Number.isFinite(budget) && budget > 0
+        ? { maxTestDays: budget }
+        : {}),
     };
 
     await this.memory.updateState((s) => {
@@ -620,7 +618,7 @@ export class DarwinLoop {
         completed: true,
         winner: currentTest.versionA,
         message:
-          `A/B test timed out after ${this.agent?.evolution?.maxTestDays}d without reaching ` +
+          `A/B test timed out after ${this.effectiveTestBudget(currentTest)}d without reaching ` +
           `minRuns (${currentTest.runsA}/${currentTest.runsB} of ${currentTest.minRuns}). ` +
           `Keeping ${currentTest.versionA}; ${currentTest.versionB} was not promoted.`,
       };
@@ -708,15 +706,34 @@ export class DarwinLoop {
   }
 
   /**
-   * Has this A/B test outlived `evolution.maxTestDays`?
+   * The wall-clock budget (days) governing this test: the budget snapshotted
+   * at test start when present (v0.13.1), else the agent's CURRENT config —
+   * the fallback keeps two pre-snapshot behaviours working: tests started
+   * before v0.13.1 under a persisted budget, and budgets added AFTER a test
+   * was already running.
+   */
+  private effectiveTestBudget(test: ABTest): number | undefined {
+    const snapshot = test.maxTestDays;
+    if (typeof snapshot === 'number' && Number.isFinite(snapshot) && snapshot > 0) {
+      return snapshot;
+    }
+    const configured = this.agent?.evolution?.maxTestDays;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+    return undefined;
+  }
+
+  /**
+   * Has this A/B test outlived its wall-clock budget?
    *
-   * Unset / non-positive / non-finite budget → never expires (the default).
-   * An unparsable `startedAt` also never expires: a clock we cannot read is no
-   * reason to abandon a test that may be collecting good data.
+   * No effective budget → never expires (the default). An unparsable
+   * `startedAt` also never expires: a clock we cannot read is no reason to
+   * abandon a test that may be collecting good data.
    */
   private isTestExpired(test: ABTest, now: number = Date.now()): boolean {
-    const maxDays = this.agent?.evolution?.maxTestDays;
-    if (typeof maxDays !== 'number' || !Number.isFinite(maxDays) || maxDays <= 0) {
+    const maxDays = this.effectiveTestBudget(test);
+    if (maxDays === undefined) {
       return false;
     }
     const started = Date.parse(test.startedAt);
@@ -754,7 +771,7 @@ export class DarwinLoop {
       test.runsA,
       test.runsB,
       test.minRuns,
-      this.agent?.evolution?.maxTestDays ?? 0,
+      this.effectiveTestBudget(test) ?? 0,
     ).catch(() => {/* swallow — notification is best-effort */});
   }
 
@@ -1314,8 +1331,16 @@ export class DarwinLoop {
 
     // Non-numeric labels fall through nextVersion's `${current}-v2` branch,
     // which can itself collide — walk until free so the upsert never clobbers.
+    //
+    // The bound is the history size, not an arbitrary constant: the candidate
+    // sequence never revisits a label (numeric "vN" strictly increments,
+    // non-numeric strictly grows in length), so each collision consumes a
+    // distinct member of `taken` and after `taken.size` collisions the next
+    // candidate MUST be free. The one theoretical exception is parseInt
+    // saturating at 2^53 (candidate stops changing) — unreachable in practice
+    // and pre-existing `nextVersion` arithmetic; the loop still terminates.
     let candidate = this.nextVersion(anchor);
-    for (let i = 0; taken.has(candidate) && i < MAX_VERSION_PROBES; i++) {
+    for (let i = 0; taken.has(candidate) && i <= taken.size; i++) {
       candidate = this.nextVersion(candidate);
     }
     return candidate;

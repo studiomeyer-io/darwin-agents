@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-08-01
+
+Patch on the day of 0.13.0, from an adversarial cross-model review (built
+by Claude Opus, refuted by Claude Fable over four rounds, then reviewed
+by GPT-5.6 — two findings survived all of that and are fixed here).
+
+### Fixed
+
+- **`nextFreeVersion` is now provably collision-free.** The probe walk
+  stopped after a fixed 100 iterations and returned a possibly-taken
+  label — an all-non-numeric history with 101 chained rejected
+  challengers would have been overwritten again. The bound is now the
+  history size itself: the candidate sequence never revisits a label
+  (numeric labels strictly increment, non-numeric strictly grow), so
+  after `|history|` collisions the next candidate must be free. The
+  documented 2^53 parseInt-saturation corner remains theoretical and
+  pre-existing.
+- **The wall-clock budget is snapshotted onto the A/B test at start**
+  (`ABTest.maxTestDays`). Expiry previously read the *current*
+  invocation's config, so a test started via a one-off
+  `darwin run … --max-test-days 7` silently lost its deadline on the
+  next plain invocation. Evaluation prefers the snapshot and falls back
+  to the agent's current config, which keeps both pre-snapshot
+  behaviours working: tests started before 0.13.1 under a persisted
+  budget, and budgets added after a test was already running. All
+  budget messages/notifications now report the effective budget.
+
+### Documented
+
+- README: the budget is enforced inside the evolution loop — a
+  `darwin run` whose output is too short to record returns before the
+  loop, so an agent producing only unrecordable output does not trip
+  the budget until one run reaches the loop (pre-existing reachability,
+  unchanged by 0.13.x; `--reset` is the immediate out).
+- Reviewed and not changed, for the record: the evidence-based
+  unreliability rule (>50% fails at ≥3 attempts) can still conclude an
+  over-budget test and promote the challenger — that is the pre-0.13
+  escape hatch for a crashing arm, fires identically on 0.12.2, and is
+  deliberately evaluated before expiry. Concurrent multi-writer
+  evolution remains outside the engine's guarantees (same envelope as
+  every prior release); `nextFreeVersion` assumes a single writer per
+  agent.
+
 ## [0.13.0] — 2026-08-01
 
 ### Fixed

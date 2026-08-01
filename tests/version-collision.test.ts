@@ -165,6 +165,38 @@ describe('challenger version labels never collide with history', () => {
     }
   });
 
+  it('stays collision-free beyond any fixed probe cap (all-non-numeric history)', async () => {
+    // Third-model-review finding (Codex R1 F3): the original walk stopped
+    // after a fixed 100 probes and returned a possibly-taken label. The bound
+    // is now the history size itself — the candidate sequence never revisits
+    // a label, so after |taken| collisions the next candidate MUST be free.
+    // 101 chained non-numeric labels defeat the old cap exactly.
+    const versions = [
+      makePromptVersion({ version: 'legacy', active: true, promptText: SAFE_PROMPT }),
+    ];
+    let label = 'legacy';
+    for (let i = 0; i < 101; i++) {
+      label = `${label}-v2`;
+      versions.push(makePromptVersion({ version: label, active: false, promptText: `rejected ${i}` }));
+    }
+
+    const { memory, result, before } = await evolveOnce(versions, 'legacy');
+
+    assert.equal(result.promptEvolved, true);
+    const takenBefore = new Set(before.map((v) => v.version));
+    assert.ok(result.newVersion, 'a new version label must be reported');
+    assert.equal(
+      takenBefore.has(result.newVersion!),
+      false,
+      `label ${result.newVersion} collides with the existing history`,
+    );
+    assert.equal(memory._versions.length, before.length + 1, 'challenger must be additive');
+    for (const original of before) {
+      const now = memory._versions.find((v) => v.version === original.version);
+      assert.equal(now?.promptText, original.promptText, `${original.version} was rewritten`);
+    }
+  });
+
   it('is unchanged when the active version already is the highest', async () => {
     // The healthy case: challenger won and was promoted. Numbering must behave
     // exactly as before the fix (v3 active → v4).

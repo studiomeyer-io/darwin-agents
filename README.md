@@ -296,6 +296,14 @@ variance (±1 on a 10-point scale) is larger than the real evolution lift
 (~+0.1–0.2, see `benchmark/results/`). Unset means tests run until they conclude
 on their own; `0` also means "no budget", so a persisted budget can be removed.
 
+Two mechanics worth knowing: the budget is **snapshotted onto the test when it
+starts** (v0.13.1), so a test keeps its deadline even if later invocations run
+without the flag; and expiry is enforced **inside the evolution loop** — a
+`darwin run` whose output is too short to record returns before the loop, so an
+agent producing *only* unrecordable output will not trip the budget until one
+run reaches the loop (`darwin evolve <agent> --reset` clears such a test
+immediately, at the cost of resetting the active version to v1).
+
 ```typescript
 evolution: {
   enabled: true,

@@ -532,6 +532,16 @@ export interface ABTest {
   failsB: number;
   minRuns: number;
   startedAt: string;
+  /**
+   * v0.13.1 — the wall-clock budget (days) SNAPSHOTTED when the test started.
+   * A deadline is a property of the test, not of whoever happens to evaluate
+   * it: without the snapshot, a test started via a one-off
+   * `darwin run … --max-test-days 7` silently lost its budget on the next
+   * plain invocation (expiry read the transient per-invocation config).
+   * Absent on tests started before v0.13.1 or without a budget — evaluation
+   * falls back to the agent's current `evolution.maxTestDays`.
+   */
+  maxTestDays?: number;
 }
 
 export interface DarwinState {

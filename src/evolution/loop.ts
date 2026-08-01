@@ -1332,18 +1332,31 @@ export class DarwinLoop {
     // Non-numeric labels fall through nextVersion's `${current}-v2` branch,
     // which can itself collide — walk until free so the upsert never clobbers.
     //
-    // The bound is the history size, not an arbitrary constant: the candidate
-    // sequence never revisits a label (numeric "vN" strictly increments,
-    // non-numeric strictly grows in length), so each collision consumes a
-    // distinct member of `taken` and after `taken.size` collisions the next
-    // candidate MUST be free. The one theoretical exception is parseInt
-    // saturating at 2^53 (candidate stops changing) — unreachable in practice
-    // and pre-existing `nextVersion` arithmetic; the loop still terminates.
-    let candidate = this.nextVersion(anchor);
+    // The bound is the history size, not an arbitrary constant: every step
+    // strictly progresses (numeric "vN" strictly increments; anything else,
+    // including the progressStep fallback below, strictly grows in length),
+    // so the candidate sequence never revisits a label, each collision
+    // consumes a distinct member of `taken`, and after `taken.size`
+    // collisions the next candidate MUST be free — unconditionally.
+    let candidate = this.progressStep(anchor);
     for (let i = 0; taken.has(candidate) && i <= taken.size; i++) {
-      candidate = this.nextVersion(candidate);
+      candidate = this.progressStep(candidate);
     }
     return candidate;
+  }
+
+  /**
+   * `nextVersion`, hardened to ALWAYS return a different label than its
+   * input. `nextVersion` alone self-maps once `parseInt` saturates at 2^53
+   * (`nextVersion("v9007199254740992") === "v9007199254740992"`), which would
+   * pin the probe walk on one taken candidate forever and hand the upsert a
+   * colliding label — found by the round-2 cross-model review. On a
+   * non-progressing step we switch to the append strategy, which strictly
+   * grows and restores the collision-freedom proof without a carve-out.
+   */
+  private progressStep(current: string): string {
+    const next = this.nextVersion(current);
+    return next === current ? `${current}-v2` : next;
   }
 
   // ─── Input Validation (P0-1) ─────────────────────

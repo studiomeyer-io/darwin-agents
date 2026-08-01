@@ -197,6 +197,30 @@ describe('challenger version labels never collide with history', () => {
     }
   });
 
+  it('survives the parseInt-saturation label without pinning on a taken candidate', async () => {
+    // Round-2 cross-model review counterexample: nextVersion self-maps at
+    // 2^53 (`nextVersion("v9007199254740992") === "v9007199254740992"`). The
+    // raw walk would produce the same taken candidate forever and hand the
+    // upsert a colliding label — worse, an A/B test with versionA ===
+    // versionB. progressStep switches to the append strategy on any
+    // non-progressing step, which strictly grows and closes the carve-out.
+    const saturated = 'v9007199254740992'; // 2^53 — parseInt(x) + 1 === parseInt(x)
+    const versions = [
+      makePromptVersion({ version: saturated, active: true, promptText: SAFE_PROMPT }),
+    ];
+
+    const { memory, result, before } = await evolveOnce(versions, saturated);
+
+    assert.equal(result.promptEvolved, true);
+    assert.ok(result.newVersion, 'a new version label must be reported');
+    assert.notEqual(result.newVersion, saturated, 'must not reuse the saturated label');
+    assert.equal(memory._versions.length, before.length + 1, 'challenger must be additive');
+    const incumbent = memory._versions.find((v) => v.version === saturated);
+    assert.equal(incumbent?.promptText, SAFE_PROMPT, 'incumbent row must survive');
+    const test = memory._state.abTests['researcher'];
+    assert.ok(test && test.versionA !== test.versionB, 'A/B arms must differ');
+  });
+
   it('is unchanged when the active version already is the highest', async () => {
     // The healthy case: challenger won and was promoted. Numbering must behave
     // exactly as before the fix (v3 active → v4).

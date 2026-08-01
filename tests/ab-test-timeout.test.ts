@@ -205,6 +205,16 @@ describe('maxTestDays config plumbing', () => {
     assert.equal(override.maxTestDays, undefined);
     assert.deepEqual(rest, ['--force'], '--force must not be eaten as the value');
 
+    // Single-dash flags too: the CLI defines `-v` (verbose). The old guard
+    // only recognised `--…` and swallowed `-v` as an invalid value, silently
+    // disabling verbose mode (round-2 review finding, both value flags).
+    for (const flag of ['--max-test-days', '--max-merge']) {
+      const r = parseEvolutionConfigFlags([flag, '-v']);
+      assert.deepEqual(r.rest, ['-v'], `${flag} must not eat a following -v`);
+      assert.equal(r.override.maxTestDays, undefined);
+      assert.equal(r.override.maxMergeInvocations, undefined);
+    }
+
     assert.equal(hasAnyEvolutionFlag({ maxTestDays: 30 }), true);
     assert.equal(hasAnyEvolutionFlag({}), false);
   });

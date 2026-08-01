@@ -128,9 +128,14 @@ export function applyEvolutionFlag(
       return 0;
     case '--max-merge': {
       // A missing value (end of argv) or a following FLAG (`--max-merge
-      // --force`) is a missing value, not this flag's argument — warn and do
-      // NOT consume the next token, so a following action flag still runs.
-      if (nextArg === undefined || nextArg.startsWith('--')) {
+      // --force`, `--max-merge -v`) is a missing value, not this flag's
+      // argument — warn and do NOT consume the next token, so a following
+      // action flag still runs. Single-dash matters: the CLI defines `-v`
+      // (run.ts), and the old `--`-only guard swallowed it as an invalid
+      // value, silently disabling verbose mode (round-2 review finding —
+      // both value-taking flags shared the bug). `-3` is caught here too:
+      // negative numbers were never valid values for either flag.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
         console.warn('[darwin] --max-merge needs a non-negative integer value — ignored.');
         return 0;
       }
@@ -148,9 +153,10 @@ export function applyEvolutionFlag(
       return 1;
     }
     case '--max-test-days': {
-      // Same footguns as --max-merge: a missing value or a following flag is
-      // not this flag's argument, and Number() would coerce '' to 0.
-      if (nextArg === undefined || nextArg.startsWith('--')) {
+      // Same footguns as --max-merge: a missing value or a following flag
+      // (double- OR single-dash — the CLI defines `-v`) is not this flag's
+      // argument, and Number() would coerce '' to 0.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
         console.warn('[darwin] --max-test-days needs a non-negative integer value — ignored.');
         return 0;
       }

@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-08-01
+
+Round two of the cross-model review upheld two of its round-one findings
+against 0.13.1 — including a counterexample to 0.13.1's own
+"provably collision-free" claim. Both closed:
+
+### Fixed
+
+- **The collision-freedom proof now holds unconditionally.** 0.13.1
+  documented the parseInt-saturation corner
+  (`nextVersion("v9007199254740992")` self-maps at 2^53) as theoretical —
+  but a documented counterexample refutes a claimed proof: with that
+  label in history the probe walk produced the same taken candidate
+  forever, returned it, and the upsert would have overwritten the
+  incumbent and started an A/B test with `versionA === versionB`. The
+  walk now steps through `progressStep`, which falls back to the append
+  strategy on any non-progressing step — every step strictly progresses,
+  so the history-size bound is a real proof with no carve-out.
+- **`--max-test-days -v` / `--max-merge -v` no longer swallow the
+  verbose flag.** The missing-value guard only recognised `--`-prefixed
+  tokens; the CLI defines single-dash `-v`, which was consumed as an
+  invalid value and silently dropped. Both value-taking flags now treat
+  any `-`-prefixed token as a missing value (negative numbers were never
+  valid for either). The 0.13.1 rebuttal of this finding claimed the CLI
+  had no single-dash flags — that was wrong, and this entry is the
+  correction.
+
 ## [0.13.1] — 2026-08-01
 
 Patch on the day of 0.13.0, from an adversarial cross-model review (built

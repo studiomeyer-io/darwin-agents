@@ -29,6 +29,13 @@ const CANDIDATE_SELECTION_VALUES: ReadonlySet<string> = new Set([
   'epsilon-greedy',
 ]);
 
+/** Valid values for `--confidence-method` (v0.14.0). */
+const CONFIDENCE_METHOD_VALUES: ReadonlySet<string> = new Set([
+  'effect-size',
+  'msprt',
+  'hoeffding',
+]);
+
 /** True when `arg` is one of the evolution-config flags this module handles. */
 export function isEvolutionConfigFlag(arg: string): boolean {
   switch (arg) {
@@ -48,6 +55,9 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--no-skip-perfect':
     case '--max-merge':
     case '--max-test-days':
+    case '--require-confidence':
+    case '--no-require-confidence':
+    case '--confidence-method':
       return true;
     default:
       return false;
@@ -179,6 +189,28 @@ export function applyEvolutionFlag(
       }
       return 1;
     }
+    case '--require-confidence':
+      target.requireConfidence = true;
+      return 0;
+    case '--no-require-confidence':
+      target.requireConfidence = false;
+      return 0;
+    case '--confidence-method':
+      // Same consume-but-validate contract as --candidate-selection: the value
+      // token was clearly meant for this flag, but only a known method is
+      // persisted — a typo warns instead of silently gating on 'effect-size'.
+      if (nextArg !== undefined && !nextArg.startsWith('-')) {
+        if (CONFIDENCE_METHOD_VALUES.has(nextArg)) {
+          target.confidenceMethod = nextArg as EvolutionConfigOverride['confidenceMethod'];
+        } else {
+          console.warn(
+            `[darwin] --confidence-method "${nextArg}" is not one of: ${[...CONFIDENCE_METHOD_VALUES].join(', ')} — ignored.`,
+          );
+        }
+        return 1;
+      }
+      console.warn('[darwin] --confidence-method needs a value (effect-size | msprt | hoeffding) — ignored.');
+      return 0;
     default:
       return 0;
   }
@@ -220,6 +252,8 @@ export function hasAnyEvolutionFlag(override: EvolutionConfigOverride): boolean 
     override.candidateSelection !== undefined ||
     override.skipPerfectFeedback !== undefined ||
     override.maxMergeInvocations !== undefined ||
-    override.maxTestDays !== undefined
+    override.maxTestDays !== undefined ||
+    override.requireConfidence !== undefined ||
+    override.confidenceMethod !== undefined
   );
 }

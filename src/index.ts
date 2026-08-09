@@ -229,3 +229,35 @@ export {
   filterPerfectFeedback,
   DEFAULT_PERFECT_FEEDBACK_SCORE,
 } from './evolution/feedback-filter.js';
+
+// v0.14.0 — Offline eval: the benchmark harness as a first-class API. Run N
+// prompt arms over a frozen task set with an injectable runner + metric and
+// get per-task means + deltas vs the baseline arm. The CLI (`darwin eval`)
+// wires this to stored prompt versions and the built-in critic.
+export {
+  parseEvalTasks,
+  runEval,
+  renderEvalReport,
+  type EvalTask,
+  type EvalArm,
+  type EvalRunFn,
+  type EvalScoreFn,
+  type EvalCellResult,
+  type EvalArmResult,
+  type EvalReport,
+  type RunEvalOptions,
+} from './eval/eval-runner.js';
+
+// v0.14.0 — Metrics sink: every evolution decision (run recorded, A/B
+// started/completed, rollback, timeout) as a typed event you can pipe to
+// JSONL, Prometheus, or OpenTelemetry (see examples/otel-bridge.ts). Zero
+// hard deps — the sink is injected, and DARWIN_METRICS_JSONL wires the
+// built-in JSONL sink from the environment.
+export {
+  JsonlMetricsSink,
+  emitMetric,
+  metricsSinkFromEnv,
+  type DarwinMetricEvent,
+  type DarwinMetricEventType,
+  type MetricsSink,
+} from './metrics/sink.js';

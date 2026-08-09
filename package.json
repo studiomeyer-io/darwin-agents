@@ -1,6 +1,6 @@
 {
   "name": "darwin-agents",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "description": "AI agents that improve themselves. Self-evolving prompts via A/B testing, multi-model critics, safety gates, and pattern detection.",
   "type": "module",
   "bin": {
@@ -54,6 +54,7 @@
     "darwin": "tsx src/cli/index.ts",
     "benchmark": "tsx benchmark/evolution-benchmark.ts",
     "test": "tsx --test tests/*.test.ts",
+    "test:coverage": "node --import tsx --test --experimental-test-coverage --test-coverage-include='src/**' tests/*.test.ts",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "prepublishOnly": "npm run build && npm test && npm run check:adapter-compat",
     "check:adapter-compat": "node scripts/check-adapter-compat.mjs"

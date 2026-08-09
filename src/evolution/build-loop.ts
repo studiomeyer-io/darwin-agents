@@ -17,7 +17,9 @@ import { PromptOptimizer } from './optimizer.js';
 import { GepaOptimizer } from './optimizer-gepa.js';
 import { SafetyGate } from './safety.js';
 import { loadNotificationConfig } from './notifications.js';
+import { metricsSinkFromEnv } from '../metrics/sink.js';
 import type { AgentDefinition, DarwinConfig, MemoryProvider } from '../types.js';
+import { DEFAULT_SAFETY } from '../types.js';
 
 /**
  * Build a DarwinLoop for `agent` against `memory`/`config`. Mirrors the wiring
@@ -32,7 +34,13 @@ export function buildEvolutionLoop(
 ): DarwinLoop {
   const tracker = new ExperimentTracker(memory);
   const patterns = new PatternDetector(memory);
-  const safety = new SafetyGate();
+  // v0.14.0 — per-agent safety thresholds. `evolution.safety` is a Partial
+  // merged over DEFAULT_SAFETY, which finally makes the statistical-rigor
+  // knobs (requireConfidence / confidenceMethod) reachable from agent
+  // definitions and the CLI instead of only from hand-wired loops.
+  const safety = agent.evolution?.safety
+    ? new SafetyGate({ ...DEFAULT_SAFETY, ...agent.evolution.safety })
+    : new SafetyGate();
 
   // The optimizer uses the configured provider to generate improved prompts.
   //
@@ -91,5 +99,11 @@ export function buildEvolutionLoop(
   }
 
   const notifications = loadNotificationConfig();
-  return new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications, gepa });
+
+  // v0.14.0 — env-wired metrics sink (DARWIN_METRICS_JSONL=<path> → JSONL
+  // file). Programmatic consumers wiring DarwinLoop by hand pass their own
+  // sink via deps.metrics instead.
+  const metrics = metricsSinkFromEnv();
+
+  return new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications, gepa, metrics });
 }

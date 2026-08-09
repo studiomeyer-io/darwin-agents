@@ -16,6 +16,7 @@ import { evolveCommand } from './evolve.js';
 import { initCommand } from './init.js';
 import { createCommand } from './create.js';
 import { canaryCommand } from './canary.js';
+import { evalCommand } from './eval.js';
 
 const HELP = `
   darwin — AI agents that improve themselves.
@@ -23,6 +24,7 @@ const HELP = `
   Usage:
     darwin run <agent> "task"     Run an agent on a task
     darwin status [agent]        Show evolution status & metrics
+    darwin eval <agent> --tasks <file>   Offline eval: stored versions over a frozen task set
     darwin canary <agent>        Check for behavioural drift vs a frozen baseline
     darwin evolve <agent>        Manage evolution settings
     darwin create <name>         Scaffold a new agent
@@ -39,6 +41,7 @@ const HELP = `
     darwin run researcher "AI Agent frameworks 2026"
     darwin run analyst --path ./src
     darwin status researcher
+    darwin eval writer --tasks tasks.json --versions v1,v3 --runs 3
     darwin evolve researcher --enable
     darwin evolve researcher --force
 
@@ -63,6 +66,16 @@ const HELP = `
     --reflection-model <id>       stronger reflection model for GEPA
     --demos / --no-demos          SIMBA-style demo injection (v0.10)
     --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
+    --require-confidence / --no-require-confidence   peeking-resistant A/B gate (v0.14)
+    --confidence-method <m>       effect-size | msprt | hoeffding (v0.14)
+
+  Eval flags (darwin eval):
+    --tasks <file.json>           Frozen task set ([{id, type, task}, …])
+    --versions v1,v3              Compare specific stored versions (default: v1 vs active)
+    --all-versions                Compare every stored version
+    --runs <n>                    Samples per cell (averages judge variance)
+    --json                        Also write the report as JSON
+    --dry                         Validate wiring, make zero LLM calls
 `;
 
 async function main(): Promise<void> {
@@ -82,6 +95,9 @@ async function main(): Promise<void> {
         break;
       case 'status':
         await statusCommand(args.slice(1));
+        break;
+      case 'eval':
+        await evalCommand(args.slice(1));
         break;
       case 'canary':
         await canaryCommand(args.slice(1));

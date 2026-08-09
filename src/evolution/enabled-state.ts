@@ -82,6 +82,8 @@ const OVERRIDE_KEYS = [
   'skipPerfectFeedback',
   'maxMergeInvocations',
   'maxTestDays',
+  'requireConfidence',
+  'confidenceMethod',
 ] as const;
 
 /**
@@ -131,6 +133,16 @@ export function resolveEvolutionConfig(
           resolved.maxMergeInvocations = value as number;
         } else if (key === 'maxTestDays') {
           resolved.maxTestDays = value as number;
+        } else if (key === 'requireConfidence') {
+          // The confidence knobs live on the nested safety block (they are
+          // SafetyThresholds fields, not loop fields) — merge, don't replace,
+          // so a static `safety: { maxRegression: … }` survives the override.
+          resolved.safety = { ...resolved.safety, requireConfidence: value as boolean };
+        } else if (key === 'confidenceMethod') {
+          resolved.safety = {
+            ...resolved.safety,
+            confidenceMethod: value as 'effect-size' | 'msprt' | 'hoeffding',
+          };
         } else {
           // Remaining override keys are all boolean flags (useGepa / useMerge /
           // paretoGate / useCoverage / useDemos / skipPerfectFeedback).

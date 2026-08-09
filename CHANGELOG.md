@@ -2,6 +2,133 @@
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-09
+
+Built and hardened through a seven-round cross-model review loop (built by
+Claude Fable, adversarially reviewed by GPT-5.6 over rounds R1–R7 until GO):
+the reviews surfaced — and this release fixes — a bug family that had made
+three advertised behaviours unreachable from the CLI (the evolved prompt
+never ran outside a test, failure rollback died after every promotion, and
+incomplete runs never reached the reliability tracking).
+
+### Added
+
+- **Offline evals** (`darwin eval` + `runEval` API). The dataset-and-metric
+  loop offline optimizers are built around, as a complement to the online
+  gate: run stored prompt versions (or all of them) over a frozen JSON task
+  set, score each output with the built-in critic — or any injected metric —
+  and read per-task means plus deltas against the baseline arm. Reports land
+  in `.darwin/reports/eval-*.md` (`--json` for machine-readable output),
+  `--dry` validates wiring with zero LLM calls. `parseEvalTasks` /
+  `runEval` / `renderEvalReport` are root exports with injectable
+  runner + scorer, so tests (and custom metrics) never touch an LLM.
+- **Per-agent safety thresholds** (`evolution.safety`,
+  `--require-confidence`, `--confidence-method <effect-size|msprt|hoeffding>`).
+  The statistical-rigor knobs shipped in v0.6/v0.7 were only reachable by
+  hand-wiring a `SafetyGate`; now they merge over `DEFAULT_SAFETY` from the
+  agent definition, persist via `darwin evolve`, and follow the same
+  layered-override resolution as every other evolution flag. The
+  `--confidence-method` parser inherits the v0.13.2 single-dash lesson: a
+  following flag token (`-v`, `--force`) is a missing value, never consumed.
+- **Metrics sink** (`MetricsSink`, `JsonlMetricsSink`,
+  `DARWIN_METRICS_JSONL`, `examples/otel-bridge.ts`). Every evolution
+  decision — run recorded, A/B started / completed / timed out, rollback —
+  emits a typed event through `emitMetric`, which swallows sink errors by
+  contract: observability can never break the loop. Zero hard deps; the OTel
+  bridge is an example for consumer projects, mirroring
+  `examples/mcp-memory-bridge.ts`.
+- **CLI test coverage + `npm run test:coverage`.** The CLI layer was the
+  repo's only zero-coverage code while carrying its real regressions;
+  `parseRunArgs` is now exported and pinned (including the 0.13.2 `-v`
+  case), `parseEvalArgs` ships tested, and the coverage script makes the
+  gap measurable (`node --test --experimental-test-coverage`).
+
+### Fixed — cross-model review findings (v0.14.0 scope)
+
+- **A promoted winner now actually runs.** `darwin run` resolved the prompt
+  from the store only while an A/B test was open; with no test running it
+  always executed the STATIC v1 prompt and recorded the run against v1 —
+  an evolved winner (active `v3` in state) never ran through the CLI, and
+  the version stats were corrupted by mislabeled runs. The CLI now runs the
+  agent's active version (`pickRunVersion`, exported + tested), with a loud
+  fallback to the static prompt when a stored version label has no prompt.
+- **`darwin evolve --disable` stops A/B traffic.** Routing previously
+  ignored the enabled flag, so a disabled agent kept sending ~50% of runs
+  through the challenger arm with frozen counters — forever. Routing is now
+  gated on the resolved evolution-enabled state.
+- **Failure rollback works after a promotion.** `handleABTest` promotes a
+  winner by setting `activeVersions` AND `lastKnownGood` to the same label,
+  which made `rollback()` conclude "already on last-known-good" from that
+  moment on — the advertised failure rollback was dead exactly when a
+  freshly-promoted prompt started degrading in real traffic. Rollback now
+  walks one step up the version lineage (`parentVersion`) in that state,
+  moving `lastKnownGood` along; v1 (no parent) is the floor. Guards from the
+  second review round: the lineage walk never runs while an A/B test is open
+  (the failure counter is version-agnostic — a failing CHALLENGER must not
+  sink the healthy incumbent; challenger unreliability is the test's own
+  auto-loss job), and a stale `lastKnownGood` naming a label with no stored
+  prompt is never activated (no phantom state; the walk falls back to the
+  current version's stored parent).
+- **Run labels always name the prompt that ran.** When state requests a
+  version whose stored prompt is missing (corrupted/foreign state), the CLI
+  used to run the static v1 prompt while RECORDING the run under the missing
+  label — poisoning that label's stats. `resolveRunPrompt` now relabels such
+  runs to v1, prefers the SEEDED v1 prompt over the static definition (live
+  runs and `darwin eval` resolve identically), and `--no-evolve` skips A/B
+  routing (an unmeasured challenger run is a wasted live request).
+- **Eval hardening (second review round):** paired deltas (mean per-task
+  difference over tasks BOTH arms scored — asymmetric failures can no longer
+  flatter an arm), `runsPerCell` clamped to finite integers with a CLI cap of
+  1000 (`Number('9'.repeat(400)) === Infinity` would have looped a cell
+  forever), `--tasks`/`--versions` treat a following flag token as a missing
+  value, the active-version marker moved out of the canonical arm label into
+  an `active` field (no collision with stored labels or JSON consumers), and
+  report filenames carry a second-resolution stamp (same-day re-runs no
+  longer overwrite earlier reports or strand a stale `.json`).
+- **`evolution_skipped` is now emitted** (collecting_data /
+  no_actionable_patterns / data_quality) — the metrics event type existed
+  but never fired, leaving every skip decision invisible.
+- **Fifth review round (R6):** the CLI's too-short-output early return made
+  the loop's ENTIRE incomplete-run path (`afterRun` step 0 — failsA/failsB
+  reliability tracking, unreliability auto-loss, mid-test expiry) dead code
+  for `darwin run` users, so an unreliable challenger kept receiving live
+  traffic forever (pre-existing since the check was introduced; surfaced by
+  the review). Short output is now flagged instead of returned: never saved,
+  never judged, but always handed to the evolution loop. Covered by a real
+  CLI integration test driving `runCommand` against a local mock
+  OpenAI-compatible server. Also: `darwin eval --dry` now rejects duplicate
+  `--versions` arms instead of green-lighting them.
+- **Fourth review round (R5):** every test-closing path (decided /
+  unreliability / timeout / orphan-repair) atomically resets the
+  version-agnostic `consecutiveFailures` counter — a streak filled by the
+  LOSING arm no longer survives the test and tees up a lineage rollback
+  against the confirmed winner; the rollback transition commits state-first
+  inside one atomic `updateState` with an open-test re-check (a test started
+  concurrently in the guard window survives, the rollback aborts); the
+  orphan-test repair clears only the exact test it diagnosed
+  (identity-checked in the callback); `runEval` rejects duplicate task ids
+  at the API boundary; metrics docs now say zero-or-more/best-effort.
+- **Third review round (R4):** no rollback of ANY kind while an A/B test is
+  open (stage 1 could still fire mid-test on a divergent `lastKnownGood`;
+  during a test, the test decides), `runEval` caps huge-but-finite
+  `runsPerCell` at 10 000 in the API itself (`1e100` slipped past the
+  non-finite guard), an open test referencing a version with no stored
+  prompt is cleared as dead instead of mislabel-feeding it v1 runs
+  (`abTestArmsResolvable`), report filenames carry ms + pid (same-second
+  collisions), the paired-Δ note also renders when zero tasks paired, and
+  the metrics delivery semantics are documented as zero-or-more /
+  best-effort (events can be lost AND duplicated — observability, not an
+  audit log).
+
+### Changed
+
+- README feature comparison now includes the TypeScript prompt-optimization
+  packages that appeared around Darwin (gepa-ts, @currentai/dsts,
+  @kamiyo-org/selfimprove) with an honest per-column comparison, instead of
+  only the Python frameworks. Darwin's claim is stated precisely: the GEPA
+  reflector running *online inside a production safety gate* — offline
+  optimizers tune before deploy, Darwin keeps tuning safely after.
+
 ## [0.13.2] — 2026-08-01
 
 Round two of the cross-model review upheld two of its round-one findings

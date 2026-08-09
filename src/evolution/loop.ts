@@ -33,6 +33,7 @@ import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoO
 import { selectDemoCandidates, buildDemoSection, applyDemoSection } from './demos.js';
 import { selectParentVariant } from './selection.js';
 import { isPerfectScore, resolvePerfectFeedbackScore } from './feedback-filter.js';
+import { emitMetric, type MetricsSink } from '../metrics/sink.js';
 
 // ─── Result Type ───────────────────────────────────────
 
@@ -87,6 +88,14 @@ interface DarwinLoopDeps {
    * default `'active'` path.
    */
   rng?: () => number;
+  /**
+   * v0.14.0 — Optional metrics sink. Every evolution decision (run recorded,
+   * A/B started/completed/timeout, rollback) is emitted as a typed event via
+   * {@link emitMetric}, which swallows sink errors — observability must never
+   * break the loop. Omit for zero overhead; `buildEvolutionLoop` wires the
+   * JSONL sink from `DARWIN_METRICS_JSONL` automatically.
+   */
+  metrics?: MetricsSink;
 }
 
 // ─── Validation Constants ─────────────────────────────
@@ -111,6 +120,7 @@ export class DarwinLoop {
   private embed?: EmbedFn;
   private alignmentSimilarityThreshold?: number;
   private rng?: () => number;
+  private metrics?: MetricsSink;
 
   constructor(deps: DarwinLoopDeps) {
     this.memory = deps.memory;
@@ -124,6 +134,7 @@ export class DarwinLoop {
     this.embed = deps.embed;
     this.alignmentSimilarityThreshold = deps.alignmentSimilarityThreshold;
     this.rng = deps.rng;
+    this.metrics = deps.metrics;
   }
 
   /**
@@ -191,11 +202,20 @@ export class DarwinLoop {
             s.abTests[agent] = null;
             s.lastKnownGood[agent] = winner;
             s.activeVersions[agent] = winner;
+            // The version-agnostic failure counter belongs to the test era
+            // that just ended — a streak filled by the LOSER must not tee up
+            // a rollback against the confirmed winner (R5 review, P0).
+            s.consecutiveFailures[agent] = 0;
             return s;
           });
 
           result.abTestCompleted = true;
           result.message = `A/B test auto-ended: ${loser} too unreliable. ${winner} wins.`;
+          emitMetric(this.metrics, 'ab_test_completed', agent, {
+            winner,
+            loser,
+            reason: 'unreliability',
+          });
           return result;
         }
 
@@ -221,6 +241,12 @@ export class DarwinLoop {
 
     // ── Step 1: Record ────────────────────────────────
     await this.tracker.recordExperiment(experiment);
+    emitMetric(this.metrics, 'run_recorded', agent, {
+      version: experiment.promptVersion,
+      qualityScore: experiment.metrics.qualityScore,
+      success: experiment.success,
+      durationMs: experiment.metrics.durationMs,
+    });
 
     // ── Step 2: Rollback check ────────────────────────
     const state = await this.memory.getState();
@@ -235,6 +261,10 @@ export class DarwinLoop {
         notifyRollback(
           this.notifications, agent, rolledBackState.activeVersions[agent] ?? 'unknown', failures,
         ).catch(() => {/* swallow */});
+        emitMetric(this.metrics, 'rollback', agent, {
+          toVersion: rolledBackState.activeVersions[agent] ?? 'unknown',
+          consecutiveFailures: failures,
+        });
         return result;
       }
     }
@@ -267,6 +297,10 @@ export class DarwinLoop {
 
     if (!this.safety.canEvolve(agent, stats)) {
       result.message = `Collecting data: ${stats.totalRuns} runs so far, need more before evolving.`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'collecting_data',
+        totalRuns: stats.totalRuns,
+      });
       return result;
     }
 
@@ -282,6 +316,10 @@ export class DarwinLoop {
 
     if (!hasWeaknesses && !hasNegativeTrend) {
       result.message = `${detectedPatterns.length} patterns found, but no weaknesses or negative trends — no evolution needed.`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'no_actionable_patterns',
+        patternsFound: detectedPatterns.length,
+      });
       return result;
     }
 
@@ -289,6 +327,10 @@ export class DarwinLoop {
     const validation = await this.validateDataQuality(agent);
     if (!validation.valid) {
       result.message = `Data quality check failed: ${validation.reason}. Skipping evolution.`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'data_quality',
+        detail: validation.reason,
+      });
       return result;
     }
 
@@ -529,6 +571,13 @@ export class DarwinLoop {
       this.buildChangeReason(detectedPatterns),
     ).catch(() => {/* swallow */});
 
+    emitMetric(this.metrics, 'ab_test_started', agent, {
+      versionA: activePrompt.version,
+      versionB: newVersion,
+      generatedBy,
+      minRuns: dynamicMinRuns,
+    });
+
     return result;
   }
 
@@ -677,11 +726,15 @@ export class DarwinLoop {
     // Activate winner, deactivate loser
     await this.activateVersion(agentName, winner);
 
-    // Update state atomically: clear test, set last-known-good
+    // Update state atomically: clear test, set last-known-good, and reset
+    // the failure streak — it is version-agnostic, so a streak accumulated
+    // by the losing arm must not carry over into the winner's era and tee
+    // up a bogus lineage rollback on its first hiccup (R5 review, P0).
     await this.memory.updateState((s) => {
       s.abTests[agentName] = null;
       s.lastKnownGood[agentName] = winner;
       s.activeVersions[agentName] = winner;
+      s.consecutiveFailures[agentName] = 0;
       return s;
     });
 
@@ -697,6 +750,14 @@ export class DarwinLoop {
     // Notify via Telegram (non-blocking)
     notifyABTestComplete(this.notifications, agentName, winner, loser, winnerScore, loserScore)
       .catch(() => {/* swallow — notification is best-effort */});
+
+    emitMetric(this.metrics, 'ab_test_completed', agentName, {
+      winner,
+      loser,
+      winnerScore,
+      loserScore,
+      reason: 'decided',
+    });
 
     return {
       completed: true,
@@ -757,6 +818,8 @@ export class DarwinLoop {
     await this.memory.updateState((s) => {
       s.abTests[agentName] = null;
       s.activeVersions[agentName] = test.versionA;
+      // Same failure-era reset as every other test-closing path (R5, P0).
+      s.consecutiveFailures[agentName] = 0;
       return s;
     });
 
@@ -773,38 +836,113 @@ export class DarwinLoop {
       test.minRuns,
       this.effectiveTestBudget(test) ?? 0,
     ).catch(() => {/* swallow — notification is best-effort */});
+
+    emitMetric(this.metrics, 'ab_test_timeout', agentName, {
+      kept: test.versionA,
+      notPromoted: test.versionB,
+      runsA: test.runsA,
+      runsB: test.runsB,
+      minRuns: test.minRuns,
+      budgetDays: this.effectiveTestBudget(test) ?? 0,
+    });
   }
 
   // ─── Rollback ──────────────────────────────────────
 
   /**
-   * Roll back to the last known good prompt version.
-   * Returns true if a rollback was performed.
+   * Roll back after consecutive failures. Returns true if a rollback was
+   * performed.
+   *
+   * Two-stage target resolution (v0.14.0):
+   *   1. `lastKnownGood` when it differs from the active version — divergent
+   *      state WITHOUT an open test (manual state surgery, legacy blobs);
+   *      with a test open, no rollback of any kind runs (guard below).
+   *   2. Otherwise the ACTIVE version's parent in the version lineage. This
+   *      closes a real gap (cross-model review): `handleABTest` promotes a
+   *      winner by setting `activeVersions` AND `lastKnownGood` to the same
+   *      label, so from that moment `current === lastGood` and stage 1 can
+   *      never fire — the advertised failure rollback was dead exactly when
+   *      a freshly-promoted prompt started degrading in real traffic (model
+   *      update, tool drift). One step up the lineage per rollback, and
+   *      `lastKnownGood` moves along, so repeated failure bursts can walk
+   *      further back — v1 (no parent) is the floor.
    */
   private async rollback(agentName: string): Promise<boolean> {
     const state = await this.memory.getState();
-    const lastGood = state.lastKnownGood[agentName];
 
+    // No rollback of ANY kind while an A/B test is open (R3+R4 review, P0).
+    // The consecutive-failure counter is version-agnostic, so a failing
+    // CHALLENGER would otherwise roll the healthy incumbent back (stage 2:
+    // to its parent; stage 1: to a divergent lastKnownGood) and destroy the
+    // test. During a test the TEST decides: complete-but-failing runs sink
+    // that arm's composite, incomplete runs feed the failsA/B auto-loss, and
+    // maxTestDays bounds the wall clock. The failure counter takes over
+    // again the moment the slot is free.
+    if (state.abTests[agentName]) {
+      return false;
+    }
+
+    const lastGood = state.lastKnownGood[agentName];
     if (!lastGood) {
       return false;
     }
 
     const currentVersion = state.activeVersions[agentName];
+    const versions = await this.memory.getAllPromptVersions(agentName);
+    let target = lastGood;
+
     if (currentVersion === lastGood) {
-      // Already on last-known-good — nothing to roll back
-      return false;
+      // Stage 2 — the promoted winner itself is failing. Walk one step up
+      // the version lineage instead of declaring "nothing to roll back".
+      const current = versions.find((v) => v.version === currentVersion);
+      const parentLabel = current?.parentVersion ?? null;
+      const parent = parentLabel !== null
+        ? versions.find((v) => v.version === parentLabel)
+        : undefined;
+      if (!parent || parent.version === currentVersion) {
+        return false; // no lineage to fall back to (v1, or unknown state)
+      }
+      target = parent.version;
+    } else if (!versions.some((v) => v.version === lastGood)) {
+      // Stage 1 guard (R3 review, P1): a stale `lastKnownGood` pointing at a
+      // label with no stored prompt must not be "activated" — activateVersion
+      // would deactivate every real version and persist a phantom label. Try
+      // the lineage walk from the CURRENT version instead; give up if that
+      // has no stored parent either.
+      const current = versions.find((v) => v.version === currentVersion);
+      const parent = current?.parentVersion != null
+        ? versions.find((v) => v.version === current.parentVersion)
+        : undefined;
+      if (!parent || parent.version === currentVersion) {
+        return false;
+      }
+      target = parent.version;
     }
 
-    // Activate the last-known-good version
-    await this.activateVersion(agentName, lastGood);
-
-    // Atomically clear A/B test and reset failure counter
+    // Commit the transition ATOMICALLY, state first (R5 review, P0 — TOCTOU):
+    // the open-test guard above read a snapshot, and every awaited call since
+    // is a window in which a concurrent process may have STARTED a test. The
+    // re-check runs inside the same updateState callback as the transition,
+    // so a test that appeared in the window survives and the rollback aborts
+    // instead of destroying it. The prompt-version active flags are aligned
+    // AFTER the state commit — state is the source of truth readers resolve
+    // against, flag alignment is idempotent repair.
+    let abortedByOpenTest = false;
     await this.memory.updateState((s) => {
-      s.abTests[agentName] = null;
-      s.activeVersions[agentName] = lastGood;
+      if (s.abTests[agentName]) {
+        abortedByOpenTest = true;
+        return s;
+      }
+      s.activeVersions[agentName] = target;
+      s.lastKnownGood[agentName] = target;
       s.consecutiveFailures[agentName] = 0;
       return s;
     });
+    if (abortedByOpenTest) {
+      return false;
+    }
+
+    await this.activateVersion(agentName, target);
 
     return true;
   }

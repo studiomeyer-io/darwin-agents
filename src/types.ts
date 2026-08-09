@@ -73,6 +73,18 @@ export interface EvolutionConfig {
    * on their own, exactly as before.
    */
   maxTestDays?: number;
+  /**
+   * v0.14.0 — Per-agent safety-gate thresholds, merged over
+   * {@link DEFAULT_SAFETY}. This is the config-level door to the v0.6/v0.7
+   * statistical rigor knobs ({@link SafetyThresholds.requireConfidence},
+   * `confidenceMethod: 'msprt' | 'hoeffding'`, `maxRegression`, …) — before
+   * v0.14 they were reachable ONLY by constructing a `SafetyGate` by hand and
+   * wiring your own `DarwinLoop`, so neither the CLI nor
+   * {@link buildEvolutionLoop} consumers (agent fleets) could turn them on.
+   * Unset fields keep their {@link DEFAULT_SAFETY} value; omit the block for
+   * byte-for-byte pre-v0.14 behaviour.
+   */
+  safety?: Partial<SafetyThresholds>;
   /** Minimum output length to save (default: 2000). Lower for short-form agents like marketing. */
   minOutputLength?: number;
   /**
@@ -606,6 +618,10 @@ export interface EvolutionConfigOverride {
   maxMergeInvocations?: number;
   /** v0.13.0 — wall-clock budget per A/B test in days (`--max-test-days <n>`). */
   maxTestDays?: number;
+  /** v0.14.0 — peeking-resistant A/B gate (`--require-confidence` / `--no-require-confidence`). */
+  requireConfidence?: boolean;
+  /** v0.14.0 — statistic backing the confidence gate (`--confidence-method <m>`). */
+  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
 }
 
 // ─── Patterns ───────────────────────────────────────

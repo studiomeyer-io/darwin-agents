@@ -18,7 +18,7 @@ import { checkCriticFamilies, crossFamilyRequired, singleFamilyHint } from '../e
 import { resolveEvolutionConfig } from '../evolution/enabled-state.js';
 import { buildEvolutionLoop } from '../evolution/build-loop.js';
 import { isEvolutionConfigFlag, applyEvolutionFlag } from './evolution-flags.js';
-import type { EvolutionConfigOverride } from '../types.js';
+import type { ABTest, EvolutionConfigOverride } from '../types.js';
 
 // ─── Multi-Model Critic Provider Resolution ─────────
 
@@ -84,7 +84,7 @@ function resolveCriticProviders(agentName: string): Record<string, CriticProvide
   return defaults;
 }
 
-interface RunFlags {
+export interface RunFlags {
   agentName: string;
   task: string;
   taskType: string;
@@ -101,7 +101,10 @@ interface RunFlags {
   evolutionOverride: EvolutionConfigOverride;
 }
 
-function parseRunArgs(args: string[]): RunFlags {
+// Exported for tests (v0.14.0) — the CLI surface was the least-covered code
+// in the repo while carrying real parsing bugs (the 0.13.2 single-dash `-v`
+// regression lived exactly here).
+export function parseRunArgs(args: string[]): RunFlags {
   const flags: RunFlags = {
     agentName: '',
     task: '',
@@ -165,6 +168,88 @@ function resolveAgent(name: string): AgentDefinition {
   return agent;
 }
 
+/**
+ * Which prompt version should THIS run use? (v0.14.0 — exported for tests.)
+ *
+ * - Active A/B test AND evolution enabled → round-robin the arm with fewer
+ *   runs (the pre-v0.14 behaviour).
+ * - Otherwise → the agent's ACTIVE version. Two real bugs lived here
+ *   (cross-model review, v0.14.0):
+ *     1. Without a running test the CLI always ran the STATIC v1 prompt —
+ *        a promoted winner (v3 active in state) never actually ran, and its
+ *        runs were recorded against v1, corrupting the version stats.
+ *     2. `darwin evolve --disable` did not stop the A/B routing, so a
+ *        disabled agent kept sending ~50% of its traffic through the
+ *        challenger — with the test counters frozen, forever.
+ */
+export function pickRunVersion(
+  abTest: ABTest | null,
+  evolutionEnabled: boolean,
+  activeVersion: string,
+): string {
+  if (evolutionEnabled && abTest) {
+    return abTest.runsA <= abTest.runsB ? abTest.versionA : abTest.versionB;
+  }
+  return activeVersion;
+}
+
+/**
+ * Are both arms of an A/B test backed by a resolvable prompt? `v1` always
+ * resolves (the agent definition is its floor); any other label needs a
+ * stored prompt. (v0.14.0 — exported for tests.)
+ *
+ * Why this exists (R4 review, P0): when an open test references an arm whose
+ * stored prompt has vanished (corrupted/foreign state), routing would fall
+ * back to v1 and RELABEL the run as v1 — which `handleABTest` then counts
+ * for whichever arm happens to be labeled v1, or for neither, so the test
+ * either decides on wrong data or starves forever. An unresolvable test is
+ * dead on arrival; the caller clears it and runs the active version.
+ */
+export function abTestArmsResolvable(
+  abTest: ABTest,
+  storedVersions: ReadonlyArray<Pick<PromptVersion, 'version'>>,
+): boolean {
+  const resolvable = (label: string): boolean =>
+    label === 'v1' || storedVersions.some((v) => v.version === label);
+  return resolvable(abTest.versionA) && resolvable(abTest.versionB);
+}
+
+/**
+ * Resolve the prompt TEXT + the version label the experiment must be recorded
+ * under. (v0.14.0 — exported for tests; R3 review closed two gaps here.)
+ *
+ * Invariant: the returned `version` always names the prompt that actually
+ * RUNS. When state requests a label with no stored prompt (corrupted/foreign
+ * state), we fall back to the static v1 prompt AND relabel the run as v1 —
+ * recording a static-v1 output under the missing label would corrupt that
+ * label's stats and could decide an A/B test with wrong data.
+ *
+ * v1 itself prefers the STORED v1 prompt when one exists (the seeded copy),
+ * falling back to the agent definition. `darwin eval` resolves versions the
+ * same way, so a built-in prompt edited after seeding no longer makes live
+ * runs and offline evals score different texts under the same label.
+ */
+export function resolveRunPrompt(
+  agent: AgentDefinition,
+  storedVersions: ReadonlyArray<Pick<PromptVersion, 'version' | 'promptText'>>,
+  requestedVersion: string,
+): { version: string; promptText: string; missingStored: boolean } {
+  const stored = storedVersions.find((v) => v.version === requestedVersion);
+  if (stored) {
+    return { version: requestedVersion, promptText: stored.promptText, missingStored: false };
+  }
+  if (requestedVersion === 'v1') {
+    return { version: 'v1', promptText: agent.systemPrompt, missingStored: false };
+  }
+  // Requested label has no stored prompt — run static v1, AS v1.
+  const storedV1 = storedVersions.find((v) => v.version === 'v1');
+  return {
+    version: 'v1',
+    promptText: storedV1?.promptText ?? agent.systemPrompt,
+    missingStored: true,
+  };
+}
+
 export async function runCommand(args: string[]): Promise<void> {
   const flags = parseRunArgs(args);
 
@@ -226,27 +311,69 @@ async function runCommandInner(
   const preState = await memory.getState();
   const evolutionEnabled = resolveEvolutionEnabled(agent, preState);
 
-  // A/B test routing: check if there's an active test and pick a version
-  let activePromptVersion = 'v1';
-  let agentToRun = agent;
-  {
-    const abTest = preState.abTests[agent.name] ?? null;
-    if (abTest) {
-      // Round-robin: pick whichever version has fewer runs
-      activePromptVersion = abTest.runsA <= abTest.runsB ? abTest.versionA : abTest.versionB;
+  // Prompt-version routing (v0.14.0 — see pickRunVersion for the two bugs
+  // this replaces): with an active test and evolution enabled, round-robin
+  // the arms; otherwise run the agent's ACTIVE version, which after a
+  // promoted A/B win is the evolved prompt, not the static default.
+  // `--no-evolve` counts as disabled for routing too (R3 review): the loop
+  // is skipped after the run, so a challenger run would not even be counted —
+  // pure waste of a live request on an arm nobody is measuring.
+  const routingEnabled = evolutionEnabled && !flags.noEvolve;
+  const allVersions = await memory.getAllPromptVersions(agent.name);
+  let abTest = routingEnabled ? (preState.abTests[agent.name] ?? null) : null;
 
-      // If using a non-v1 prompt, load it from DB and override systemPrompt
-      if (activePromptVersion !== 'v1') {
-        const allVersions = await memory.getAllPromptVersions(agent.name);
-        const targetVersion = allVersions.find(v => v.version === activePromptVersion);
-        if (targetVersion) {
-          agentToRun = { ...agent, systemPrompt: targetVersion.promptText };
-          console.log(`[darwin] A/B test: Using prompt ${activePromptVersion}`);
-        }
-      } else {
-        console.log(`[darwin] A/B test: Using prompt ${activePromptVersion}`);
+  // Orphaned-test repair (R4 review, P0): a test whose arm has no stored
+  // prompt can never be measured correctly — routing would relabel its runs
+  // to v1 and the test would decide on wrong data or starve forever. Clear
+  // it loudly and continue on the active version; the freed slot lets the
+  // next evolution cycle start a fresh, resolvable test.
+  if (abTest && !abTestArmsResolvable(abTest, allVersions)) {
+    console.warn(
+      `[darwin] ⚠  A/B test ${abTest.versionA} vs ${abTest.versionB} references a version with no stored prompt — clearing the dead test.`,
+    );
+    // Clear ONLY the exact test we diagnosed (R5 review, P0 — TOCTOU): the
+    // snapshot is from before this process's awaits, and a concurrent
+    // process may have replaced the dead test with a fresh, valid one. The
+    // identity check runs inside the atomic updateState callback.
+    const dead = abTest;
+    await memory.updateState((s) => {
+      const cur = s.abTests[agent.name];
+      if (
+        cur &&
+        cur.versionA === dead.versionA &&
+        cur.versionB === dead.versionB &&
+        cur.startedAt === dead.startedAt
+      ) {
+        s.abTests[agent.name] = null;
+        // The dead test's failure era ends with it (same rule as every
+        // test-closing path in the loop).
+        s.consecutiveFailures[agent.name] = 0;
       }
-    }
+      return s;
+    });
+    abTest = null;
+  }
+
+  const stateActiveVersion = preState.activeVersions[agent.name] ?? 'v1';
+  const requestedVersion = pickRunVersion(abTest, routingEnabled, stateActiveVersion);
+  const resolved = resolveRunPrompt(agent, allVersions, requestedVersion);
+  const activePromptVersion = resolved.version;
+  const agentToRun: AgentDefinition =
+    resolved.promptText === agent.systemPrompt
+      ? agent
+      : { ...agent, systemPrompt: resolved.promptText };
+  if (resolved.missingStored) {
+    // A version label with no stored prompt means corrupted/foreign state.
+    // resolveRunPrompt already relabeled the run to the prompt that actually
+    // runs (v1) — say so loudly instead of silently mislabeling experiments.
+    console.warn(
+      `[darwin] ⚠  Active version ${requestedVersion} has no stored prompt — running (and recording) v1 instead.`,
+    );
+  }
+  if (abTest) {
+    console.log(`[darwin] A/B test: Using prompt ${activePromptVersion}`);
+  } else if (activePromptVersion !== 'v1') {
+    console.log(`[darwin] Active prompt: ${activePromptVersion}`);
   }
 
   const startTime = Date.now();
@@ -270,9 +397,9 @@ async function runCommandInner(
     console.log(`[darwin] Report: ${result.reportPath}`);
   }
 
-  // Seed v1 prompt version if it doesn't exist yet
-  const existingVersions = await memory.getAllPromptVersions(agent.name);
-  if (existingVersions.length === 0) {
+  // Seed v1 prompt version if it doesn't exist yet (allVersions was loaded
+  // before the run — one lookup serves routing AND the seed check, R3 review).
+  if (allVersions.length === 0) {
     const v1: PromptVersion = {
       version: 'v1',
       agentName: agent.name,
@@ -287,18 +414,30 @@ async function runCommandInner(
     console.log(`[darwin] Seeded v1 prompt for ${agent.name}`);
   }
 
-  // Save experiment to DB + update state
-  // Skip saving if output is too short (incomplete run — avoid poisoning data)
-  // Use agent-specific threshold (e.g., marketing content is naturally shorter than research reports)
+  // Incomplete-run detection. Too-short output is never SAVED (it would
+  // poison the stats) and never judged — but it MUST still reach the
+  // evolution loop (R6 review, P0): `afterRun`'s step 0 is where an
+  // incomplete run counts against its A/B arm (failsA/failsB → unreliability
+  // auto-loss) and where an expired test gets closed. The old early-return
+  // here made that entire path unreachable from the CLI, so an unreliable
+  // challenger kept being routed live traffic forever.
   const MIN_SAVE_OUTPUT = agent.evolution?.minOutputLength ?? 2000;
-  if (result.experiment.metrics.outputLength < MIN_SAVE_OUTPUT) {
-    console.log(`\n[darwin] Output too short (${result.experiment.metrics.outputLength} chars < ${MIN_SAVE_OUTPUT}). Skipping DB save.`);
-    return;
+  const incompleteRun = result.experiment.metrics.outputLength < MIN_SAVE_OUTPUT;
+  if (incompleteRun) {
+    // Say what will actually happen (R7 review): the loop only runs when
+    // evolution is on and --no-evolve was not passed.
+    const loopWillRun = evolutionEnabled && !flags.noEvolve;
+    console.log(
+      `\n[darwin] Output too short (${result.experiment.metrics.outputLength} chars < ${MIN_SAVE_OUTPUT}). ` +
+        `Not saved${loopWillRun
+          ? ' — still handed to the evolution loop for A/B reliability tracking.'
+          : '; evolution is off for this run, so it is not counted anywhere.'}`,
+    );
   }
 
   // Save experiment — tracker.recordExperiment() handles this for evolution-enabled agents.
   // Only save here for non-evolution agents to avoid double-save.
-  if (!evolutionEnabled) {
+  if (!evolutionEnabled && !incompleteRun) {
     await memory.saveExperiment(result.experiment);
     await memory.updateState((state) => {
       state.experimentCounts[agent.name] = (state.experimentCounts[agent.name] ?? 0) + 1;
@@ -309,8 +448,9 @@ async function runCommandInner(
     });
   }
 
-  // Run critic evaluation (unless skipped)
-  if (!flags.noCritic && agent.name !== 'critic' && agent.name !== 'investigator-critic' && agent.name !== 'multi-critic' && evolutionEnabled) {
+  // Run critic evaluation (unless skipped; never on incomplete output —
+  // judging a truncated run wastes an LLM call on data step 0 will discard)
+  if (!incompleteRun && !flags.noCritic && agent.name !== 'critic' && agent.name !== 'investigator-critic' && agent.name !== 'multi-critic' && evolutionEnabled) {
     const evaluatorName = agent.evolution?.evaluator ?? 'critic';
 
     if (evaluatorName === 'multi-critic') {

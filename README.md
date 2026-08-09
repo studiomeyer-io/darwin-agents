@@ -316,6 +316,58 @@ evolution: {
 },
 ```
 
+### Offline evals + metrics sink (v0.14, opt-in)
+
+**Offline evals** (`darwin eval`) bring the dataset-and-metric loop that offline
+optimizers (DSPy's `Evaluate`, gepa-ts/dsts trainsets) are built around — as a
+complement to the online loop, not a replacement. Run any stored prompt
+versions over a frozen task set, score every output with the built-in critic
+(or your own metric via the API), and read per-task means plus deltas against
+the baseline arm:
+
+```bash
+darwin eval writer --tasks tasks.json                  # v1 vs the active version
+darwin eval writer --tasks tasks.json --versions v1,v3 --runs 3
+darwin eval writer --tasks tasks.json --all-versions --json
+```
+
+The task set is plain JSON (`[{"id": "t1", "type": "tech", "task": "…"}]` —
+the same shape as `benchmark/seed-tasks.json`), and the programmatic API
+(`runEval`) takes an injectable runner + scorer, so custom metrics
+(exact-match, latency, your own rubric) plug in without touching the loop.
+The intended workflow: **vet prompts offline on a frozen set, then let the
+live A/B gate decide under real traffic** — offline means are directional,
+the sequential gate is the significance test.
+
+**Per-agent safety thresholds** (`evolution.safety`) open the config-level
+door to the statistical-rigor knobs. Before v0.14 the always-valid sequential
+tests existed but were reachable only by hand-wiring a `SafetyGate`; now any
+agent definition — and the CLI — can arm them:
+
+```typescript
+evolution: {
+  enabled: true,
+  safety: { requireConfidence: true, confidenceMethod: 'msprt' },
+},
+```
+
+```bash
+darwin evolve writer --require-confidence --confidence-method msprt   # persisted
+```
+
+**Metrics sink** — every evolution decision (run recorded, evolution
+skipped with its reason, A/B started / completed / timed out, rollback) is
+emitted as a typed event. Zero hard deps: set
+`DARWIN_METRICS_JSONL=darwin-events.jsonl` for the built-in append-only
+JSONL sink, or inject your own `MetricsSink` (Prometheus, dashboards —
+see `examples/otel-bridge.ts` for an OpenTelemetry bridge in ~60 lines). A
+throwing sink can never break the loop; observability is fire-and-forget
+and strictly best-effort — async sink errors are dropped, not retried (an
+event can be LOST), and concurrent multi-process writers against the same
+store can double-report a decision they race on (an event can be
+DUPLICATED). Zero-or-more delivery: treat the stream as observability,
+never as an audit log.
+
 ## Built-in Agents
 
 | Agent | What it does | Needs |
@@ -495,16 +547,39 @@ tasks with [`npm run benchmark`](benchmark/).
 
 ## Feature Comparison
 
+Against the Python frameworks the category grew up in:
+
 | Feature | Darwin | EvoAgentX | DSPy | CrewAI | AutoGen |
 |---------|--------|-----------|------|--------|--------|
 | Self-evolving prompts | **Yes** | Yes | Yes (compiler) | No | No |
-| A/B testing | **Yes** | No | No | No | No |
+| Online A/B testing in production | **Yes** | No | No | No | No |
 | Safety gate + rollback | **Yes** | No | No | No | No |
+| Offline dataset evals | **Yes** (v0.14) | Yes | **Yes** (its core) | No | No |
 | TypeScript native | **Yes** | No (Python) | No (Python) | No (Python) | No (Python) |
 | Zero-config first agent | **Yes** | No | No | No | Partial |
 | MCP-native memory bridge | **Yes** | No | No | No | No |
 | File-based (no DB required) | **Yes** | No | No | No | No |
 | Built-in Critic agent | **Yes** | No | No | No | No |
+
+And against the TypeScript prompt-optimization packages that have since
+appeared — worth knowing, and each good at what it does:
+
+| | Darwin | [gepa-ts](https://github.com/tangle-network/gepa-ts) | [@currentai/dsts](https://www.npmjs.com/package/@currentai/dsts) | [@kamiyo-org/selfimprove](https://www.npmjs.com/package/@kamiyo-org/selfimprove) |
+|---|---|---|---|---|
+| GEPA reflective optimizer | **Online, inside the safety gate** | Offline batch (1:1 Python parity) | Offline batch (AI-SDK-native) | No (bandit + LLM judge) |
+| Where optimization runs | Live traffic, A/B-gated | Offline trainset | Offline trainset | Live traffic, bandit-routed |
+| Regression rollback + alignment guard | **Yes** | No | No | Canary rollback |
+| Always-valid sequential stats | **Yes** (mSPRT / Hoeffding) | No | No | Welch's t-test |
+| Offline dataset evals | Yes (v0.14) | **Yes** | **Yes** | Cold-start harness |
+| Cost/latency as objectives | No (roadmap) | No | **Yes** (+ USD budget caps) | Pareto (quality/cost/latency) |
+| Metrics export | JSONL + OTel bridge (v0.14) | WandB | Logger hook | **Prometheus/Grafana** |
+| Zero hard deps | **Yes** | No | No | ~ (SQLite) |
+
+The one thing none of the others ship — and Darwin's actual point — is the
+**GEPA reflector running *online*, inside a production safety gate** with
+regression rollback, alignment checks on every mutation, and peeking-resistant
+sequential statistics. Offline optimizers tune prompts before you deploy;
+Darwin keeps tuning them safely after.
 
 ## Architecture
 
@@ -544,6 +619,8 @@ darwin run analyst --path ./src    # Analyze a codebase
 
 darwin status                      # Overview of all agents
 darwin status writer               # Detailed agent stats + evolution history
+
+darwin eval writer --tasks tasks.json --versions v1,v3 --runs 3   # Offline eval over a frozen task set
 
 darwin canary writer               # Behavioural drift vs a frozen baseline (--json, --exit-on-drift)
 
@@ -618,7 +695,7 @@ every feature.
 Node.js 20+ and one of: Claude CLI (default provider), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or a local Ollama instance. For storage, install `better-sqlite3` (default) or use PostgreSQL via `DARWIN_POSTGRES_URL`.
 
 **Does Darwin work with models other than Claude?**
-Yes! Darwin supports multiple providers: Claude CLI (default), Anthropic API, OpenAI/compatible APIs, and Ollama (local). Set `provider` in your config or use `DARWIN_PROVIDER` env var.
+Yes! Darwin supports multiple providers: Claude CLI, Anthropic API, OpenAI/compatible APIs, and Ollama (local). Set `provider` in `darwin.config.ts`, pass `--provider` per run, or rely on auto-detection (`ANTHROPIC_API_KEY` → anthropic-api, else `OPENAI_API_KEY` → openai, else claude-cli).
 
 **How many runs until I see improvement?**
 Around 10 runs. First 5 establish a baseline, then Darwin generates a variant and A/B tests it over the next 5 runs.
@@ -635,7 +712,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 ## Known Limitations
 
 - **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. Each agent is scored by a **multi-dimension critic set** (several scoring rubrics per agent type, not a single number). When more than one provider key is present, the CLI also spreads those critics across model families — e.g. GPT for one, Claude for another — to blunt single-model self-preference; with one provider they all run on it. Inherent judge bias still exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
-- **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and **v0.7 ships proper always-valid sequential tests** — set `confidenceMethod: 'msprt'` (Mixture SPRT) or `'hoeffding'` (σ-free confidence sequence) on your `SafetyThresholds` to make the peeking-resistant gate statistically sound. The default path remains the simple threshold for zero-config use.
+- **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and **v0.7 ships proper always-valid sequential tests** (`confidenceMethod: 'msprt'` / `'hoeffding'`). Since v0.14 they are one config block away — `evolution.safety: { requireConfidence: true, confidenceMethod: 'msprt' }` or `darwin evolve <agent> --require-confidence --confidence-method msprt` — no hand-wired `SafetyGate` needed. The default path remains the simple threshold for zero-config use.
 - **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
 
 ## Contributing

@@ -18,7 +18,6 @@ import type { ABTest } from '../src/types.js';
 
 let memory: ReturnType<typeof createMockMemory>;
 let loop: DarwinLoop;
-let tracker: ExperimentTracker;
 
 function createLoop(mem: ReturnType<typeof createMockMemory>): {
   loop: DarwinLoop;
@@ -47,7 +46,6 @@ describe('DarwinLoop — incomplete run detection', () => {
     memory = createMockMemory();
     const created = createLoop(memory);
     loop = created.loop;
-    tracker = created.tracker;
   });
 
   it('skips recording when outputLength < 2000 (incomplete)', async () => {
@@ -144,7 +142,6 @@ describe('DarwinLoop — incomplete runs track A/B test failures', () => {
     memory = createMockMemory();
     const created = createLoop(memory);
     loop = created.loop;
-    tracker = created.tracker;
   });
 
   it('increments failsB when incomplete run uses versionB of active A/B test', async () => {
@@ -264,7 +261,6 @@ describe('DarwinLoop — rollback on consecutive failures', () => {
     memory = createMockMemory();
     const created = createLoop(memory);
     loop = created.loop;
-    tracker = created.tracker;
   });
 
   it('triggers rollback after 3 consecutive failures', async () => {
@@ -330,7 +326,6 @@ describe('DarwinLoop — evolution gating', () => {
     memory = createMockMemory();
     const created = createLoop(memory);
     loop = created.loop;
-    tracker = created.tracker;
   });
 
   it('does not evolve when not enough data points', async () => {
@@ -396,7 +391,6 @@ describe('DarwinLoop — A/B test in progress', () => {
     memory = createMockMemory();
     const created = createLoop(memory);
     loop = created.loop;
-    tracker = created.tracker;
   });
 
   it('increments runsA when experiment uses versionA', async () => {

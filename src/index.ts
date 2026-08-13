@@ -148,14 +148,23 @@ export {
   type MultiCriticResult,
 } from './evolution/multi-critic.js';
 
-// V0.7.0 — always-valid sequential testing primitives (mSPRT + Hoeffding
-// confidence sequences). Back the peeking-resistant A/B confidence gate;
-// exported so consumers can run the same statistically-rigorous comparison
-// on their own score arrays.
+// V0.7.0: sequential testing primitives (mSPRT + Hoeffding confidence
+// sequences) built for repeated looks. Neither is unconditionally
+// "always-valid": mSPRT is measurably uncalibrated at Darwin's sample sizes
+// (see its docstring), Hoeffding is proved but very conservative, and the
+// zero-config default is a heuristic with no calibrated alpha. What each one guarantees, and
+// where it only approximates, is on the functions and in the README's
+// "Statistical scope" section. Back the peeking-resistant A/B confidence gate;
+// exported so consumers can run the same comparison on their own score
+// arrays, caveats included.
 export {
   meanVar,
   msprtTwoSample,
   hoeffdingTwoSample,
+  // v0.15: the per-arm confidence-sequence half-width, exported so the
+  // α-spend can be re-derived by anyone who wants to check the guarantee
+  // instead of trusting it (see tests/sequential-coverage.test.ts).
+  hoeffdingHalfWidth,
   type ConfidenceMethod,
   type SequentialVerdict,
   type MeanVar,

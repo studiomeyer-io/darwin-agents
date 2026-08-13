@@ -81,7 +81,14 @@ function metrics(partial: Partial<DarwinMetrics>): DarwinMetrics {
  * test window. runsA is pre-counted; runsB is one short so a single trigger run
  * (promptVersion v2) brings it to parity.
  */
-function setupActiveSequentialTest(thresholds: SafetyThresholds): {
+function setupActiveSequentialTest(
+  thresholds: SafetyThresholds,
+  // v0.15: the Hoeffding case needs 60 records per arm, and the state counters
+  // have to match, or the fixture describes a state production cannot reach
+  // (runsA/runsB ARE the experiment counts). Cross-model review flagged the
+  // mismatch; the override keeps every other case on the old small numbers.
+  counters: { runsA?: number; runsB?: number; minRuns?: number } = {},
+): {
   memory: MockMemory;
   loop: DarwinLoop;
   startedAt: string;
@@ -96,11 +103,11 @@ function setupActiveSequentialTest(thresholds: SafetyThresholds): {
   const test: ABTest = {
     versionA: 'v1',
     versionB: 'v2',
-    runsA: 6,
-    runsB: 5,
+    runsA: counters.runsA ?? 6,
+    runsB: counters.runsB ?? 5,
     failsA: 0,
     failsB: 0,
-    minRuns: 5,
+    minRuns: counters.minRuns ?? 5,
     startedAt,
   };
   memory._state.abTests['researcher'] = test;
@@ -218,19 +225,41 @@ describe('DarwinLoop — sequential confidence A/B gate (v0.7.0)', () => {
     // Hoeffding is a σ-free, conservative confidence sequence: its half-width
     // shrinks with n, so it needs a decent sample count to clear a gap. We use
     // the TRUE composite bound [0, 1] (composite scores are bounded there by
-    // construction) and enough samples that the sequences genuinely separate —
-    // i.e. we exercise the real bounded-variable contract, not an out-of-range
-    // shortcut. Arms: A worst on every objective (composite ≈ 0.25 — the 0.25
-    // success-weight floor), B best on every objective (composite = 1.0).
-    const { memory, loop, startedAt } = setupActiveSequentialTest({
-      minDataPoints: 5,
-      maxRegression: 0.2,
-      failureRollbackThreshold: 3,
-      requireConfidence: true,
-      confidenceMethod: 'hoeffding',
-      confidenceScoreRange: [0, 1],
-    });
-    for (let i = 0; i < 30; i++) {
+    // construction) and enough samples that the sequences genuinely separate,
+    // exercising the real bounded-variable contract rather than an
+    // out-of-range shortcut. Arms: A worst on every objective (composite ≈
+    // 0.25, the success-weight floor), B best on every objective (composite
+    // = 1.0), so the gap on offer is ≈ 0.75.
+    //
+    // 60 runs per arm, up from 30 before v0.15. The corrected boundary (see
+    // sequential.ts) is wider, and at 30 runs per arm the two half-widths sum
+    // to ≈ 0.87, which no gap inside [0, 1] can clear, let alone 0.75. The
+    // old number only worked because the pre-0.15 boundary was narrower than
+    // its own error budget allowed: cumulatively those per-look bounds sum
+    // past α rather than to it. This is the practical cost of the fix, made visible here
+    // rather than hidden.
+    const { memory, loop, startedAt } = setupActiveSequentialTest(
+      {
+        minDataPoints: 5,
+        maxRegression: 0.2,
+        failureRollbackThreshold: 3,
+        requireConfidence: true,
+        confidenceMethod: 'hoeffding',
+        confidenceScoreRange: [0, 1],
+      },
+      // Counters match the records injected below EXACTLY: 60 seeded for A, 59
+      // for B plus the trigger run that makes 60. An earlier attempt seeded 60
+      // B records against a counter of 59, so evaluation saw 61 samples for a
+      // counter of 60; cross-model review caught it.
+      //
+      // Honest about what this fixture is: a 60/60 state with a 0.75 gap is
+      // not something per-run evaluation would still be sitting in, because
+      // the α=0.05 boundary already clears that gap at 43 runs per arm. It is
+      // a direct exercise of the Hoeffding wiring at a size where the verdict
+      // is unambiguous, not a claim about the path production would take.
+      { runsA: 60, runsB: 59, minRuns: 25 },
+    );
+    for (let i = 0; i < 60; i++) {
       memory._experiments.push(
         makeExperiment({
           agentName: 'researcher',
@@ -241,7 +270,7 @@ describe('DarwinLoop — sequential confidence A/B gate (v0.7.0)', () => {
         }),
       );
     }
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 59; i++) {
       memory._experiments.push(
         makeExperiment({
           agentName: 'researcher',

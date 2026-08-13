@@ -2,6 +2,234 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-08-12
+
+An external technical review of this repository went through the statistics
+rather than around them, and found that one of our load-bearing claims did not
+hold. This release fixes the mathematics, and then goes through the rest of the
+repository asking the same question everywhere: is this claim actually true?
+
+Several were softened as a result. Nothing was quietly deleted.
+
+### Fixed
+
+- **The Hoeffding confidence sequence had no working proof** (`src/evolution/sequential.ts`).
+  From v0.7 through v0.14 the boundary was `w(n) = R·√(ln((n+1)/α)/(2n))`,
+  documented in the source as "a standard union-bound / Cramer-Chernoff
+  time-uniform Hoeffding bound". That boundary allows `2α/(n+1)` of the error
+  budget at every look, `Σ 2α/(n+1)` diverges, and no union bound closes over a
+  divergent series, so the always-valid guarantee the code advertised was never
+  established. Precisely: what is refuted is the argument, not the boundary.
+  A divergent chain of upper bounds does not prove the true crossing
+  probability diverges, and nobody has produced another construction that
+  covers it. Gating production promotions on an unproven bound is reason enough
+  to replace it. Replaced with a summable α-spending
+  schedule, `α_n = α_arm/(n(n+1))`, whose sum telescopes to exactly `α_arm`:
+
+  ```
+  w(n) = R · √( ln( 2·n·(n+1) / α_arm ) / (2n) )
+  ```
+
+  The four-line proof now sits in the function's docstring instead of an
+  assertion that it exists. Compare Howard, Ramdas, McAuliffe and Sekhon
+  (arXiv:1810.08240), who make the same point about pointwise Hoeffding
+  intervals. **This is stricter than before**, by roughly a third on the
+  half-width (29.8% at n=10, 32.1% at n=30, 35.5% at n=900), so a challenger that used to clear the bar may no longer. It
+  should not have cleared it.
+
+- **Both arms were spending the full α** (`src/evolution/sequential.ts`). A
+  two-arm verdict needs both confidence sequences to hold at once, so the
+  budget was allocated twice over: even the nominal accounting was off by a
+  factor of two. Precisely, and no further: because the per-arm boundary had no
+  established level to begin with (see above), this is an allocation error, not
+  a proof that the old procedure ran at 2α. Each arm
+  now runs at α/2 and the union bound over the two returns the requested α.
+  This is a second, independent defect in the same function, found while fixing
+  the first.
+
+- **mSPRT could decide independently of α** (`src/evolution/sequential.ts`).
+  Its zero-variance shortcut returned `decisive: true` whenever both arms came
+  out internally constant with a gap, on the reasoning that deterministic arms
+  obviously differ. It fired **regardless of the configured significance
+  level**, and at small n two arms are constant by chance under H0 often enough
+  to matter: with `minSamplesPerArm: 2` and both arms drawn from the same
+  Bernoulli(0.5), P(A=[0,0] and B=[1,1]) plus its mirror is 0.125, a 12.5%
+  type-I error against a configured α of 0.05. At the default warmup of 5 the
+  same event sits at 0.00195, which still beats a configured α of 0.001.
+  **It now abstains.** Tested on constancy rather than on `variance === 0`,
+  because those differ in floating point and the difference was load-bearing:
+  eight samples of exactly 0.4 against eight of exactly 0.9 leave a residual
+  variance near 1e-33 (0.4 is not representable), which the closed form turns
+  straight back into Λ = ∞. **Behaviour change**: an A/B pair whose arms show no
+  spread at all no longer promotes on mSPRT. The margin path still sees the gap
+  and the `2 × minRuns` tie-break still terminates the test.
+- **Hoeffding failed OPEN on a broken bound** (`src/evolution/sequential.ts`).
+  An inverted range (`hi <= lo`) silently became 1, and samples outside the
+  declared range were accepted, even though every line of the proof rests on the
+  observations living inside it. That is reachable from configuration, not just
+  in theory: `MetricWeights` accepts arbitrary numbers and the composite is not
+  clamped, so weights like `{quality: 2, sourceCount: -1}` produce composites of
+  0.2 and 2.0, whose gap of 1.8 clears the [0,1] bar of 1.021 and promotes a
+  challenger on a guarantee that does not apply. Both cases now **abstain and
+  say why**. A gate that cannot vouch for a decision should decline to make one.
+- **mSPRT is not a calibrated test at Darwin's sample sizes, and now says so.**
+  The plug-in Welch variance is anti-conservative: when the within-arm spread
+  comes out small by chance, Λ overshoots. Measured under H0 with a coarse
+  judge scoring {0, 0.1, 0.2} at probabilities {0.50, 0.05, 0.45}, at the
+  default α of 0.05 and the default warmup, peeking after every run: **type-I
+  error 0.059 through n=14, 0.064 through n=20, 0.069 through n=30**, checking
+  after every individual run as production does. It is past α from the first
+  horizon measured and keeps drifting. (Checking only on balanced pairs
+  understates it by about a fifth; the unbalanced figures are the honest ones.)
+  `tests/sequential-coverage.test.ts` re-measures this on every run, so the
+  figures cannot rot. Nothing in the method changed for this: what changed is
+  that the docs stop calling it the rigorous option and print the numbers.
+  Fixing it properly needs a test that accounts for the estimated variance
+  rather than plugging it in, which is a different method and a later release.
+- **Explicitly invalid options are refused instead of silently replaced.**
+  `alpha: 0` used to become a 5% test; `tau: Number.MAX_VALUE` used to overflow
+  to Infinity and return `statistic: NaN`; a non-finite `lo`/`hi` used to become
+  0 and 1. All now abstain with `invalidInput: true` and a reason naming the
+  option. An ABSENT option still takes its default, which is the difference
+  between a convenience and running a different test than the caller asked for.
+- **The confidence gate no longer double-spends α.** Under `'msprt'` the gate
+  can run two tests (mSPRT, plus Hoeffding as a fallback when mSPRT has no noise
+  scale to work with). Those rejection events are disjoint but their error
+  probabilities add, so running both at the full α gave a composite nominal
+  level of up to 2α. Each now gets half. `'hoeffding'` runs one test and keeps
+  the whole budget. Being precise about what that buys: it is a conservative
+  nominal (Bonferroni) allocation, NOT a calibration proof, because mSPRT is
+  not calibrated here in the first place. Measured, the split moves the real
+  error from ~0.064 to ~0.046 at a configured 0.05. Note also that the
+  Hoeffding figures quoted in this changelog are for calling the primitive
+  directly at α; through the gate under `'msprt'` the fallback sees α/2, so the
+  bar is 0.995 at n=23, 0.891 at n=30, 0.665 at n=60, and a 0.2 gap needs
+  n=939 rather than 900.
+- **Numeric edges that returned confident nonsense.** `hoeffdingHalfWidth`
+  accepted `Infinity` (its `n >= 1` guard let it through, then `Infinity/Infinity`
+  produced NaN) and non-integer sample counts; mSPRT could return
+  `statistic: NaN` on overflowing aggregates while the field is documented
+  NaN-free; and `fmt` rendered NaN as `-∞`, turning a numeric fault into a
+  plausible-looking reason string. All four refuse or name themselves now.
+
+### Added
+
+- **`tests/sequential-coverage.test.ts`**, which checks the guarantee rather
+  than restating it. It re-derives the per-look α-spend from Hoeffding's
+  inequality and asserts that the corrected schedule converges to the budget
+  over a million looks, that the pre-0.15 schedule diverges past it (still
+  growing at 1e5 looks), that the two-arm split is applied, and that continuous
+  monitoring under H0 produces no false positive across 200 seeded simulations.
+  If a future change reintroduces an invalid boundary, these go red.
+- **`SequentialVerdict.inconclusiveByConstruction`** plus a one-shot warning
+  from `SafetyGate`. On the default [0, 1] composite score at α=0.05 the two
+  Hoeffding half-widths sum to 1.0 or more for every n up to 21 runs per arm,
+  and no gap inside [0, 1] can exceed 1.0. **Up to 21 runs per arm the method
+  is therefore structurally incapable of promoting anything**, whatever the
+  data. Above that it is merely very strict, and precision matters here: the
+  bar first fits inside the range at n=22 (0.982, so only a near-total
+  separation clears it), is still 0.865 at the `computeDynamicMinRuns` ceiling
+  of 30, and a 0.2 composite gap would take n=900 per arm. That 0.2 is itself
+  roughly twenty times the quality-component contribution we measured (~0.009 to
+  0.011). None of that was visible: the gate simply kept returning "keep testing". The
+  verdict now flags it, the reason string explains it, and the gate says so
+  once instead of freezing evolution without comment. `'msprt'` is the method
+  that can decide at these counts.
+- **`hoeffdingHalfWidth`** is exported from the package root, so the α-spend can
+  be re-derived by anyone who would rather check the guarantee than trust it.
+- **A "Statistical scope" section in the README**, stating per method what is
+  guaranteed, what is only approximated (mSPRT plugs in an estimated variance,
+  so it is asymptotic, not exact at n=10 to 30), and what is a heuristic with no
+  guarantee at all (`'effect-size'`, the default).
+- **Four CI gates that were missing.** `npm run typecheck:tests` (the tests have
+  their own tsconfig and nothing was ever type-checking them), an enforced
+  coverage floor via `test:coverage:ci` (coverage was measured but never
+  enforced, so erosion was invisible), `npm audit --audit-level=high`, and a
+  `benchmark --dry` smoke so a public claim about the package cannot rot
+  unnoticed. Scope of that last one, stated because the first draft of this
+  entry overstated it: `--dry` returns before scoring, so it covers prompt
+  loading, task parsing and config resolution, not the scoring path.
+- **Compiler-enforced dead-code checks** in place of a linter: `noUnusedLocals`,
+  `noUnusedParameters`, `noImplicitReturns`, `noImplicitOverride`,
+  `noFallthroughCasesInSwitch` and `useUnknownInCatchVariables`, which run in CI
+  through the two existing typecheck steps. Turning them on found 16 pieces of
+  dead code, including a `handleABTest` parameter that had been unused since the
+  A/B accounting moved inside the atomic `updateState` callback, and five dead
+  assignments in `loop.test.ts`. All removed.
+
+  Being straight about what this is NOT: Darwin still has no ESLint/Prettier
+  gate and no SAST or secret scanning, so two of the review's CI findings stay
+  open rather than being quietly counted as closed. The reasoning for the part
+  we did do: this package ships **zero runtime dependencies** and that is a
+  claim worth protecting, so a lint stack was not worth ~100 devDependencies
+  when the compiler already catches the class of defect that mattered here.
+  SAST is a real gap and is on the list.
+
+### Changed
+
+- **`computeDynamicMinRuns` is documented as a throughput heuristic**, which is
+  what it is. Its docstring previously read like a derivation ("increases
+  minRuns proportionally to the inverse of variance") while running the opposite
+  direction to the textbook `n ∝ σ²/Δ²` for a fixed absolute effect. The premise
+  it actually encodes, that the effect worth finding scales with the spread the
+  agent already shows, is now written out, along with the note that under a
+  fixed standardised effect size neither direction is derivable and this is a
+  product decision. **Behaviour is unchanged**: switching the direction would be
+  a silent breaking change, and the honest fix for anyone wanting rigour is
+  `requireConfidence` with `'msprt'`, not tuning this number.
+- **Claims softened where they outran the evidence.** The README's comparison
+  table, the "why this isn't a toy" summary and the Known Limitations section
+  now point at the scope section instead of asserting "always-valid" flatly. The
+  production metrics block carries a note that the judge and the author sit in
+  the same model family, that the reported lifts (+0.23, +0.28) are smaller than
+  the measured judge variance (about ±1), and that nobody independent has
+  evaluated Darwin. The benchmark README says how many stored results exist
+  (one committed) and that ten tasks at one run per cell is below the sample size either
+  sequential test needs.
+- **`CONTRIBUTING.md` names the structural debt in `loop.ts`** with measured
+  numbers (1,599 lines, 31 methods, and the three that carry the weight measured
+  signature to closing brace) and a
+  concrete three-collaborator decomposition. Deliberately not done in this
+  release: bundling a 1,600-line orchestrator refactor with a change to A/B
+  decision behaviour would turn one reviewable change into two unreviewable
+  ones.
+
+### Upgrade notes
+
+If you use `confidenceMethod: 'hoeffding'`, read the scope section, because
+this is a real behaviour change and not only a documentation one. The corrected
+boundary is wider, and **it is wider than the [0,1] score range at 21 or fewer
+runs per arm**, so on quality margin the method can no longer promote anything
+at Darwin's default run counts. That was NOT already the case in v0.14: at
+n=30 the old boundary was 0.655, which a 0.75 gap cleared, and the corrected
+one is 0.865, which it does not. An earlier draft of this entry claimed the
+inability predated v0.15; that was wrong, and the cross-model review caught it.
+
+Switch to `'msprt'`, or raise `minRuns` into the hundreds (n=900 per arm for a
++0.2 lift).
+
+**`'msprt'` is NOT unchanged** (an earlier draft of this entry said it was).
+Its zero-variance shortcut now abstains, which matters for one specific setup:
+a deterministic or rule-based evaluator returns the same score every run, so
+its arms are exactly constant, and v0.14 promoted the winner there. Now the
+gate hands that case to Hoeffding, which needs no variance estimate. A large
+deterministic gap still promotes (0.1 vs 0.95 clears the bar from n=60); a
+small one (0.6 vs 0.8, gap 0.2) does not, because resolving 0.2
+distribution-free takes n=900 and the `2 × minRuns` cap never gets there.
+That is the honest answer: from constant observations alone you cannot
+distinguish a deterministic scorer from a small sample that happened to come
+out constant. If you want the old behaviour for such a setup, leave
+`requireConfidence` off, or use `confidenceMethod: 'effect-size'`, which is a
+heuristic and now says so.
+
+The default `'effect-size'` path is unchanged.
+
+`SequentialVerdict` gained THREE optional properties:
+`inconclusiveByConstruction`, `invalidInput` and `abstainCode`. All additive
+and source-compatible, but a consumer doing exact deep-equality on the verdict
+object, or validating it against a JSON schema with
+`additionalProperties: false`, will see them.
+
 ## [0.14.0] — 2026-08-09
 
 Built and hardened through a seven-round cross-model review loop (built by

@@ -3,6 +3,19 @@
  *
  * Reads experiment data from .darwin/darwin.db and replaces
  * placeholder values in README.md between REAL_METRICS markers.
+ *
+ * ## Do not run this without reading the next paragraph (noted v0.15)
+ *
+ * The block this script emits has drifted from the block currently in the
+ * README. The README carries a multi-agent table (419 runs across 19 agents,
+ * per-agent quality, the v1-to-v2 lift) that was written by hand; this script
+ * still emits the older single-agent `writer` shape. Running it as-is would
+ * silently REPLACE the richer section with the thinner one, because the
+ * replace below swallows everything between the two markers.
+ *
+ * Bring the template at `metricsBlock` up to the README's current shape before
+ * using this again. The caveat paragraph that follows REAL_METRICS_END is
+ * outside the markers on purpose and survives regeneration: leave it there.
  */
 
 import Database from 'better-sqlite3';

@@ -8,7 +8,6 @@ import type {
   DarwinState,
   MemoryProvider,
   PromptVersion,
-  PromptVersionStats,
   Learning,
 } from '../src/types.js';
 

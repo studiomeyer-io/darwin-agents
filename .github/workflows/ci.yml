@@ -24,15 +24,56 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type check
+      - name: Type check (src + examples)
         run: npx tsc --noEmit
+
+      # The tests have their own tsconfig, so the step above never looked at
+      # them: a test could go type-broken and CI would stay green. Added in
+      # v0.15 after an audit pointed out the package.json script existed but
+      # nothing ran it.
+      - name: Type check (tests)
+        run: npm run typecheck:tests
 
       - name: Run tests
         run: npm test
 
       # Fails when this package's version escapes the published
-      # darwin-langgraph peer range — publishing such a version breaks every
+      # darwin-langgraph peer range. Publishing such a version breaks every
       # fresh paired install (happened twice: 0.9.0, 0.11.0). Network-tolerant:
       # registry hiccups warn + pass instead of flaking the build.
       - name: Adapter peer-compat guard (darwin-langgraph)
         run: npm run check:adapter-compat
+
+      # Coverage was measured but never enforced, so a drop could only be
+      # caught by someone remembering to look. The thresholds sit a few points
+      # under the current numbers: they are a ratchet against silent erosion,
+      # not a target to game. Node 22 only, because --test-coverage-* landed
+      # after the Node 20 line.
+      - name: Coverage thresholds
+        if: matrix.node-version == 22
+        run: npm run test:coverage:ci
+
+      # The benchmark is a public claim about the package, so its wiring has to
+      # stay intact. Scope, stated accurately: --dry returns before scoring, so
+      # this covers prompt loading, task parsing and config resolution only. It
+      # does NOT exercise scoreOnce, score parsing, the provider or report
+      # writing. Zero LLM calls, zero cost, and a partial check is still better
+      # than the nothing that was here before.
+      - name: Benchmark harness smoke (no LLM calls)
+        if: matrix.node-version == 22
+        run: npm run benchmark -- --dry
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      # Darwin ships zero runtime dependencies, so this is really a guard on
+      # the dev toolchain and on that promise staying true. A high or critical
+      # advisory should stop a release, not surface after it.
+      - name: npm audit (high and above)
+        run: npm audit --audit-level=high

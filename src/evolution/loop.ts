@@ -273,7 +273,7 @@ export class DarwinLoop {
     const activeTest = state.abTests[agent] ?? null;
 
     if (activeTest) {
-      const testResult = await this.handleABTest(agent, experiment, activeTest);
+      const testResult = await this.handleABTest(agent, experiment);
       result.abTestCompleted = testResult.completed;
 
       if (testResult.completed) {
@@ -583,10 +583,15 @@ export class DarwinLoop {
 
   // ─── A/B Test Handling ─────────────────────────────
 
+  // No `test` snapshot parameter on purpose. Every read below goes through
+  // `memory.updateState`, which re-reads the live A/B test inside the atomic
+  // callback; a caller-supplied snapshot could already be stale by the time it
+  // arrives and reintroduces the race that fix removed. The unused parameter
+  // survived that change and was removed in v0.15 once the compiler was told
+  // to report dead code.
   private async handleABTest(
     agentName: string,
     experiment: DarwinExperiment,
-    test: ABTest,
   ): Promise<{ completed: boolean; winner?: string; message: string }> {
     // Atomically increment run counts inside callback (prevents stale-read race)
     await this.memory.updateState((s) => {

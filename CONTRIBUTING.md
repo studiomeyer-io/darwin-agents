@@ -25,6 +25,43 @@ src/
 └── types.ts       # All type definitions (single source of truth)
 ```
 
+## Known structural debt: `src/evolution/loop.ts`
+
+Worth knowing before you open it. `DarwinLoop` is 1,599 lines across 31
+methods, and three of them carry most of the weight (counted signature to
+closing brace, so they are reproducible):
+
+| Method | Lines | What it owns |
+|---|---:|---|
+| `afterRun` | 196 | the whole per-run state machine: record, guard, route to A/B, decide |
+| `handleABTest` | 181 | an open test: arm accounting, expiry, promotion, rollback |
+| `generateAndStartABTest` | 157 | variant generation (GEPA, merge, demos, legacy) and test setup |
+
+It is well covered (98% of lines) and it has survived several rounds of
+adversarial review, but size is its own risk: every new evolution feature has
+landed here, and the class now holds the A/B lifecycle, the evolution strategy
+and the promotion/rollback policy at once. Those are three responsibilities,
+and they should be three collaborators:
+
+- **`ABTestLifecycle`**: open, tick, expire, close. Owns `handleABTest`,
+  `effectiveTestBudget`, `isTestExpired`, `concludeInconclusive`.
+- **`EvolutionStrategy`**: how a challenger gets made. Owns
+  `generateAndStartABTest`, `generateVariantGepa`, `tryMergeVariant`,
+  `tryDemoVariant`, `selectCoverageParent`, the budget counters.
+- **`PromotionPolicy`**: what happens to the winner or the loser. Owns
+  `rollback`, `activateVersion`, the lineage walk.
+
+`DarwinLoop` would keep `afterRun` as the entry point and delegate.
+
+**This is deliberately not done yet.** v0.15 changes A/B decision behaviour by
+correcting the Hoeffding confidence sequence, and bundling a 1,600-line
+orchestrator refactor into that release would turn one reviewable change into
+two unreviewable ones. The decomposition is a release of its own, and it wants
+to go in one seam at a time with the suite green between each. If you are
+picking it up, start with `ABTestLifecycle`: it has the cleanest boundary and
+`tests/ab-test-timeout.test.ts` plus `tests/rollback-chain.test.ts` already pin
+most of its behaviour.
+
 ## Adding a New Agent
 
 1. Create `src/agents/my-agent.ts`:

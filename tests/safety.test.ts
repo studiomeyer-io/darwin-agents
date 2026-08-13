@@ -239,7 +239,11 @@ describe('SafetyGate.evaluateABTest — sequential confidence (v0.7.0)', () => {
       requireConfidence: true,
       confidenceMethod: 'msprt',
     });
-    const samples = { a: Array(12).fill(0.6), b: Array(12).fill(0.85) };
+    // Slight spread on purpose: since v0.15 perfectly constant arms abstain in
+    // mSPRT (firing on them ignored alpha). LLM-judged composites carry spread;
+    // deterministic evaluators do not, and the gate routes those to Hoeffding.
+    const spread = (m: number) => Array.from({ length: 12 }, (_, i) => m + (i % 2 ? -0.01 : 0.01));
+    const samples = { a: spread(0.6), b: spread(0.85) };
     const outcome = gate.evaluateABTest(0.6, 0.85, 12, 12, 0, 0, minRuns, samples);
     assert.equal(outcome, 'b_wins');
   });

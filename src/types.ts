@@ -61,12 +61,13 @@ export interface EvolutionConfig {
    * freed so a later cycle can try a different challenger.
    *
    * This exists because `minRuns` is a SAMPLE budget with no notion of
-   * throughput. `computeDynamicMinRuns` correctly raises the bar to 30 when
-   * scores cluster tightly — but an agent that runs a few times per week needs
-   * months of wall-clock to pay that, and the agent cannot evolve at all while
-   * a test is open. Lowering `minRuns` instead would trade the deadlock for
-   * promotions on noise, which is worse: measured judge variance (±1 on a
-   * 10-point scale) dwarfs the real evolution lift (~+0.1–0.2).
+   * throughput. `computeDynamicMinRuns` raises the bar to 30 when scores
+   * cluster tightly (a throughput heuristic, not a power calculation: see its
+   * docstring), and an agent that runs a few times per week needs months of
+   * wall-clock to pay that, during which it cannot evolve at all. Lowering
+   * `minRuns` instead would trade the deadlock for promotions on noise, which
+   * is worse: measured judge variance (±1 on a 10-point scale) dwarfs the real
+   * evolution lift (~+0.1 to +0.2).
    *
    * A timeout therefore NEVER promotes the challenger — inconclusive evidence
    * is not evidence. Unset (the default) means tests run until they conclude
@@ -618,7 +619,8 @@ export interface EvolutionConfigOverride {
   maxMergeInvocations?: number;
   /** v0.13.0 — wall-clock budget per A/B test in days (`--max-test-days <n>`). */
   maxTestDays?: number;
-  /** v0.14.0 — peeking-resistant A/B gate (`--require-confidence` / `--no-require-confidence`). */
+  /** v0.14.0 — confidence gate on the A/B margin. How much it is worth depends
+   *  on `confidenceMethod`; see {@link SafetyThresholds.requireConfidence}. */
   requireConfidence?: boolean;
   /** v0.14.0 — statistic backing the confidence gate (`--confidence-method <m>`). */
   confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
@@ -660,9 +662,12 @@ export interface SafetyThresholds {
   maxRegression: number;
   failureRollbackThreshold: number;
   /**
-   * v0.6.0 — Require a minimum statistical confidence (effect size) before
-   * declaring an A/B winner on the score margin. Guards against the
-   * "peeking problem": `evaluateABTest` is called after every run, and a
+   * v0.6.0 — Require a confidence check before declaring an A/B winner on the
+   * score margin. How much that is worth depends entirely on
+   * `confidenceMethod`: the default `'effect-size'` is a heuristic with no
+   * calibrated α and is NOT peeking-resistant in any formal sense; `'msprt'`
+   * and `'hoeffding'` are the methods designed for repeated looks. Aimed at
+   * the "peeking problem": `evaluateABTest` is called after every run, and a
    * fixed relative-improvement threshold with continuous monitoring inflates
    * the false-positive rate (winners declared by chance). When `true`, a
    * margin-based win must ALSO clear the effect-size / sample-size bar from
@@ -686,26 +691,55 @@ export interface SafetyThresholds {
    *   - `'effect-size'` (default): the v0.6.0 heuristic — |Δ| / pooled-mean
    *     ≥ 0.2 with 2×minRuns samples. No per-sample data needed. Cheap,
    *     approximate. Byte-for-byte the v0.6.0 behaviour.
-   *   - `'msprt'`: Mixture SPRT (Johari/Pekelis/Walsh 2017) — always-valid
-   *     sequential test using the observed per-arm composite scores. The
-   *     rigorous upgrade; needs the per-sample scores (the loop supplies
-   *     them automatically). Abstains during warmup (see `confidenceMinSamples`).
+   *   - `'msprt'`: Mixture SPRT (Johari/Pekelis/Walsh 2017), a sequential
+   *     test over the observed per-arm composite scores. **The recommended
+   *     method**: at Darwin's run counts it is the one that can resolve the
+   *     small lifts evolution actually produces. (Hoeffding can decide an
+   *     extreme gap from n=22, it just cannot resolve a realistic one.)
+   *     Its guarantee assumes a known variance; Darwin estimates it, so the
+   *     validity is asymptotic rather than exact at n=10 to 30. Needs the
+   *     per-sample scores (the loop supplies them automatically). Abstains
+   *     during warmup (see `confidenceMinSamples`).
    *   - `'hoeffding'`: σ-free time-uniform confidence sequence for the
-   *     bounded composite score (range from `confidenceScoreRange`). Valid
-   *     at any n, more conservative than mSPRT — the honest choice with few
-   *     runs or skewed score distributions.
+   *     bounded composite score (range from `confidenceScoreRange`).
+   *     Distribution-free and non-asymptotic, and far more conservative than
+   *     mSPRT. **Cannot fire at all at 21 or fewer runs per arm on a [0,1]
+   *     score**, and needs n=900 per arm for a +0.2 lift. An extreme
+   *     separation still promotes from n=22, but at Darwin's default run
+   *     counts a realistic lift will not. Corrected in v0.15; see the README's
+   *     "Statistical scope" section before choosing it.
    *
    * Default `undefined` (= `'effect-size'`).
    */
   confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
-  /** v0.7.0 — Significance level for `'msprt'`/`'hoeffding'`. Default 0.05. */
+  /** v0.7.0: significance level for `'msprt'`/`'hoeffding'`. Default 0.05. */
   confidenceAlpha?: number;
+  // NOTE (v0.15): this is the TOTAL budget for the confidence gate, not
+  // necessarily the level handed to one test. Under `'msprt'` the gate may run
+  // two tests (mSPRT, plus Hoeffding as a fallback when mSPRT has no spread to
+  // work with), whose error probabilities add, so each receives alpha/2. Under
+  // `'hoeffding'` there is one test and it receives the whole budget.
   /** v0.7.0 — mSPRT mixing-prior std-dev over the true mean difference (raw
    *  composite-score units). Default 0.1. */
   confidenceTau?: number;
   /** v0.7.0 — Per-arm warmup floor for `'msprt'`/`'hoeffding'`. Default 5. */
   confidenceMinSamples?: number;
-  /** v0.7.0 — [lo,hi] bounds of the composite score for `'hoeffding'`. Default [0,1]. */
+  /**
+   * v0.7.0: [lo,hi] bounds of the composite score. Default [0,1].
+   *
+   * v0.15 makes this matter in two more places, so set it whenever your
+   * composites are not on a 0-to-1 scale:
+   *   - the Hoeffding gate now REFUSES samples outside the declared range
+   *     rather than deciding on a guarantee that does not apply there, so a
+   *     wrong range means no promotions plus a warning;
+   *   - `'msprt'` consults it too, because when mSPRT abstains for lack of
+   *     spread (a deterministic evaluator) the gate falls back to Hoeffding,
+   *     which needs the bounds. Omitting it does NOT disable that fallback:
+   *     Hoeffding then uses its own [0,1] default, which decides normally for
+   *     composites already on that scale and refuses (leaving mSPRT's
+   *     abstention to stand) for anything outside it. Set it whenever your
+   *     scores are not 0-to-1.
+   */
   confidenceScoreRange?: readonly [number, number];
 }
 

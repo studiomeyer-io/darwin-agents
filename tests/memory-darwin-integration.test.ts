@@ -11,8 +11,6 @@ import {
   renderLessonContext,
   runClosedLoopTurn,
   type ClosedLoopOptions,
-  type AgentRunInput,
-  type AgentRunOutput,
 } from '../examples/memory-darwin-integration.js';
 import type { RetrievableFeedbackStore, Lesson } from '../examples/mcp-memory-bridge.js';
 import type { FeedbackRecord } from '../examples/closed-loop-feedback.js';

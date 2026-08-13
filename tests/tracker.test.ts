@@ -7,8 +7,7 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ExperimentTracker } from '../src/evolution/tracker.js';
-import { DEFAULT_WEIGHTS } from '../src/types.js';
-import type { DarwinExperiment, MetricWeights } from '../src/types.js';
+import type { MetricWeights } from '../src/types.js';
 import { createMockMemory, makeExperiment } from './helpers.js';
 
 let memory: ReturnType<typeof createMockMemory>;

@@ -85,8 +85,16 @@ You did nothing.
 > rewrite can't quietly erode a safety constraint. It can drive that mutation with
 > a [GEPA](https://arxiv.org/abs/2507.19457) reflective optimizer running **online,
 > inside the gate** (not as an offline batch step), and the A/B gate supports
-> **always-valid sequential tests** (mSPRT / Hoeffding) so checking after every run
-> doesn't inflate false positives. Details: [reflective evolution](#reflective-evolution--gepa-online-v06-opt-in)
+> **sequential tests built for continuous monitoring** (mSPRT / Hoeffding),
+> which is a different thing from a fixed-n threshold checked repeatedly. How
+> much better, measured rather than asserted: Hoeffding's boundary is proved,
+> mSPRT's real type-I error still drifts from 0.059 to 0.069 as the horizon
+> grows against a nominal 0.05, and the zero-config default is a plain margin
+> heuristic with no calibrated α at all. What each one guarantees, what it only
+> approximates, and the boundary we shipped wrong until v0.15 are all in
+> [statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee).
+> Details:
+> [reflective evolution](#reflective-evolution--gepa-online-v06-opt-in)
 > · [statistical rigor](#statistical-rigor--coverage-sampling-v07-opt-in).
 
 ## Quick Start
@@ -149,26 +157,32 @@ evolution: {
 Everything degrades safely: with no critic feedback yet (cold start), on any
 reflector error, or if a mutation would erode a safety constraint, the loop
 falls back to the default optimizer. The same alignment guard now runs on both
-paths. Pair with `requireConfidence` on your `SafetyThresholds` for a
-peeking-resistant A/B gate. All of it is off unless you opt in — existing
+paths. Pair with `requireConfidence` plus `confidenceMethod: 'msprt'` on your
+`SafetyThresholds` for an A/B gate built for repeated looks. (`requireConfidence`
+alone selects the `'effect-size'` heuristic, which has no calibrated α.) All of it is off unless you opt in — existing
 agents behave exactly as before.
 
 ### Statistical rigor + coverage sampling (v0.7, opt-in)
 
-v0.7 makes the evolution loop statistically honest and brings the GEPA optimizer
-closer to the paper. Every piece is additive and off by default (one exception:
+v0.7 added sequential testing to the evolution loop and brought the GEPA
+optimizer closer to the paper. (One of those tests was wrong until v0.15; see
+[statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee).) Every piece is additive and off by default (one exception:
 the feedback window default rose from 5 to 15):
 
 ```typescript
 import { SafetyGate, DarwinLoop } from 'darwin-agents';
 
-// Always-valid sequential A/B gate — peeking-resistant after every run.
+// Sequential A/B gate, built for peeking after every run.
+// 'msprt' is the one that can resolve realistic lifts at these run counts.
+// It is NOT calibrated here: see "Statistical scope" for the measured error.
 const safety = new SafetyGate({
   minDataPoints: 10,
   maxRegression: 0.2,
   failureRollbackThreshold: 3,
   requireConfidence: true,
-  confidenceMethod: 'msprt',   // Mixture SPRT (or 'hoeffding' — σ-free, conservative)
+  confidenceMethod: 'msprt',   // Mixture SPRT. 'hoeffding' is σ-free but needs
+                               // ~900 runs per arm even for a 0.2 composite
+                               // gap, ~20x the quality component we measured.
 });
 
 const loop = new DarwinLoop({
@@ -177,9 +191,11 @@ const loop = new DarwinLoop({
 });
 ```
 
-- **mSPRT / Hoeffding confidence sequences** — a margin win is adopted only when
-  it clears an always-valid significance bar, so monitoring after every run no
-  longer inflates false positives.
+- **mSPRT / Hoeffding confidence sequences**: a margin win is adopted only when
+  it clears a significance bar designed for repeated looks, so monitoring after
+  every run no longer inflates false positives the way a fixed-n threshold
+  does. Read [statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee)
+  before relying on either one. `'msprt'` is the method to reach for.
 - **ε-Pareto gate** (`evolution.paretoEpsilon`) — forgive a microscopic
   regression on one objective when a challenger wins decisively on another.
 - **Instance-wise coverage sampling** (`useCoverage` + per-variant `perKeyScores`)
@@ -192,8 +208,63 @@ const loop = new DarwinLoop({
   false rejection; a *removed* one still is (fail-closed without an embedder).
 - **Epoch-shuffled reflection minibatch** (`reflectionMinibatchSize`) + a
   configurable `feedbackWindow` (default 15).
-- **Style-bias-free judging** (`normalizeForJudging`) — strip markdown before the
+- **Style-bias-free judging** (`normalizeForJudging`): strip markdown before the
   critic scores, so it measures content not formatting.
+
+### Statistical scope: what the sequential tests do and do not guarantee
+
+Darwin is applied engineering that borrows from the sequential-testing
+literature. It is not a statistics library, and this section says exactly where
+the line runs, because "always-valid" is a phrase that gets thrown around and
+we threw it around too loosely ourselves.
+
+**We shipped a Hoeffding boundary whose stated proof does not work, from
+v0.7 through v0.14.** It used `w(n) = R·√(ln((n+1)/α) / (2n))` and the code
+called it "a standard union-bound time-uniform Hoeffding bound". That boundary
+allows `2α/(n+1)` of the error budget at every look, and `Σ 2α/(n+1)` diverges,
+so the union bound never closes and the justification establishes nothing.
+Being exact about the scope of that, because not overclaiming is the point:
+what is refuted is the argument, not the boundary. A divergent chain of upper
+bounds does not prove the true crossing probability diverges. Nobody has
+produced a construction that covers it either, and we are not going to gate
+promotions on an unproven bound. Both arms also spent the full α rather than α/2, so even the nominal
+accounting was off by a factor of two. Note the limit of that statement: since
+the per-arm boundary had no established level in the first place, this is a
+bookkeeping error in the allocation, not a proof that the old procedure ran at
+2α. Both are fixed in v0.15, and
+[`tests/sequential-coverage.test.ts`](tests/sequential-coverage.test.ts) now
+re-derives the α-spend numerically instead of asserting it in a comment: the
+corrected schedule converges to the budget, the old one is shown diverging past
+it. Related reading: Howard, Ramdas, McAuliffe and Sekhon,
+[*Time-uniform, nonparametric, nonasymptotic confidence sequences*](https://arxiv.org/abs/1810.08240),
+which makes the same point about pointwise Hoeffding intervals.
+
+Where each method stands today:
+
+| | What is guaranteed | The honest caveat |
+|---|---|---|
+| **`'msprt'`** (the practical choice) | Mixture SPRT over the difference in means, prior δ ~ N(0, τ²), reject at Λ ≥ 1/α. Valid under repeated looks **given a known variance AND a Gaussian (or suitably sub-Gaussian) sampling model**. The mixture likelihood ratio is built from a Gaussian likelihood, so a known variance on its own is not enough, and Darwin has neither. | Darwin plugs in the observed Welch variance, and that is anti-conservative: when the within-arm spread comes out small by chance, Λ overshoots. **Measured under H0** (a coarse judge scoring {0, 0.1, 0.2} at {0.50, 0.05, 0.45}, default α=0.05 and warmup, checking after every individual run): type-I error **0.059 through n=14, 0.064 through n=20, 0.069 through n=30**. It is past α from the first horizon measured and keeps drifting. Through `SafetyGate` the primary test gets α/2, which brings the real error to about 0.046 rather than the 0.025 it was handed: the split narrows the gap, it does not buy calibration. **So this is not a calibrated test at Darwin's sample sizes**, it is a well-motivated stopping rule that behaves roughly like its nominal α over short horizons. v0.15 removed the worst of it (a branch that decided regardless of α); the rest needs a different method (unknown-variance e-process or t-mixture), not a patch. The numbers above are re-measured by the test suite on every run. |
+| **`'hoeffding'`** | Non-asymptotic, distribution-free, and provable in four lines (the proof is in the [source](src/evolution/sequential.ts)). No variance estimate involved. **Assumes what Darwin does not enforce**: observations bounded to the declared range (v0.15 refuses out-of-range data rather than guessing), AND independent, with a stable target mean. Correlated judge scores, task drift over the life of a test, or any confounding between arm and task all break that, and a decisive verdict then is not evidence of a prompt effect. | Being σ-free costs power, and more than it looks. Exact figures on a [0, 1] score, **calling the primitive directly at α=0.05**: at n ≤ 21 per arm the two half-widths sum to ≥ 1.0, so no data at all can make it fire; the bar first fits inside the range at n=22 (0.982); at the `computeDynamicMinRuns` ceiling of 30 it is 0.865; a 0.2 composite gap needs n=900. **Through `SafetyGate` under `'msprt'` the fallback runs at α/2**, so those become n=23 (0.995), 0.891 at n=30, 0.665 at n=60, and n=939 for a 0.2 gap. Mind which path you are quoting. A stock config will not promote on quality in practice: the test tops out at 2×minRuns = 60 runs per arm, where the bar is 0.648 (0.665 through the gate). **Mind the units on the lift, because they are easy to conflate**: 0.2 above is a gap on the [0,1] COMPOSITE, while the +0.23 and +0.28 figures reported further down are quality points on a 1-to-10 scale. `tracker.ts` normalises quality as `score / 10` and weights it 0.40 by default, so those lifts contribute **0.0092 and 0.0112** to the composite. Being careful about what that is: it is the QUALITY COMPONENT's contribution, not the total composite delta, which also moves with source count, output length, duration and success, and which we did not record. What it does establish is the order of magnitude, roughly a twentieth of 0.2. Resolving a gap that size distribution-free would take on the order of 742,000 and 488,000 runs per arm. Hoeffding is not a candidate for measuring real evolution lift, and 0.2 is not a realistic composite gap either. v0.15 stopped the inability being silent: the verdict carries `inconclusiveByConstruction` and the gate warns once. |
+| **`'effect-size'`** (default) | Nothing. It is a heuristic: \|Δ\| / pooled-mean ≥ 0.2 plus a sample-count floor. | Documented as a heuristic on purpose. It is what runs when you have not opted into anything. |
+
+Two further things we would rather state than have someone discover:
+
+- **`computeDynamicMinRuns` is a throughput heuristic, not a power
+  calculation.** It asks for *more* runs when scores cluster tightly, which is
+  the opposite direction to the textbook `n ∝ σ²/Δ²` for a fixed absolute
+  effect. That is deliberate, and the premise it rests on (that the effect
+  worth finding scales with the spread the agent already shows) is written out
+  in its [docstring](src/evolution/safety.ts). If you want statistics, do not
+  tune this number: turn on `requireConfidence` with `'msprt'` and let the
+  sequential test decide.
+- **Tighter boundaries exist and we have not implemented them.** The
+  curved/stitched and conjugate-mixture constructions in the paper above are
+  narrower than a union bound and would make Hoeffding usable at smaller n.
+  (Their growth rates differ from one another; an earlier draft of this section
+  quoted a single rate for both, which was wrong. Read the paper rather than
+  our paraphrase.) Darwin uses the union-bound schedule because its validity is
+  checkable by hand in four lines. Checkable beat optimal. That is a trade, and
+  you should know it was made.
 
 ### Drift detection — validate-by-reproduce canary (v0.9)
 
@@ -340,8 +411,8 @@ live A/B gate decide under real traffic** — offline means are directional,
 the sequential gate is the significance test.
 
 **Per-agent safety thresholds** (`evolution.safety`) open the config-level
-door to the statistical-rigor knobs. Before v0.14 the always-valid sequential
-tests existed but were reachable only by hand-wiring a `SafetyGate`; now any
+door to the statistical-rigor knobs. Before v0.14 the sequential tests
+existed but were reachable only by hand-wiring a `SafetyGate`; now any
 agent definition — and the CLI — can arm them:
 
 ```typescript
@@ -540,10 +611,24 @@ writer      v1  6.89 (126 runs)  →  v2  7.12 (42 runs)    +0.23
 marketing   v1  7.64 (45 runs)   →  v2  7.92 (25 runs)    +0.28
 ```
 
-Don't take our word for it — reproduce the v1-vs-evolved comparison on your own
+Don't take our word for it. Reproduce the v1-vs-evolved comparison on your own
 tasks with [`npm run benchmark`](benchmark/).
 
 <!-- REAL_METRICS_END -->
+
+> **How much these numbers are worth.** They are ours: our agents, our tasks,
+> our critics. The quality score is an LLM judging an LLM, and for most of
+> these runs the judge and the author sit in the same model family, which is
+> the direction self-preference bias runs. The lifts above (+0.23, +0.28) are
+> also smaller than the judge variance we measured on repeat scoring of
+> identical output (about ±1 point), so they are directional evidence across
+> many runs, not a per-run effect you could observe. Nobody independent has
+> evaluated Darwin. If a number here matters to your decision, reproduce it:
+> `npm run benchmark` ships the prompts, the frozen task set and the scoring
+> loop for exactly that reason.
+>
+> (Kept outside the `REAL_METRICS` markers on purpose: everything between them
+> is regenerated by `scripts/update-readme-metrics.ts`.)
 
 ## Feature Comparison
 
@@ -569,7 +654,7 @@ appeared — worth knowing, and each good at what it does:
 | GEPA reflective optimizer | **Online, inside the safety gate** | Offline batch (1:1 Python parity) | Offline batch (AI-SDK-native) | No (bandit + LLM judge) |
 | Where optimization runs | Live traffic, A/B-gated | Offline trainset | Offline trainset | Live traffic, bandit-routed |
 | Regression rollback + alignment guard | **Yes** | No | No | Canary rollback |
-| Always-valid sequential stats | **Yes** (mSPRT / Hoeffding) | No | No | Welch's t-test |
+| Sequential stats built for continuous monitoring | **Yes** (mSPRT / Hoeffding, [scope + caveats](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee)) | No | No | Welch's t-test |
 | Offline dataset evals | Yes (v0.14) | **Yes** | **Yes** | Cold-start harness |
 | Cost/latency as objectives | No (roadmap) | No | **Yes** (+ USD budget caps) | Pareto (quality/cost/latency) |
 | Metrics export | JSONL + OTel bridge (v0.14) | WandB | Logger hook | **Prometheus/Grafana** |
@@ -712,7 +797,8 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 ## Known Limitations
 
 - **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. Each agent is scored by a **multi-dimension critic set** (several scoring rubrics per agent type, not a single number). When more than one provider key is present, the CLI also spreads those critics across model families — e.g. GPT for one, Claude for another — to blunt single-model self-preference; with one provider they all run on it. Inherent judge bias still exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
-- **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes based on variance. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and **v0.7 ships proper always-valid sequential tests** (`confidenceMethod: 'msprt'` / `'hoeffding'`). Since v0.14 they are one config block away — `evolution.safety: { requireConfidence: true, confidenceMethod: 'msprt' }` or `darwin evolve <agent> --require-confidence --confidence-method msprt` — no hand-wired `SafetyGate` needed. The default path remains the simple threshold for zero-config use.
+- **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes from the observed spread, as a throughput heuristic rather than a power calculation. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate and v0.7 added sequential tests (`confidenceMethod: 'msprt'` / `'hoeffding'`). Since v0.14 they are one config block away: `evolution.safety: { requireConfidence: true, confidenceMethod: 'msprt' }` or `darwin evolve <agent> --require-confidence --confidence-method msprt`, with no hand-wired `SafetyGate` needed. The default path remains the simple threshold for zero-config use. **What those tests guarantee, what they only approximate, and the boundary we shipped wrong until v0.15, are all in [statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee). Read it before treating a promotion as a significant result.**
+- **Our numbers are our own**: the [benchmark](benchmark/) is reproducible (frozen tasks, both prompts, the scoring loop, all in the repo) but it is ten tasks scored by an LLM judge, and the production figures quoted anywhere in this README come from our own fleet with our own critics. Nobody independent has evaluated Darwin. Treat every number here as a starting point for your own measurement, not as evidence.
 - **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
 
 ## Contributing

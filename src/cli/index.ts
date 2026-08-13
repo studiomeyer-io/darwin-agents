@@ -66,7 +66,7 @@ const HELP = `
     --reflection-model <id>       stronger reflection model for GEPA
     --demos / --no-demos          SIMBA-style demo injection (v0.10)
     --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
-    --require-confidence / --no-require-confidence   peeking-resistant A/B gate (v0.14)
+    --require-confidence / --no-require-confidence   confidence gate on the A/B margin (v0.14)
     --confidence-method <m>       effect-size | msprt | hoeffding (v0.14)
 
   Eval flags (darwin eval):

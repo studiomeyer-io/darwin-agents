@@ -10,7 +10,7 @@
  * byte-for-byte unchanged — these tests only exercise the new opt-in surfaces.
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { DarwinLoop } from '../src/evolution/loop.js';

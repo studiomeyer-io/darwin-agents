@@ -1,13 +1,17 @@
 /**
  * Darwin — Evolution Benchmark
  *
- * Reproducible proof that an *evolved* prompt beats the *baseline* it grew from,
- * scored on a frozen set of held-out tasks the evolution never saw.
+ * A reproducible CHECK of whether an *evolved* prompt beats the *baseline* it
+ * grew from, scored on a frozen set of held-out tasks the evolution never saw.
  *
- * This is the honest version of a metrics claim: we ship the two prompts (the
- * baseline `writer-v1` and the prompt Darwin's own optimizer produced, `writer-v2`),
- * a fixed task set, and the exact scoring loop — so anyone can reproduce the delta
- * on their own machine and their own tasks.
+ * Not a proof, and the word was removed in v0.15 for being exactly the kind of
+ * overclaim that release is about. Ten tasks scored by an LLM judge is a
+ * harness, not a significance test, and the judge shares a model family with
+ * the author. What it does buy is honesty about the mechanism: we ship the two
+ * prompts (the baseline `writer-v1` and the prompt Darwin's own optimizer
+ * produced, `writer-v2`), a fixed task set, and the exact scoring loop, so
+ * anyone can reproduce the delta on their own machine and their own tasks
+ * instead of taking a number on trust. See benchmark/README.md for the caveats.
  *
  *   npm run benchmark               # all seed tasks, 1 run/cell (≈4 LLM calls/task)
  *   npm run benchmark -- --runs 3   # 3 runs per cell, averaged — cuts judge variance

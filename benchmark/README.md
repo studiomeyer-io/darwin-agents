@@ -42,9 +42,19 @@ agents keep the caps.
 - **The critic is an LLM judge.** It carries self-preference bias; that's a known
   limitation, not a benchmark artifact. Point the critic at a different model
   family for a cleaner read.
-- **Your numbers will differ** from ours — different model versions, different
-  tasks, sampling variance. That's the point: it's reproducible, not a fixed
+- **Your numbers will differ** from ours: different model versions, different
+  tasks, sampling variance. That's the point. It's reproducible, not a fixed
   marketing figure.
+- **Nothing here is independent validation.** The prompts are ours, the tasks
+  are ours, the judge is ours, and [`results/`](results/) holds a single
+  committed report from one of our own runs. A reproducible harness is a much
+  better claim than a screenshot, and it is still not the same thing as
+  somebody else measuring us.
+- **Read [statistical scope](../README.md#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee)
+  before quoting a delta.** Ten tasks at one run per cell is far below what the
+  `'hoeffding'` gate needs (it cannot fire at all under 22 runs per arm). mSPRT
+  can separate ten well-separated samples, but a delta this harness produces is
+  not one the online gate has vetted, so do not present it as one.
 
 ## Want the full mechanism, not just a replay?
 

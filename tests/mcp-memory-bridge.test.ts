@@ -9,7 +9,6 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,8 +22,6 @@ import {
   defaultMapReadResult,
   mem0Preset,
   remoteMemory,
-  type McpMemoryConfig,
-  type Lesson,
 } from '../examples/mcp-memory-bridge.js';
 import type { FeedbackRecord } from '../examples/closed-loop-feedback.js';
 

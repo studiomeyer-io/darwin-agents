@@ -1,5 +1,5 @@
 /**
- * Tests for the always-valid sequential testing primitives (v0.7.0).
+ * Tests for the sequential testing primitives (v0.7.0, corrected v0.15).
  * Covers meanVar, msprtTwoSample, hoeffdingTwoSample — happy path,
  * warmup abstention, degenerate variance, NaN resilience, monotonicity.
  */
@@ -12,6 +12,19 @@ import {
   msprtTwoSample,
   hoeffdingTwoSample,
 } from '../src/evolution/sequential.js';
+
+/**
+ * n samples around `mean` with a small deterministic spread.
+ *
+ * Needed since v0.15: perfectly constant arms now abstain in mSPRT, because
+ * firing on them ignored alpha (a 12.5% type-I error at minSamplesPerArm 2).
+ * LLM-judged composites carry spread, so these fixtures do too. Deterministic
+ * evaluators legitimately do not, and that case is covered separately in
+ * tests/sequential-coverage.test.ts (the SafetyGate hands it to Hoeffding).
+ */
+function around(mean: number, n: number, spread = 0.01): number[] {
+  return Array.from({ length: n }, (_, i) => mean + (i % 2 === 0 ? spread : -spread));
+}
 
 // ─── meanVar ────────────────────────────────────────
 
@@ -49,9 +62,12 @@ describe('msprtTwoSample', () => {
     assert.match(v.reason, /warmup/);
   });
 
+  // v0.15: these arms carry a little spread on purpose. Perfectly constant
+  // arms now abstain (see the degenerate branch in sequential.ts), because
+  // firing on them ignored alpha.
   it('fires decisively on a large, consistent gap', () => {
-    const a = Array(12).fill(0.55);
-    const b = Array(12).fill(0.85);
+    const a = around(0.55, 12);
+    const b = around(0.85, 12);
     const v = msprtTwoSample(a, b);
     assert.equal(v.decisive, true);
     assert.equal(v.direction, 1); // B > A
@@ -68,20 +84,31 @@ describe('msprtTwoSample', () => {
   });
 
   it('detects direction when A beats B', () => {
-    const a = Array(12).fill(0.9);
-    const b = Array(12).fill(0.5);
+    const a = around(0.9, 12);
+    const b = around(0.5, 12);
     const v = msprtTwoSample(a, b);
     assert.equal(v.decisive, true);
     assert.equal(v.direction, -1); // A > B
   });
 
-  it('deterministic differing arms (zero variance) are decisive with Infinity statistic', () => {
-    const a = Array(8).fill(0.4);
-    const b = Array(8).fill(0.9);
-    const v = msprtTwoSample(a, b);
-    assert.equal(v.decisive, true);
-    assert.equal(v.statistic, Number.POSITIVE_INFINITY);
-    assert.equal(v.direction, 1);
+  it('arms with NO observed spread abstain instead of firing (v0.15)', () => {
+    // Behaviour change. This used to return decisive with an Infinity
+    // statistic. It fired regardless of alpha, and under H0 two arms come out
+    // constant by chance often enough to matter: with minSamplesPerArm 2 under
+    // Bernoulli(0.5) that is a 12.5% type-I error. Found by cross-model review.
+    const v = msprtTwoSample(Array(8).fill(0.4), Array(8).fill(0.9));
+    assert.equal(v.decisive, false);
+    assert.equal(v.statistic, 0);
+    assert.match(v.reason, /no observed spread/);
+
+    // The exact counterexample from that review, at the setting where it bites.
+    const w = msprtTwoSample([0, 0], [1, 1], { minSamplesPerArm: 2 });
+    assert.equal(w.decisive, false);
+
+    // And the check is on spread, not on an exact zero variance: 0.4 and 0.9
+    // are not representable, so the residual variance here is ~1e-33 rather
+    // than 0, which used to slip through into Λ = ∞.
+    assert.equal(msprtTwoSample(Array(8).fill(0.1), Array(8).fill(0.7)).decisive, false);
   });
 
   it('identical constant arms are NOT decisive', () => {
@@ -93,8 +120,8 @@ describe('msprtTwoSample', () => {
   });
 
   it('Λ grows monotonically as more consistent evidence accrues', () => {
-    const small = msprtTwoSample(Array(6).fill(0.55), Array(6).fill(0.8));
-    const large = msprtTwoSample(Array(20).fill(0.55), Array(20).fill(0.8));
+    const small = msprtTwoSample(around(0.55, 6), around(0.8, 6));
+    const large = msprtTwoSample(around(0.55, 20), around(0.8, 20));
     // more samples of the same gap → stronger evidence (only meaningful when
     // both are finite; the small case may already be Infinity for a clean gap,
     // so compare logs guardedly)
@@ -117,8 +144,12 @@ describe('hoeffdingTwoSample', () => {
   });
 
   it('fires when intervals no longer overlap (big gap, enough n)', () => {
-    const a = Array(40).fill(0.2);
-    const b = Array(40).fill(0.9);
+    // n was 40 until v0.15. The corrected (provably time-uniform) boundary is
+    // wider, so a 0.7 gap now needs ~50 runs per arm rather than 40. The number
+    // moving is the point: see tests/sequential-coverage.test.ts for why the
+    // pre-0.15 boundary was cheaper than it was allowed to be.
+    const a = Array(60).fill(0.2);
+    const b = Array(60).fill(0.9);
     const v = hoeffdingTwoSample(a, b);
     assert.equal(v.decisive, true);
     assert.equal(v.direction, 1);
@@ -133,11 +164,17 @@ describe('hoeffdingTwoSample', () => {
   });
 
   it('is more conservative than mSPRT on the same borderline data', () => {
-    const a = Array(12).fill(0.6);
-    const b = Array(12).fill(0.74);
+    const a = around(0.6, 12);
+    const b = around(0.74, 12);
     const h = hoeffdingTwoSample(a, b);
     const m = msprtTwoSample(a, b);
-    // If Hoeffding fires, mSPRT must also fire (Hoeffding ⊆ mSPRT power).
+    // Asserted both ways so the test cannot pass vacuously: at 12 runs per arm
+    // mSPRT resolves this low-noise pair while Hoeffding provably cannot
+    // (its bar exceeds the [0,1] range at this n).
+    assert.equal(m.decisive, true);
+    assert.equal(h.decisive, false);
+    assert.equal(h.inconclusiveByConstruction, true);
+    // And the general relation still holds: Hoeffding firing implies mSPRT does.
     if (h.decisive) assert.equal(m.decisive, true);
   });
 

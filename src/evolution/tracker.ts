@@ -7,7 +7,6 @@
 
 import type {
   DarwinExperiment,
-  DarwinState,
   MemoryProvider,
   MetricWeights,
   PromptVersionStats,
@@ -221,7 +220,7 @@ export class ExperimentTracker {
   /**
    * v0.7.0 — Per-experiment composite scores for a specific agent + prompt
    * version, in chronological order. Unlike {@link getAverageComposite} this
-   * does NOT collapse to a scalar — it feeds the always-valid sequential
+   * does NOT collapse to a scalar — it feeds the sequential
    * confidence gate (mSPRT / Hoeffding), which needs the individual samples
    * (and therefore their variance), not just the mean.
    *

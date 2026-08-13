@@ -85,7 +85,6 @@ async function showAgentStatus(
 
   // Calculate improvement since v1
   const v1Exps = experiments.filter(e => e.promptVersion === 'v1');
-  const latestExps = experiments.filter(e => e.promptVersion === activeVersion);
   const v1Quality = v1Exps.filter(e => e.metrics.qualityScore !== null).length > 0
     ? v1Exps.reduce((s, e) => s + (e.metrics.qualityScore ?? 0), 0) / v1Exps.filter(e => e.metrics.qualityScore !== null).length
     : 0;

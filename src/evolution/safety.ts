@@ -8,7 +8,7 @@
 
 import type { PromptVersionStats, SafetyThresholds, DarwinExperiment } from '../types.js';
 import { DEFAULT_SAFETY } from '../types.js';
-import { msprtTwoSample, hoeffdingTwoSample } from './sequential.js';
+import { msprtTwoSample, hoeffdingTwoSample, ebTwoSample } from './sequential.js';
 
 export type ABTestOutcome = 'a_wins' | 'b_wins' | 'continue';
 
@@ -84,6 +84,7 @@ export function resetInertConfidenceWarningForTests(): void {
 function classifyInvalidInput(reason: string): string {
   if (reason.startsWith('invalid alpha')) return 'alpha';
   if (reason.startsWith('invalid tau')) return 'tau';
+  if (reason.startsWith('invalid truncation')) return 'truncation';
   if (reason.startsWith('invalid score range')) return 'range';
   if (reason.startsWith('non-finite score bound')) return 'bound';
   if (reason.includes('outside the declared score range')) return 'out-of-range';
@@ -120,7 +121,8 @@ export class SafetyGate {
     return (
       this.thresholds.requireConfidence === true &&
       (this.thresholds.confidenceMethod === 'msprt' ||
-        this.thresholds.confidenceMethod === 'hoeffding')
+        this.thresholds.confidenceMethod === 'hoeffding' ||
+        this.thresholds.confidenceMethod === 'eb')
     );
   }
 
@@ -349,8 +351,10 @@ export class SafetyGate {
     // and Hoeffding as a fallback when mSPRT has no noise scale to work with.
     // Those two rejection events are disjoint but their error probabilities
     // ADD, so running both at the full alpha would give a composite level of up
-    // to 2*alpha. Each therefore gets half. Under `'hoeffding'` there is only
-    // ever one test, so it keeps the whole budget.
+    // to 2*alpha. Each therefore gets half. Under `'hoeffding'` and `'eb'`
+    // (v0.16) there is only ever one test, so it keeps the whole budget: EB
+    // needs no fallback because its regularised variance estimate exists from
+    // the first observation, so it has no no-spread abstention to hand off.
     const configuredAlpha = this.thresholds.confidenceAlpha ?? DEFAULT_CONFIDENCE_ALPHA;
     const perTestAlpha = method === 'msprt' ? configuredAlpha / 2 : configuredAlpha;
 
@@ -364,7 +368,9 @@ export class SafetyGate {
     let verdict =
       method === 'hoeffding'
         ? hoeffdingTwoSample(samples.a, samples.b, hoeffdingOpts)
-        : msprtTwoSample(samples.a, samples.b, {
+        : method === 'eb'
+          ? ebTwoSample(samples.a, samples.b, hoeffdingOpts)
+          : msprtTwoSample(samples.a, samples.b, {
             ...opts,
             alpha: perTestAlpha,
             tau: this.thresholds.confidenceTau,
@@ -412,10 +418,12 @@ export class SafetyGate {
             `quality until this is fixed. ${verdict.reason}`,
         );
       }
-      // v0.15: a Hoeffding gate whose bar already exceeds the score range
-      // cannot confirm a score margin, whatever the data. That is honest
-      // behaviour for a distribution-free bound at 10 to 30 runs per arm, but
-      // freezing the margin path in silence is not, so say it once per process.
+      // v0.15: a gate whose bar already exceeds the score range cannot confirm
+      // a score margin, whatever the data. That is honest behaviour for a
+      // distribution-free bound at 10 to 30 runs per arm, but freezing the
+      // margin path in silence is not, so say it once per process. (v0.16: the
+      // same structural blind zone exists for 'eb' below ~18 runs per arm, so
+      // the message names the method that actually produced the verdict.)
       //
       // Careful with the wording: this does NOT mean nothing can ever be
       // promoted. `evaluateABTest` runs the reliability auto-loss BEFORE this
@@ -424,7 +432,7 @@ export class SafetyGate {
       if (verdict.inconclusiveByConstruction && !warnedInertConfidence) {
         warnedInertConfidence = true;
         console.warn(
-          `[darwin] confidenceMethod 'hoeffding' cannot confirm a score margin ` +
+          `[darwin] confidenceMethod '${verdict.method}' cannot confirm a score margin ` +
             `at this sample size, so no challenger will be promoted on quality ` +
             `while that holds (the reliability auto-loss rule still applies). ` +
             `${verdict.reason}`,

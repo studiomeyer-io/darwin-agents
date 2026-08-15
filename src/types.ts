@@ -78,7 +78,7 @@ export interface EvolutionConfig {
    * v0.14.0 — Per-agent safety-gate thresholds, merged over
    * {@link DEFAULT_SAFETY}. This is the config-level door to the v0.6/v0.7
    * statistical rigor knobs ({@link SafetyThresholds.requireConfidence},
-   * `confidenceMethod: 'msprt' | 'hoeffding'`, `maxRegression`, …) — before
+   * `confidenceMethod: 'msprt' | 'hoeffding' | 'eb'`, `maxRegression`, …). Before
    * v0.14 they were reachable ONLY by constructing a `SafetyGate` by hand and
    * wiring your own `DarwinLoop`, so neither the CLI nor
    * {@link buildEvolutionLoop} consumers (agent fleets) could turn them on.
@@ -622,8 +622,9 @@ export interface EvolutionConfigOverride {
   /** v0.14.0 — confidence gate on the A/B margin. How much it is worth depends
    *  on `confidenceMethod`; see {@link SafetyThresholds.requireConfidence}. */
   requireConfidence?: boolean;
-  /** v0.14.0 — statistic backing the confidence gate (`--confidence-method <m>`). */
-  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
+  /** v0.14.0: statistic backing the confidence gate (`--confidence-method <m>`).
+   *  v0.16.0 adds `'eb'`; see {@link SafetyThresholds.confidenceMethod}. */
+  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding' | 'eb';
 }
 
 // ─── Patterns ───────────────────────────────────────
@@ -708,21 +709,33 @@ export interface SafetyThresholds {
    *     separation still promotes from n=22, but at Darwin's default run
    *     counts a realistic lift will not. Corrected in v0.15; see the README's
    *     "Statistical scope" section before choosing it.
+   *   - `'eb'` (v0.16.0): predictable plug-in empirical Bernstein confidence
+   *     sequence (Waudby-Smith & Ramdas 2024). Time-uniform with a proof of
+   *     the same supermartingale kind as `'hoeffding'`, but its width adapts
+   *     to the OBSERVED spread, so on tight judge-score distributions it
+   *     resolves gaps Hoeffding structurally cannot (measured figures on
+   *     `ebTwoSample`). Unlike mSPRT its guarantee does not lean on a
+   *     plugged-in variance estimate, so it is the method to pick when you
+   *     want both calibration and usable power. Structural blind zone below
+   *     ~18 runs per arm on a [0,1] score; uses `confidenceScoreRange`.
    *
    * Default `undefined` (= `'effect-size'`).
    */
-  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding';
-  /** v0.7.0: significance level for `'msprt'`/`'hoeffding'`. Default 0.05. */
+  confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding' | 'eb';
+  /** v0.7.0: significance level for `'msprt'`/`'hoeffding'`/`'eb'`. Default 0.05. */
   confidenceAlpha?: number;
   // NOTE (v0.15): this is the TOTAL budget for the confidence gate, not
   // necessarily the level handed to one test. Under `'msprt'` the gate may run
   // two tests (mSPRT, plus Hoeffding as a fallback when mSPRT has no spread to
   // work with), whose error probabilities add, so each receives alpha/2. Under
-  // `'hoeffding'` there is one test and it receives the whole budget.
+  // `'hoeffding'` and `'eb'` there is one test and it receives the whole budget.
   /** v0.7.0 — mSPRT mixing-prior std-dev over the true mean difference (raw
    *  composite-score units). Default 0.1. */
   confidenceTau?: number;
-  /** v0.7.0 — Per-arm warmup floor for `'msprt'`/`'hoeffding'`. Default 5. */
+  /** v0.7.0: per-arm warmup floor for the sequential methods. Defaults when
+   *  unset differ per method: 5 for `'msprt'` (noisy variance estimates below
+   *  that), 2 for `'hoeffding'` and `'eb'` (valid from n=1, but a 1-sample arm
+   *  yields a range-wide interval). */
   confidenceMinSamples?: number;
   /**
    * v0.7.0: [lo,hi] bounds of the composite score. Default [0,1].
@@ -739,6 +752,10 @@ export interface SafetyThresholds {
    *     composites already on that scale and refuses (leaving mSPRT's
    *     abstention to stand) for anything outside it. Set it whenever your
    *     scores are not 0-to-1.
+   *
+   * `'eb'` (v0.16) reads it the same way `'hoeffding'` does: these bounds ARE
+   * its boundedness assumption, and out-of-range samples are refused
+   * fail-closed.
    */
   confidenceScoreRange?: readonly [number, number];
 }

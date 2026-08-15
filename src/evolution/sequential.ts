@@ -29,6 +29,14 @@
  *      n=900 per arm to resolve a +0.2 lift, so treat it as a conservative
  *      second opinion rather than the everyday gate.
  *
+ *   3. {@link ebTwoSample} (v0.16): the predictable plug-in empirical
+ *      Bernstein confidence sequence of Waudby-Smith & Ramdas (JRSS-B 2024).
+ *      The unknown-variance e-process the v0.15 notes said a proper fix would
+ *      require. Time-uniform like Hoeffding, with a proof of the same
+ *      supermartingale kind, but its width ADAPTS to the observed variance,
+ *      so on the tight score distributions LLM judges actually produce it
+ *      resolves gaps Hoeffding structurally cannot at Darwin's sample sizes.
+ *
  * **v0.15 corrected the Hoeffding boundary.** Through v0.14 it allowed
  * 2α/(n+1) at every look, which is not a summable schedule, so the union
  * bound the comment invoked never closed and the time-uniform guarantee was
@@ -48,7 +56,7 @@
  */
 
 /** Which confidence method the safety gate uses for the peeking guard. */
-export type ConfidenceMethod = "effect-size" | "msprt" | "hoeffding";
+export type ConfidenceMethod = "effect-size" | "msprt" | "hoeffding" | "eb";
 
 /** Verdict from a sequential test. `decisive` answers "is the gap real?". */
 export interface SequentialVerdict {
@@ -850,6 +858,401 @@ export function hoeffdingHalfWidth(n: number, range: number, alpha: number): num
   const w = range * Math.sqrt(inner / 2 / n);
   // n above ~1e154 overflows n*(n+1) to Infinity. Refusing beats returning NaN.
   return Number.isFinite(w) ? w : Number.POSITIVE_INFINITY;
+}
+
+export interface EbOptions {
+  /** Significance level for the WHOLE two-arm decision. Default 0.05. */
+  alpha?: number;
+  /** Lower bound of the score range. Default 0 (Darwin composite scores). */
+  lo?: number;
+  /** Upper bound of the score range. Default 1 (Darwin composite scores). */
+  hi?: number;
+  /** Per-arm warmup floor (≥1). Default 2, same reasoning as Hoeffding. */
+  minSamplesPerArm?: number;
+  /**
+   * Truncation cap c on the predictable bet λ_t, strictly inside (0, 1).
+   * Default 1/2, one of the two values the source paper recommends. The
+   * guarantee holds for ANY predictable λ_t in [0, 1), so this is a tuning
+   * knob, not a validity knob: a larger c lets the sequence tighten faster
+   * when the plug-in λ is capped (constant or near-constant arms), at the
+   * price of a larger ψ_E penalty per observation while the early mean
+   * estimate is still poor.
+   */
+  truncation?: number;
+}
+
+/**
+ * Two-sample decision via per-arm predictable plug-in empirical Bernstein
+ * confidence sequences (Waudby-Smith & Ramdas, "Estimating means of bounded
+ * random variables by betting", JRSS-B 86(1), 2024, Theorem 2; arXiv:2010.09686).
+ *
+ * ## Why this method exists here
+ *
+ * v0.15 measured both of its own methods honestly and left a gap on the
+ * record: mSPRT does not hold its configured α at Darwin's sample sizes
+ * (0.059 to 0.069 against a configured 0.05, growing with the horizon),
+ * and Hoeffding holds a real guarantee but is σ-free, so it needs n=900 per
+ * arm for a +0.2 composite lift. The v0.15 notes named the proper fix: a
+ * method whose guarantee survives an UNKNOWN variance without plugging an
+ * estimate into a known-variance formula. This is that method. The variance
+ * enters through a nonnegative-supermartingale construction that is valid for
+ * ANY predictable bet sequence, so adapting the bet to an estimated variance
+ * changes the POWER, never the LEVEL. That is the structural difference from
+ * mSPRT, where the estimate sits inside the guarantee itself.
+ *
+ * ## The construction, scaled to [0, 1]
+ *
+ * Observations are affinely mapped to Y_i = (X_i − lo)/(hi − lo) ∈ [0, 1].
+ * With predictable estimates (regularised so they exist from i = 1 and the
+ * λ denominator can never be zero)
+ *
+ *   μ̂_t  = (1/2 + Σ_{i≤t} Y_i) / (t + 1)
+ *   σ̂²_t = (1/4 + Σ_{i≤t} (Y_i − μ̂_i)²) / (t + 1)
+ *
+ * the bet, capped at c, with L = ln(2/α_arm):
+ *
+ *   λ_t = min( √( 2L / (σ̂²_{t−1} · t · ln(t+1)) ), c )
+ *
+ * and the variance proxy and its cost function
+ *
+ *   v_i = 4·(Y_i − μ̂_{i−1})²,   ψ_E(λ) = (−ln(1−λ) − λ) / 4,
+ *
+ * the confidence sequence after t observations is
+ *
+ *   center_t = Σ λ_i·Y_i / Σ λ_i
+ *   width_t  = ( L + Σ v_i·ψ_E(λ_i) ) / Σ λ_i
+ *
+ * mapped back to score units as lo + range·center and range·width.
+ *
+ * ## The proof, stated at the same depth as Hoeffding's
+ *
+ * For the true (conditional) mean μ, the process
+ * M_t = ∏_{i≤t} exp{ λ_i(Y_i − μ) − v_i·ψ_E(λ_i) } is a nonnegative
+ * supermartingale for any [0, 1)-valued predictable λ_i. That single
+ * inequality (E[exp{λ(Y−μ) − 4(Y−m̂)²ψ_E(λ)} | F] ≤ 1 for Y ∈ [0, 1]) is
+ * Waudby-Smith & Ramdas' Theorem 2 (building on Fan, Grama & Liu 2015), and
+ * this module CITES it rather than re-deriving it. From there the argument is
+ * the familiar two steps: Ville's inequality gives
+ * P(∃t: M_t ≥ 2/α_arm) ≤ α_arm/2 per side, the two one-sided processes
+ * (bet λ and −λ) share α_arm, and solving M_t < 2/α_arm for μ yields exactly
+ * the interval above. Honest scope note: the checkable-in-four-lines property
+ * that hoeffdingTwoSample carries applies here to the Ville/union step only;
+ * the supermartingale inequality itself is imported from the paper. The test
+ * suite compensates twice over (`tests/sequential-eb.test.ts`): the imported
+ * inequality is checked numerically as an EXACT finite sum over a grid of
+ * discrete laws, bets and predictable means, and the empirical type-I error
+ * under continuous peeking is measured directly, the same standard v0.15 set
+ * for the other two methods.
+ *
+ * Like Hoeffding, no i.i.d. assumption is needed: the guarantee is stated
+ * for conditional means against the observation filtration. What IS assumed:
+ * boundedness inside [lo, hi] (fail-closed below, same as Hoeffding), and a
+ * STABLE target mean. Task drift over the life of a test breaks the
+ * interpretation (not the coverage of the running mean, but its meaning as
+ * "this prompt's quality"), exactly as it does for the other two methods.
+ *
+ * ## Order sensitivity, stated before someone reports it as a bug
+ *
+ * The bet λ_i and the proxy v_i depend on the PREFIX of the sequence, so two
+ * arrays holding the same multiset in different orders legitimately produce
+ * different intervals, both valid at level α, because the guarantee is
+ * uniform over the filtration actually observed. This is the opposite
+ * contract from {@link meanVar}, which sorts precisely to erase order. The
+ * arrays the safety gate feeds in come from
+ * `tracker.getCompositeScores`, which returns CHRONOLOGICAL order (the one
+ * canonical filtration). Callers supplying their own arrays must do the same;
+ * shuffling costs validity of nothing but reproducibility.
+ *
+ * ## Two arms cost two budgets
+ *
+ * Identical to Hoeffding: each arm runs its CS at α_arm = α/2, a false
+ * "decisive" under H0 implies at least one CS failed, union bound α/2 + α/2.
+ * The decision is interval disjointness: |center_B − center_A| > w_A + w_B.
+ *
+ * ## What it can and cannot do at Darwin's sample sizes (measured)
+ *
+ * The bet cap bounds Σλ_i ≤ c·n, so both half-widths together are at least
+ * 2L/(c·n). With defaults (α = 0.05 → L = ln 80 ≈ 4.382, c = 1/2) that is
+ * ≈ 17.53/n: through n = 17 per arm NO data can produce a decisive verdict
+ * on a [0, 1] score, and the verdict flags that via
+ * {@link SequentialVerdict.inconclusiveByConstruction}, same contract as
+ * Hoeffding (whose blind zone ends at n = 22 but whose bar then still sits
+ * near the full range). Where EB pulls ahead is spread-adaptivity. Measured
+ * in `tests/sequential-eb.test.ts` (EB columns: exact for constant arms,
+ * median first decisive n over 21 seeded runs for the noisy ones, peeking
+ * after every paired observation; Hoeffding columns: the exact first n at
+ * which its data-independent bar drops below the gap), so the numbers cannot
+ * rot:
+ *
+ *   constant arms 0.00 vs 1.00        : decisive at n = 18/arm (Hoeffding: 22)
+ *   constant arms 0.10 vs 0.95        : decisive at n = 21/arm (Hoeffding: 32)
+ *   tight arms σ≈0.05, gap 0.30       : decisive at n ≈ 59/arm (Hoeffding: 359)
+ *   tight arms σ≈0.05, gap 0.20       : decisive at n ≈ 89/arm (Hoeffding: 900)
+ *   judge-noise arms σ≈0.10, gap 0.10 : decisive at n ≈ 188/arm (Hoeffding: 4216)
+ *
+ * The +0.009 composite deltas measured on our own fleet remain out of reach
+ * for EVERY method here (EB included: the σ̂ term shrinks but the L/(c·n)
+ * floor does not), and the README says so; what EB changes is that gaps in
+ * the 0.1 to 0.3 range become resolvable inside a real test's lifetime.
+ *
+ * Pure, deterministic, NaN-free, fail-closed on invalid input: the same
+ * contracts as the other two entry points, enforced by the same guards.
+ */
+export function ebTwoSample(
+  samplesA: ReadonlyArray<number>,
+  samplesB: ReadonlyArray<number>,
+  opts: EbOptions = {},
+): SequentialVerdict {
+  const invalid = (reason: string): SequentialVerdict => ({
+    method: "eb",
+    nA: meanVar(samplesA).n,
+    nB: meanVar(samplesB).n,
+    decisive: false,
+    direction: 0,
+    statistic: 0,
+    threshold: Number.POSITIVE_INFINITY,
+    invalidInput: true,
+    reason,
+  });
+
+  // Fail closed on explicitly invalid options, same contract as the other
+  // two entry points: omitting an option keeps its default, passing rubbish
+  // refuses. `alpha: 0` must not silently run a 5% test, and a truncation of
+  // 0 or 1 breaks the construction itself (λ = 0 never accumulates evidence;
+  // ψ_E(1) is infinite).
+  if (opts.alpha !== undefined && !isUsableAlpha(opts.alpha)) {
+    return invalid(`invalid alpha ${fmt(opts.alpha)}: must be inside (0, 1). Refusing to decide.`);
+  }
+  if (
+    opts.truncation !== undefined &&
+    !(
+      typeof opts.truncation === "number" &&
+      Number.isFinite(opts.truncation) &&
+      opts.truncation > 0 &&
+      opts.truncation < 1
+    )
+  ) {
+    return invalid(
+      `invalid truncation ${fmt(opts.truncation)}: must be strictly inside (0, 1). Refusing to decide.`,
+    );
+  }
+  if (
+    (opts.lo !== undefined && !Number.isFinite(opts.lo)) ||
+    (opts.hi !== undefined && !Number.isFinite(opts.hi))
+  ) {
+    return invalid(
+      `non-finite score bound (lo=${fmt(opts.lo as number)}, hi=${fmt(opts.hi as number)}): ` +
+        `the bounded-variable assumption needs real numbers. Refusing to decide.`,
+    );
+  }
+
+  const alpha = clampAlpha(opts.alpha);
+  const c = opts.truncation !== undefined ? (opts.truncation as number) : 0.5;
+  const lo = opts.lo !== undefined ? (opts.lo as number) : 0;
+  const hiRaw = opts.hi !== undefined ? (opts.hi as number) : 1;
+  const minSamples =
+    Number.isFinite(opts.minSamplesPerArm) && (opts.minSamplesPerArm as number) >= 1
+      ? Math.floor(opts.minSamplesPerArm as number)
+      : 2;
+
+  if (!(hiRaw > lo)) {
+    return invalid(
+      `invalid score range [${fmt(lo)}, ${fmt(hiRaw)}]: hi must exceed lo. ` +
+        `Refusing to decide rather than guessing a range.`,
+    );
+  }
+  const range = hiRaw - lo;
+
+  // Every line of the guarantee rests on the observations living inside
+  // [lo, hi]. Outside it the supermartingale inequality says nothing, so this
+  // fails CLOSED exactly like Hoeffding does (the fail-open version of this
+  // guard is how a mis-weighted composite once promoted a challenger on a
+  // guarantee that did not exist; see hoeffdingTwoSample).
+  const outOfRange = findOutOfRange(samplesA, samplesB, lo, hiRaw);
+  if (outOfRange !== null) {
+    return invalid(
+      `sample ${fmt(outOfRange)} lies outside the declared score range ` +
+        `[${fmt(lo)}, ${fmt(hiRaw)}], so the bounded-variable assumption this ` +
+        `method rests on does not hold. Refusing to decide. Check the agent's ` +
+        `metric weights, or set confidenceScoreRange to the real bounds.`,
+    );
+  }
+
+  // L = ln(2/α_arm) with α_arm = α/2, i.e. ln(4/α), formed as a sum of logs:
+  // a quotient overflows for tiny α and a product underflows for α near 1
+  // (same lesson hoeffdingHalfWidth carries).
+  const L = 2 * Math.LN2 - Math.log(alpha);
+
+  const armA = ebArm(samplesA, lo, range, L, c);
+  const armB = ebArm(samplesB, lo, range, L, c);
+  const base = { method: "eb" as const, nA: armA.n, nB: armB.n };
+
+  if (armA.n < minSamples || armB.n < minSamples) {
+    return {
+      ...base,
+      decisive: false,
+      direction: 0,
+      statistic: 0,
+      threshold: range,
+      reason: `warmup: need ≥${minSamples} samples/arm, have A=${armA.n} B=${armB.n}`,
+    };
+  }
+
+  // The per-arm accumulators are sums of bounded terms, but a caller can still
+  // hand in enough observations to overflow them in principle; a non-finite
+  // center or width is not interpretable and must not decide anything.
+  if (
+    !Number.isFinite(armA.center) ||
+    !Number.isFinite(armB.center) ||
+    !Number.isFinite(armA.width) ||
+    !Number.isFinite(armB.width)
+  ) {
+    return {
+      ...base,
+      decisive: false,
+      direction: 0,
+      statistic: 0,
+      threshold: Number.POSITIVE_INFINITY,
+      invalidInput: true,
+      reason: "numeric overflow while evaluating the confidence sequence: refusing to decide",
+    };
+  }
+
+  const gap = Math.abs(armB.center - armA.center);
+  const threshold = armA.width + armB.width;
+  const decisive = gap > threshold;
+  const delta = armB.center - armA.center;
+  const direction: -1 | 0 | 1 = decisive ? (delta > 0 ? 1 : -1) : 0;
+
+  // Structural floor: λ_i ≤ c bounds Σλ_i ≤ c·n, so each half-width is at
+  // least L/(c·n) whatever the data. When the two floors together already
+  // exceed the score range, no in-range data at these sample sizes could have
+  // produced decisive:true. Say so, same contract as Hoeffding. (`threshold`
+  // itself is data-dependent here, so the flag keys on the data-FREE floor:
+  // it must only ever assert impossibility, not strictness.)
+  const structuralFloor = (L / (c * armA.n) + L / (c * armB.n)) * range;
+  const inconclusiveByConstruction = !decisive && structuralFloor >= range;
+
+  const overlapReason = inconclusiveByConstruction
+    ? `|Δ|=${fmt(gap)} ≤ CS half-widths ${fmt(threshold)}; even the data-free ` +
+      `floor ${fmt(structuralFloor)} exceeds the [${fmt(lo)}, ${fmt(hiRaw)}] score ` +
+      `range: at n=${armA.n}/${armB.n} NO gap can clear this bar (needs ≈` +
+      `${Math.ceil((2 * L) / c)} runs per arm before a full-range gap can fire).`
+    : `|Δ|=${fmt(gap)} ≤ CS half-widths ${fmt(threshold)} (overlap)`;
+
+  return {
+    ...base,
+    decisive,
+    direction,
+    statistic: gap,
+    threshold,
+    inconclusiveByConstruction,
+    reason: decisive
+      ? `|Δ|=${fmt(gap)} > CS half-widths ${fmt(threshold)} (non-overlap)`
+      : overlapReason,
+  };
+}
+
+/** One arm's running EB confidence sequence: λ-weighted center and half-width
+ *  in ORIGINAL score units. Exported for tests and callers sizing an
+ *  experiment, same transparency contract as {@link hoeffdingHalfWidth}. */
+export function ebIntervalForArm(
+  samples: ReadonlyArray<number>,
+  opts: Pick<EbOptions, "alpha" | "lo" | "hi" | "truncation"> = {},
+): { center: number; halfWidth: number; n: number } {
+  // Mirrors the entry-point guards; a helper that silently defaulted what the
+  // entry point refuses would let tests "verify" a different computation.
+  // (Verify round 1 caught exactly that: an explicitly passed non-finite
+  // lo/hi fell through to the 0/1 defaults here while ebTwoSample refused the
+  // same input, so the guard below now matches the entry point.)
+  if (opts.alpha !== undefined && !isUsableAlpha(opts.alpha)) {
+    return { center: Number.NaN, halfWidth: Number.POSITIVE_INFINITY, n: meanVar(samples).n };
+  }
+  if (
+    opts.truncation !== undefined &&
+    !(Number.isFinite(opts.truncation) && opts.truncation > 0 && opts.truncation < 1)
+  ) {
+    return { center: Number.NaN, halfWidth: Number.POSITIVE_INFINITY, n: meanVar(samples).n };
+  }
+  if (
+    (opts.lo !== undefined && !Number.isFinite(opts.lo)) ||
+    (opts.hi !== undefined && !Number.isFinite(opts.hi))
+  ) {
+    return { center: Number.NaN, halfWidth: Number.POSITIVE_INFINITY, n: meanVar(samples).n };
+  }
+  const lo = opts.lo !== undefined ? (opts.lo as number) : 0;
+  const hi = opts.hi !== undefined ? (opts.hi as number) : 1;
+  if (!(hi > lo)) {
+    return { center: Number.NaN, halfWidth: Number.POSITIVE_INFINITY, n: meanVar(samples).n };
+  }
+  const alpha = clampAlpha(opts.alpha);
+  const c = opts.truncation !== undefined ? (opts.truncation as number) : 0.5;
+  const L = 2 * Math.LN2 - Math.log(alpha);
+  const arm = ebArm(samples, lo, hi - lo, L, c);
+  return { center: arm.center, halfWidth: arm.width, n: arm.n };
+}
+
+/**
+ * Core PrPl-EB accumulation over one arm, in observation order (the order IS
+ * the filtration; see the order-sensitivity note on {@link ebTwoSample}).
+ * Non-finite entries are skipped, matching {@link meanVar}'s convention that
+ * one bad score never poisons an estimate. Returns center/width in ORIGINAL
+ * score units. No sorting: unlike meanVar, order is semantic here.
+ */
+function ebArm(
+  samples: ReadonlyArray<number>,
+  lo: number,
+  range: number,
+  L: number,
+  c: number,
+): { center: number; width: number; n: number } {
+  // Predictable state BEFORE observation t: μ̂_{t−1}, σ̂²_{t−1}.
+  let muHat = 0.5; // μ̂_0 = (1/2 + 0)/(0+1)
+  let sqDevSum = 0; // Σ (Y_i − μ̂_i)² so far
+  let ySum = 0;
+  let sumLambda = 0;
+  let sumLambdaY = 0;
+  let sumPenalty = 0; // Σ v_i·ψ_E(λ_i)
+  let t = 0;
+
+  for (const s of samples) {
+    if (typeof s !== "number" || !Number.isFinite(s)) continue;
+    const y = (s - lo) / range;
+    t += 1;
+
+    // σ̂²_{t−1} from the regularised running sums; ≥ 1/(4t) > 0 always, so the
+    // λ denominator cannot vanish even on constant arms.
+    const sigmaSqPrev = (0.25 + sqDevSum) / t;
+
+    // λ_t = min(√(2L/(σ̂²_{t−1}·t·ln(t+1))), c). The denominator grows without
+    // bound, so for huge t the raw bet underflows toward 0. That is correct
+    // behaviour (late observations carry little marginal width), not a fault.
+    const denom = sigmaSqPrev * t * Math.log(t + 1);
+    const rawLambda = denom > 0 ? Math.sqrt((2 * L) / denom) : Number.POSITIVE_INFINITY;
+    const lambda = Math.min(Number.isFinite(rawLambda) ? rawLambda : Number.POSITIVE_INFINITY, c);
+
+    // v_t uses μ̂_{t−1} (predictable), ψ_E via log1p for small-λ precision.
+    const dev = y - muHat;
+    const v = 4 * dev * dev;
+    const psi = (-Math.log1p(-lambda) - lambda) / 4;
+
+    sumLambda += lambda;
+    sumLambdaY += lambda * y;
+    sumPenalty += v * psi;
+
+    // Advance the predictable estimates to include observation t.
+    ySum += y;
+    muHat = (0.5 + ySum) / (t + 1);
+    const devPost = y - muHat; // (Y_t − μ̂_t) enters σ̂²_t per the paper
+    sqDevSum += devPost * devPost;
+  }
+
+  if (t === 0 || sumLambda <= 0) {
+    return { center: Number.NaN, width: Number.POSITIVE_INFINITY, n: t };
+  }
+  const centerY = sumLambdaY / sumLambda;
+  const widthY = (L + sumPenalty) / sumLambda;
+  return { center: lo + range * centerY, width: range * widthY, n: t };
 }
 
 /**

@@ -29,11 +29,12 @@ const CANDIDATE_SELECTION_VALUES: ReadonlySet<string> = new Set([
   'epsilon-greedy',
 ]);
 
-/** Valid values for `--confidence-method` (v0.14.0). */
+/** Valid values for `--confidence-method` (v0.14.0; `'eb'` since v0.16.0). */
 const CONFIDENCE_METHOD_VALUES: ReadonlySet<string> = new Set([
   'effect-size',
   'msprt',
   'hoeffding',
+  'eb',
 ]);
 
 /** True when `arg` is one of the evolution-config flags this module handles. */
@@ -209,7 +210,7 @@ export function applyEvolutionFlag(
         }
         return 1;
       }
-      console.warn('[darwin] --confidence-method needs a value (effect-size | msprt | hoeffding) — ignored.');
+      console.warn('[darwin] --confidence-method needs a value (effect-size | msprt | hoeffding | eb); ignored.');
       return 0;
     default:
       return 0;

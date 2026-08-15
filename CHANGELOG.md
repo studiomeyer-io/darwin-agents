@@ -2,6 +2,67 @@
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-08-15
+
+v0.15 measured its own two sequential methods honestly and left the
+conclusion on the record: mSPRT does not hold its configured α at Darwin's
+sample sizes, Hoeffding does but is too conservative to resolve realistic
+gaps, and the proper fix is "an unknown-variance e-process or a t-mixture,
+which is a different method, not a patch". This release ships that method.
+
+### Added
+
+- **`confidenceMethod: 'eb'`**: the predictable plug-in empirical Bernstein
+  confidence sequence of Waudby-Smith & Ramdas (JRSS-B 2024, Theorem 2;
+  arXiv:2010.09686), as `ebTwoSample` / `ebIntervalForArm` in
+  `src/evolution/sequential.ts`, both exported from the package root under
+  the same transparency contract as `hoeffdingHalfWidth`. Time-uniform at
+  level α by a nonnegative-supermartingale argument plus Ville's inequality.
+  No i.i.d. assumption; no variance plug-in inside the guarantee (the bet
+  λ_t adapts to the estimated spread, and since ANY predictable bet is
+  valid, the estimate can only change power, never level: the structural
+  difference from mSPRT). Wired through `SafetyGate` (full α, no fallback
+  needed: the regularised variance estimate exists from the first
+  observation, so there is no no-spread abstention), `evolution.safety`,
+  `darwin evolve --confidence-method eb`, and persisted evolution flags.
+- **Measured decision points**, pinned by `tests/sequential-eb.test.ts` so
+  they cannot rot (EB exact for constant arms, median over 21 seeded runs
+  for noisy ones; Hoeffding columns are the exact first n at which its
+  data-independent bar drops below the gap):
+  constant 0.10 vs 0.95 at n=21 (Hoeffding 32); σ≈0.05 gap 0.30 at n≈59
+  (Hoeffding 359); gap 0.20 at n≈89 (Hoeffding 900); judge-noise σ≈0.10 gap
+  0.10 at n≈188 (Hoeffding 4216). Structural blind zone through n=17 per
+  arm at defaults, surfaced via `inconclusiveByConstruction` exactly like
+  Hoeffding's. The ~0.009 composite deltas our own fleet produces remain
+  out of reach for every method; the README table says so.
+- **The imported inequality is checked, not believed**: the supermartingale
+  bound is cited from the paper rather than re-derived, so the test suite
+  (a) evaluates E[exp{λ(Y−μ) − 4(Y−m̂)²ψ_E(λ)}] as an EXACT finite sum over
+  a grid of discrete laws, bets and predictable means and asserts it never
+  exceeds 1, (b) measures the empirical type-I error under continuous
+  peeking (the production access pattern) and asserts it stays at or below
+  α at every horizon tried, in contrast to mSPRT's measured drift, and
+  (c) pins the implementation against an independent reference
+  transcription of the paper's formulas to 1e-12. Five mutation probes run
+  during development (α-split dropped, ψ_E scale dropped, samples sorted,
+  structural floor removed, gate dispatch removed) each turned tests red;
+  none of the new tests is vacuous.
+- **Order sensitivity documented as a contract**: the bet is predictable
+  from the prefix, so the same multiset in a different order legitimately
+  produces a different (equally valid) interval. The docstring says why,
+  the gate feeds chronological samples (`tracker.getCompositeScores`), and
+  a pinned test points anyone who "fixes" it by sorting at the docstring.
+- **`npm run test:coverage:lcov`**: same run as `test:coverage` plus an
+  `lcov.info` for machine consumers, via the built-in `lcov` test reporter.
+
+### Changed
+
+- The once-per-process inert-gate warning now names the method that
+  produced the verdict (`'hoeffding'` or `'eb'`) instead of hardcoding
+  Hoeffding; the invalid-input warning cause classes gained `truncation`.
+- README "Statistical scope" gained the `'eb'` row, and the mSPRT row now
+  points at it as the shipped answer to its own caveat.
+
 ## [0.15.0] - 2026-08-12
 
 An external technical review of this repository went through the statistics

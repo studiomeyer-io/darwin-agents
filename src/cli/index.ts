@@ -67,7 +67,7 @@ const HELP = `
     --demos / --no-demos          SIMBA-style demo injection (v0.10)
     --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
     --require-confidence / --no-require-confidence   confidence gate on the A/B margin (v0.14)
-    --confidence-method <m>       effect-size | msprt | hoeffding (v0.14)
+    --confidence-method <m>       effect-size | msprt | hoeffding | eb (v0.14; eb v0.16)
 
   Eval flags (darwin eval):
     --tasks <file.json>           Frozen task set ([{id, type, task}, …])

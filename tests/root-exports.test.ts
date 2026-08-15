@@ -14,6 +14,8 @@ import {
   createProvider,
   loadNotificationConfig,
   createTraceCapture,
+  ebTwoSample,
+  ebIntervalForArm,
 } from '../src/index.js';
 
 /**
@@ -41,6 +43,11 @@ describe('root export surface — loop composition (v0.12.1)', () => {
     assert.strictEqual(typeof loadNotificationConfig, 'function');
     assert.strictEqual(typeof createTraceCapture, 'function');
     assert.ok(builtinAgents && typeof builtinAgents === 'object');
+  });
+
+  it('exports the v0.16 empirical Bernstein surface from the root', () => {
+    assert.strictEqual(typeof ebTwoSample, 'function');
+    assert.strictEqual(typeof ebIntervalForArm, 'function');
   });
 
   it('buildEvolutionLoop composes a DarwinLoop instance (mock memory, no disk)', () => {

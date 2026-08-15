@@ -141,7 +141,7 @@ export function resolveEvolutionConfig(
         } else if (key === 'confidenceMethod') {
           resolved.safety = {
             ...resolved.safety,
-            confidenceMethod: value as 'effect-size' | 'msprt' | 'hoeffding',
+            confidenceMethod: value as 'effect-size' | 'msprt' | 'hoeffding' | 'eb',
           };
         } else {
           // Remaining override keys are all boolean flags (useGepa / useMerge /

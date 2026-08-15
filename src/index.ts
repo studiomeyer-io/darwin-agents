@@ -165,11 +165,18 @@ export {
   // α-spend can be re-derived by anyone who wants to check the guarantee
   // instead of trusting it (see tests/sequential-coverage.test.ts).
   hoeffdingHalfWidth,
+  // v0.16: the empirical Bernstein confidence sequence (Waudby-Smith &
+  // Ramdas 2024), the unknown-variance method the v0.15 notes called for.
+  // The per-arm interval is exported under the same transparency contract
+  // as hoeffdingHalfWidth (see tests/sequential-eb.test.ts).
+  ebTwoSample,
+  ebIntervalForArm,
   type ConfidenceMethod,
   type SequentialVerdict,
   type MeanVar,
   type MsprtOptions,
   type HoeffdingOptions,
+  type EbOptions,
 } from './evolution/sequential.js';
 
 // V0.9.0 — Validate-by-Reproduce drift-detection canary (S1376 Phase 2 A5).

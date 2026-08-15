@@ -9,3 +9,4 @@ benchmark/results/
 .DS_Store
 *.swp
 *.swo
+coverage/

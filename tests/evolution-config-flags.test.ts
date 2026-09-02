@@ -28,6 +28,7 @@ import {
 import { SqliteMemoryProvider } from '../src/memory/sqlite-memory.js';
 import type { DarwinLoop } from '../src/evolution/loop.js';
 import { buildResolvedEvolutionLoop } from '../src/evolution/build-loop.js';
+import { describeConfig, describeOverride } from '../src/cli/evolve.js';
 import { PromptOptimizer } from '../src/evolution/optimizer.js';
 import { createMockMemory, makeExperiment, makePromptVersion } from './helpers.js';
 import type { AgentDefinition, DarwinConfig, DarwinState } from '../src/types.js';
@@ -179,8 +180,16 @@ describe('setEvolutionConfigOverrides — persists across a fresh state load', (
 //
 // Adding an override flag means touching OVERRIDE_KEYS (persistence),
 // isEvolutionConfigFlag (recognition), applyEvolutionFlag (parsing) and
-// hasAnyEvolutionFlag (detection). `--require-approval` shipped with the
-// fourth missed: it parsed, applied and persisted correctly, yet
+// hasAnyEvolutionFlag (detection). This block covers those four. Two more
+// hand-maintained lists sit downstream (describeOverride, describeConfig) and
+// have their own block below, and the wiring past all of them is covered by
+// "a persisted override reaches the behaviour it controls".
+//
+// The heading deliberately does not carry a NUMBER any more: round 5 found
+// that "all four places" was hand-counted and there were six. The list of
+// lists drifts exactly like the lists.
+//
+// `--require-approval` shipped with the fourth missed: it parsed, applied and persisted correctly, yet
 // `darwin evolve <agent> --require-approval` skipped its confirmation line and
 // then printed `requireApproval=false` right after setting it. Nothing threw.
 //
@@ -208,7 +217,7 @@ const FLAG_FOR_KEY: Record<string, readonly [string, string | undefined]> = {
   approvalTimeoutDays: ['--approval-timeout-days', '5'],
 };
 
-describe('every OVERRIDE_KEY is wired through all four places', () => {
+describe('every OVERRIDE_KEY is wired through the bookkeeping places', () => {
   it('has an entry in the flag map (a new key without one fails here)', () => {
     for (const key of OVERRIDE_KEYS) {
       assert.ok(
@@ -471,5 +480,65 @@ describe('the CLI commands use buildResolvedEvolutionLoop, never the raw builder
       .filter((f) => f.endsWith('.ts'))
       .filter((f) => /(?<!Resolved)buildEvolutionLoop\s*\(/.test(readFileSync(join(cliDir, f), 'utf8')));
     assert.deepEqual(offenders, [], `these CLI files call the raw builder: ${offenders.join(', ')}`);
+  });
+});
+
+// ─── The confirmation lines are lists too, and lists drift ────────────────
+//
+// Round 5 counted them: the guard above says "all four places" and there are
+// six. `describeOverride` (what `darwin evolve --flag` prints back) and
+// `describeConfig` (what `darwin evolve <agent>` shows) are hand-maintained
+// key lists of exactly the shape round 1 found in `hasAnyEvolutionFlag`, and
+// they had already drifted once: `--require-confidence` and
+// `--confidence-method` were persistable from v0.14 and appeared in neither
+// summary for three releases, so setting one confirmed itself with "(none)".
+//
+// A wrong confirmation is not cosmetic here. `--require-approval` printing
+// `requireApproval=false` right after being set is what sent round 1 looking.
+
+describe('both confirmation summaries cover every OVERRIDE_KEY', () => {
+  /** A value each key accepts, in override shape. */
+  const SAMPLE: Record<string, unknown> = {
+    useGepa: true,
+    useMerge: true,
+    paretoGate: true,
+    useCoverage: true,
+    reflectionModel: 'claude-opus-4-8',
+    useDemos: true,
+    candidateSelection: 'best',
+    skipPerfectFeedback: true,
+    maxMergeInvocations: 3,
+    maxTestDays: 7,
+    requireConfidence: true,
+    confidenceMethod: 'eb',
+    requireApproval: true,
+    approvalTimeoutDays: 5,
+  };
+
+  it('describeOverride names every key it was given', () => {
+    for (const key of OVERRIDE_KEYS) {
+      assert.notEqual(SAMPLE[key], undefined, `this test has no sample value for "${key}"`);
+      const line = describeOverride({ [key]: SAMPLE[key] } as never);
+      assert.ok(
+        line.includes(String(SAMPLE[key])),
+        `describeOverride dropped "${key}": it reported "${line}"`,
+      );
+      assert.notEqual(line, '(none)', `describeOverride reported "(none)" after "${key}" was set`);
+    }
+  });
+
+  it('describeConfig reflects every key once it is resolved onto the config', () => {
+    for (const key of OVERRIDE_KEYS) {
+      const resolved = resolveEvolutionConfig(
+        baseAgent,
+        { evolutionConfigOverrides: { [baseAgent.name]: { [key]: SAMPLE[key] } as never } },
+      );
+      assert.ok(resolved, `resolveEvolutionConfig returned nothing for "${key}"`);
+      const line = describeConfig(resolved);
+      assert.ok(
+        line.includes(String(SAMPLE[key])),
+        `describeConfig dropped "${key}": it reported "${line}"`,
+      );
+    }
   });
 });

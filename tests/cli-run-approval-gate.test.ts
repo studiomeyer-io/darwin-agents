@@ -1,13 +1,15 @@
 /**
- * CLI integration test (round 4 of the v0.17 adversarial review): a persisted
- * `requireApproval` override must reach the REAL `darwin run`.
+ * CLI integration test (rounds 4 and 5 of the v0.17 adversarial review): a
+ * persisted `requireApproval` override must reach the REAL `darwin run`.
  *
- * The hole this closes has now been found three rounds in a row, one step
- * further along the same chain each time:
+ * ## What it guards
+ *
+ * The same hole was found one step further along the same chain in four
+ * consecutive rounds:
  *
  *   round 1: `hasAnyEvolutionFlag` was a hand-maintained list and went stale,
  *            so the flag persisted while the CLI printed it as unset.
- *   round 2: the guard reached `resolveEvolutionConfig` but stopped there, so
+ *   round 2: the guard reached `resolveEvolutionConfig` and stopped, so
  *            dropping the override inside the resolver left the suite green.
  *   round 3: the guard called `buildResolvedEvolutionLoop`, but nothing pinned
  *            that the COMMANDS call it. Rewiring `run.ts` to
@@ -16,24 +18,49 @@
  *            writer --require-approval` confirmed itself and every later run
  *            went UNGATED: challengers on live traffic behind a gate the
  *            operator believes is armed.
+ *   round 4: that guard called the shared function in its four-argument form,
+ *            so the fifth parameter was dead code as far as any test knew.
  *
- * A unit test cannot catch that, because the bug is in which function the
- * command reaches for. So this drives `runCommand` itself against a local
- * mock OpenAI-compatible server, exactly like cli-run-loop-integration does,
- * and asserts on the persisted state afterwards: no A/B test, one proposal.
+ * A unit test cannot catch which function a command reaches for, so this
+ * drives `runCommand` itself and asserts on the persisted state afterwards.
  *
- * Two runs, one file: gated and ungated, so the assertion cannot pass by
- * accident on an agent that would not have evolved anyway.
+ * ## Why it does not use a local HTTP server
+ *
+ * The first version did, and round 5 measured that it was not hermetic:
+ * `DEFAULT_CONFIG.provider = detectDefaultProvider()` in core/agent.ts runs at
+ * MODULE level, so it reads `process.env` when this file is IMPORTED, before
+ * any `before()` hook can prepare it. Two consequences, both measured:
+ *
+ *   - With `ANTHROPIC_API_KEY` set in the developer's shell, both tests failed
+ *     with "Anthropic API key required" (provider frozen to anthropic-api at
+ *     import, key deleted by the hook).
+ *   - With neither key set, the provider froze to `claude-cli`, and the
+ *     optimizer step spawned the REAL Claude CLI. The suite passed locally
+ *     only because that CLI was logged in: two real model calls per run, and
+ *     three red CI jobs waiting on the next push, since CI sets no keys and
+ *     installs no `claude`.
+ *
+ * The `--base-url` flag never helped, because it only reaches the agent run;
+ * the optimizer's provider is built from the CONFIG (`resolveProvider` in
+ * core/runner.ts passes no base URL at all).
+ *
+ * So the provider is pinned where a `before()` hook can still win: a real
+ * `darwin.config.ts` in the temp cwd, which `loadConfig` merges OVER
+ * `DEFAULT_CONFIG`. And the network is stubbed at `globalThis.fetch`, which
+ * every HTTP provider goes through, so nothing leaves the process. The stub
+ * counts its calls and the tests assert on that count: if a future change
+ * routes around it (back to a spawned CLI, say), the count stays at zero and
+ * this fails instead of quietly billing someone.
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, type Server } from 'node:http';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { runCommand } from '../src/cli/run.js';
+import { evolveCommand } from '../src/cli/evolve.js';
 import { loadConfig } from '../src/core/agent.js';
 import { createMemory } from '../src/memory/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
@@ -41,47 +68,75 @@ import { setEvolutionConfigOverrides, setEvolutionEnabled } from '../src/evoluti
 import { makePromptVersion, makeExperiment } from './helpers.js';
 import type { DarwinExperiment, MemoryProvider } from '../src/types.js';
 
-let server: Server;
-let baseUrl = '';
-
 /** Long enough to clear the 2000-char incomplete-run threshold. */
 const LONG_ANSWER = `Sources: https://example.org/a and https://example.org/b. ${'The measured answer continues at length. '.repeat(80)}`;
 
-before(async () => {
-  // Own child process per test file (node:test isolation), so chdir and env
-  // changes cannot leak into other files.
+let fetchCalls = 0;
+let realFetch: typeof globalThis.fetch;
+
+/**
+ * A fresh cwd with its own database and its own pinned config.
+ *
+ * Per TEST, not per file: both cases drive the same agent, and the gated one
+ * leaves a proposal behind that would make the ungated twin refuse to evolve
+ * for the wrong reason.
+ *
+ * The agent is `writer` in both, because it declares no MCP tools. That is not
+ * cosmetic: `resolveProvider` (core/runner.ts) falls back to the Claude CLI for
+ * any agent that needs MCP, whatever the config says, so the first version of
+ * this twin used `researcher` and spawned the real CLI. The fetch counter
+ * caught it, which is what the counter is for.
+ */
+function freshWorkspace(): void {
   const dir = mkdtempSync(join(tmpdir(), 'darwin-approve-e2e-'));
   process.chdir(dir);
-  process.env.OPENAI_API_KEY = 'test-key-not-real';
-  // Make the default provider deterministic: with only OPENAI_API_KEY set,
-  // detectDefaultProvider resolves 'openai', so any stray call goes to the
-  // mock and fails fast instead of spawning the real Claude CLI.
-  delete process.env.ANTHROPIC_API_KEY;
+  // Pin the provider where it still counts. DEFAULT_CONFIG froze its guess at
+  // import time; this file is read by loadConfig() per call and merged on top,
+  // so it wins regardless of what the developer's shell exports.
+  writeFileSync(
+    join(dir, 'darwin.config.ts'),
+    `const config = { provider: 'openai' as const, memory: 'sqlite' as const };\nexport default config;\n`,
+  );
+}
+
+before(() => {
+  // Own child process per test file (node:test isolation), so chdir, env and
+  // the fetch patch cannot leak into other files.
+  freshWorkspace();
+
+  // The OpenAI provider's constructor reads this at CONSTRUCTION time, not at
+  // import, so setting it here works. No request leaves the process anyway.
+  process.env.OPENAI_API_KEY = 'test-key-never-sent';
   delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
   delete process.env.DARWIN_TELEGRAM_CHAT_ID;
+  delete process.env.DARWIN_POSTGRES_URL;
   setMaxRunsPerProcess(0);
   setMaxRunWallMs(0);
 
-  server = createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      choices: [{ message: { content: LONG_ANSWER }, finish_reason: 'stop' }],
-      usage: { prompt_tokens: 1, completion_tokens: 1 },
-    }));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const address = server.address();
-  if (address === null || typeof address === 'string') throw new Error('no server port');
-  baseUrl = `http://127.0.0.1:${address.port}/v1`;
+  realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (!url.includes('/chat/completions')) {
+      throw new Error(`unexpected network call in a hermetic test: ${url}`);
+    }
+    fetchCalls++;
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: LONG_ANSWER }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof globalThis.fetch;
 });
 
-after(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
+after(() => {
+  globalThis.fetch = realFetch;
 });
 
 /**
- * Seed an agent that the automatic loop WANTS to evolve: enough runs, weak
- * scores (so patterns finds a weakness), sources on most of them (so the
+ * Seed an agent the automatic loop WANTS to evolve: enough runs, weak scores
+ * (so the pattern detector finds a weakness), sources on most of them (so the
  * data-quality gate passes).
  */
 async function seedWeakAgent(memory: MemoryProvider, agentName: string): Promise<void> {
@@ -113,6 +168,7 @@ async function seedWeakAgent(memory: MemoryProvider, agentName: string): Promise
 
 describe('darwin run: a persisted requireApproval override reaches the real command', () => {
   it('holds the challenger instead of opening an A/B test', async () => {
+    freshWorkspace();
     const memory = createMemory(await loadConfig());
     await memory.init();
     await seedWeakAgent(memory, 'writer');
@@ -120,12 +176,14 @@ describe('darwin run: a persisted requireApproval override reaches the real comm
     await setEvolutionConfigOverrides(memory, 'writer', { requireApproval: true });
     await memory.close();
 
-    await runCommand([
-      'writer', 'write something long',
-      '--provider', 'openai',
-      '--base-url', baseUrl,
-      '--no-critic',
-    ]);
+    const before_ = fetchCalls;
+    await runCommand(['writer', 'write something long', '--no-critic']);
+    const used = fetchCalls - before_;
+
+    // Two calls: the agent run and the optimizer. If a future change routes
+    // either around fetch (a spawned CLI, say), this drops and the test fails
+    // rather than silently billing a real account.
+    assert.equal(used, 2, `expected the run and the optimizer to go through the stub, saw ${used}`);
 
     const verify = createMemory(await loadConfig());
     await verify.init();
@@ -149,18 +207,17 @@ describe('darwin run: a persisted requireApproval override reaches the real comm
 
   it('and WITHOUT the override the same setup opens the test, so the assertion is not vacuous', async () => {
     // A negative twin: without it, an agent that simply refused to evolve
-    // would satisfy the test above for the wrong reason.
+    // would satisfy the test above for the wrong reason. Same agent, same
+    // seeding, own workspace; the ONLY difference is the persisted override.
+    freshWorkspace();
     const memory = createMemory(await loadConfig());
     await memory.init();
-    await seedWeakAgent(memory, 'researcher');
+    await seedWeakAgent(memory, 'writer');
     await memory.close();
 
-    await runCommand([
-      'researcher', 'research something',
-      '--provider', 'openai',
-      '--base-url', baseUrl,
-      '--no-critic',
-    ]);
+    const before_ = fetchCalls;
+    await runCommand(['writer', 'write something long', '--no-critic']);
+    assert.equal(fetchCalls - before_, 2, 'same two calls, same stub');
 
     const verify = createMemory(await loadConfig());
     await verify.init();
@@ -168,9 +225,84 @@ describe('darwin run: a persisted requireApproval override reaches the real comm
     await verify.close();
 
     assert.ok(
-      state.abTests['researcher'],
+      state.abTests['writer'],
       'without the gate this setup DOES evolve, so the gated case above means something',
     );
-    assert.equal(state.pendingApprovals?.['researcher'] ?? null, null);
+    assert.equal(state.pendingApprovals?.['writer'] ?? null, null);
+  });
+});
+
+describe('darwin evolve --force: the same wiring, through the other command', () => {
+  it('honours --require-approval passed on the SAME command line', async () => {
+    // Round 5: `darwin evolve X --force --require-approval` works only because
+    // the flags are persisted BEFORE the --force branch reads the state. The
+    // source guard pins the function NAME, not that ordering, so moving the
+    // getState above the persist block would survive the guard and the whole
+    // suite while opening the A/B test ungated. That is the round-3 production
+    // scenario, on the command run.ts already has a test for.
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedWeakAgent(memory, 'writer');
+    await memory.close();
+
+    const before_ = fetchCalls;
+    await evolveCommand(['writer', '--force', '--require-approval']);
+    // Only the optimizer runs here: --force skips the agent run entirely.
+    assert.equal(fetchCalls - before_, 1, 'the optimizer must go through the stub');
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+
+    assert.equal(
+      state.abTests['writer'] ?? null,
+      null,
+      'a flag on this very command line must gate this very cycle',
+    );
+    assert.ok(state.pendingApprovals?.['writer'], 'a proposal must be waiting');
+  });
+
+  it('honours a PREVIOUSLY persisted --require-approval on a later --force', async () => {
+    // The other half: the flag was set in an earlier process and has to survive.
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedWeakAgent(memory, 'writer');
+    await memory.close();
+
+    await evolveCommand(['writer', '--require-approval']); // set only, no --force
+    const before_ = fetchCalls;
+    await evolveCommand(['writer', '--force']);
+    assert.equal(fetchCalls - before_, 1);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+
+    assert.equal(state.abTests['writer'] ?? null, null, 'the persisted gate must hold');
+    assert.ok(state.pendingApprovals?.['writer']);
+  });
+
+  it('and WITHOUT the flag the same forced cycle opens the test', async () => {
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedWeakAgent(memory, 'writer');
+    await memory.close();
+
+    const before_ = fetchCalls;
+    await evolveCommand(['writer', '--force']);
+    assert.equal(fetchCalls - before_, 1);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+
+    assert.ok(state.abTests['writer'], 'without the gate the forced cycle DOES open a test');
+    assert.equal(state.pendingApprovals?.['writer'] ?? null, null);
   });
 });

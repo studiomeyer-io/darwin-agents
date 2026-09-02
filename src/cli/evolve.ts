@@ -171,7 +171,18 @@ export async function evolveCommand(args: string[]): Promise<void> {
 }
 
 /** One-line summary of which advanced flags an override set (for confirmation). */
-function describeOverride(o: EvolutionConfigOverride): string {
+/**
+ * One-line summary of what a `darwin evolve <agent> --flag` call just wrote.
+ *
+ * Exported since v0.17.0 so a guard can walk it. Round 5 of the adversarial
+ * review counted the hand-maintained key lists in this chain: the guard's own
+ * name said "all four places", and this function plus {@link describeConfig}
+ * are the fifth and sixth. The drift is not hypothetical, it already happened:
+ * `--require-confidence` and `--confidence-method` were persistable from
+ * v0.14 and appeared in neither summary for three releases, so setting one
+ * confirmed itself with "(none)".
+ */
+export function describeOverride(o: EvolutionConfigOverride): string {
   const parts: string[] = [];
   if (o.useGepa !== undefined) parts.push(`gepa=${o.useGepa}`);
   if (o.useMerge !== undefined) parts.push(`merge=${o.useMerge}`);
@@ -195,7 +206,7 @@ function describeOverride(o: EvolutionConfigOverride): string {
 }
 
 /** One-line summary of the effective advanced config for the status view. */
-function describeConfig(evo: EvolutionConfig | undefined): string {
+export function describeConfig(evo: EvolutionConfig | undefined): string {
   if (!evo) return '(no evolution config)';
   const parts = [
     `gepa=${evo.useGepa ?? false}`,

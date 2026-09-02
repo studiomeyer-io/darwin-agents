@@ -296,10 +296,65 @@ the same chain.**
 - **A README counter and a mis-filed bullet.** "Two things the gate does NOT
   protect against" had grown to four, one of which is a protection.
 
-Every fix in all four rounds is checked against the mutation that would undo
-it, including every one a round named as uncovered. That sentence has now been
-false twice and corrected twice, which is the reason it is worth writing: it is
-a claim someone can check.
+### What the fifth round found (all fixed here)
+
+Round 4 found the chain of guards ending one step short, four times running.
+Round 5 answered the obvious next question: is the chain over? It is not. It
+changed sides. For four rounds the hole was in the product and the guard was
+sound; in round 5 the hole was in the guard that was supposed to close the
+chain.
+
+- **The new integration test was not hermetic, and its green was borrowed from
+  a logged-in developer machine.** `DEFAULT_CONFIG.provider =
+  detectDefaultProvider()` runs at MODULE level in core/agent.ts, so it reads
+  `process.env` when the test file is IMPORTED, before any `before()` hook can
+  prepare it. With `ANTHROPIC_API_KEY` set in a shell, both tests failed on a
+  key the hook had just deleted. With neither key set, the provider froze to
+  `claude-cli` and the optimizer step **spawned the real Claude CLI**: two
+  actual model calls per suite run, and three red CI jobs waiting on the next
+  push, since CI sets no keys and installs no `claude`. The `--base-url` flag
+  never helped, because it reaches only the agent run: the optimizer's provider
+  is built from the config and `resolveProvider` passes no base URL at all.
+
+  The provider is now pinned where a hook can still win (a real
+  `darwin.config.ts` written into the temp cwd, which `loadConfig` merges over
+  the frozen default), and the network is stubbed at `globalThis.fetch`, which
+  every HTTP provider goes through. The stub counts its calls and the tests
+  assert the count, so a future change that routes around it fails loudly
+  instead of quietly billing someone. Measured across four environments:
+  foreign key set, fake `claude` first in PATH, no keys and no `claude` at all,
+  and plain. All green, zero CLI invocations.
+
+  The same wrong comment sits in `tests/cli-run-loop-integration.test.ts`,
+  which escapes the trap only because it seeds an open A/B test and never
+  reaches the optimizer.
+
+- **The chain had two more links, and the guard's own name was hand-counted.**
+  It said "wired through all four places"; `describeOverride` and
+  `describeConfig` are the fifth and sixth hand-maintained key lists of exactly
+  the shape round 1 found in `hasAnyEvolutionFlag`, and they had already
+  drifted once: `--require-confidence` and `--confidence-method` were
+  persistable from v0.14 and appeared in neither summary for three releases.
+  Both are exported and walked now, the heading carries no number, and the
+  historical drift is what the new guard catches when mutated back.
+
+- **`darwin evolve --force` had no behavioural net.** The source guard pins the
+  function NAME, not the argument, and `--force --require-approval` works only
+  because the flags are persisted before the branch reads the state. Moving
+  that read earlier would survive the guard and the whole suite while opening
+  the A/B test ungated: the round-3 production scenario, on the one command
+  that had no test. Three behavioural tests now, including the persisted case
+  and a negative twin.
+
+Every fix in all five rounds is checked against the mutation that would undo
+it. That sentence has been false three times and corrected three times, which
+is exactly why it is worth writing down: it is a claim a reader can check, and
+three readers did.
+
+**Verification status, stated precisely** (round 5 asked for it, and it was a
+fair ask): 846 tests pass locally AND under CI conditions, measured with a PATH
+containing node but not `claude` and with no provider keys exported. The CI
+workflow itself has not run on this work: the branch is not pushed yet.
 
 ### Fixed
 

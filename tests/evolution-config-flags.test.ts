@@ -10,7 +10,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -370,6 +370,39 @@ describe('a persisted override reaches the behaviour it controls', () => {
     assert.equal(memory._state.pendingApprovals?.[gateAgent.name] ?? null, null);
   });
 
+  it('a ONE-OFF cliOverride reaches the loop too (the darwin run --flag lane)', async () => {
+    // Round 4: the guard only ever called buildResolvedEvolutionLoop in its
+    // four-argument form, so dropping `cliOverride` from the resolve inside it
+    // left all 833 tests green while `darwin run writer "task"
+    // --require-approval` silently opened the A/B test UNGATED, and every
+    // one-off `--gepa` / `--max-test-days` was ignored. The README documents
+    // that lane explicitly ("One-off for a single run"), so it needs a guard.
+    //
+    // The most recently added parameter of a shared function is the likeliest
+    // blind spot: this is the third round in a row that the hole sat one step
+    // past where the guard stopped.
+    const memory = seeded();
+    const state = await memory.getState(); // nothing persisted
+    const config: DarwinConfig = {
+      provider: 'openai',
+      memory: 'custom',
+      memoryProvider: memory,
+      openaiApiKey: 'test-key-not-used',
+    } as DarwinConfig;
+    const loop = buildResolvedEvolutionLoop(gateAgent, state, config, memory, {
+      requireApproval: true,
+    });
+    (loop as unknown as { optimizer: PromptOptimizer }).optimizer = new PromptOptimizer(
+      async () => 'You are a meticulous research agent. Never fabricate sources.',
+    );
+
+    const result = await loop.forceEvolve(gateAgent.name);
+
+    assert.equal(result.abTestStarted, false, 'the one-off flag must gate this run');
+    assert.equal(result.awaitingApproval, true);
+    assert.ok(memory._state.pendingApprovals?.[gateAgent.name]);
+  });
+
   it('persisted --approval-timeout-days reaches the loop as well', async () => {
     const memory = seeded();
     await setEvolutionConfigOverrides(memory, gateAgent.name, {
@@ -392,5 +425,51 @@ describe('a persisted override reaches the behaviour it controls', () => {
       null,
       'the persisted timeout must actually expire the proposal',
     );
+  });
+});
+
+// ─── Every command reaches for the SHARED wiring ──────────────────────────
+//
+// `darwin run` is pinned behaviourally (tests/cli-run-approval-gate.test.ts
+// drives the real command). `darwin evolve --force` and `darwin approve` are
+// not, and a behavioural test for each would need its own mock LLM server for
+// what is really a one-line question: does the command call the shared
+// function, or reach past it?
+//
+// So this reads the source. A source check is weaker than a behavioural one
+// and is used here only because the failure it guards is textual: round 3
+// measured that rewiring a command to `buildEvolutionLoop(agent, ...)` leaves
+// every other test green while the persisted gate silently stops working.
+describe('the CLI commands use buildResolvedEvolutionLoop, never the raw builder', () => {
+  const COMMANDS = ['run.ts', 'evolve.ts', 'approve.ts'] as const;
+
+  for (const file of COMMANDS) {
+    it(`${file} calls the shared, override-resolving builder`, () => {
+      const src = readFileSync(
+        join(import.meta.dirname, '..', 'src', 'cli', file),
+        'utf8',
+      );
+      assert.ok(
+        /buildResolvedEvolutionLoop\s*\(/.test(src),
+        `${file} must build its loop through buildResolvedEvolutionLoop`,
+      );
+      // The raw builder skips resolveEvolutionConfig, so a command calling it
+      // directly ignores every persisted and one-off override, including
+      // requireApproval. Import-only mentions are fine; a CALL is not.
+      assert.ok(
+        !/(?<!Resolved)buildEvolutionLoop\s*\(/.test(src),
+        `${file} calls buildEvolutionLoop directly, which drops persisted overrides ` +
+          `(a gated agent would silently run ungated)`,
+      );
+    });
+  }
+
+  it('and the shared builder is the only thing outside build-loop.ts that calls the raw one', () => {
+    // If a fourth command appears, it lands here rather than in production.
+    const cliDir = join(import.meta.dirname, '..', 'src', 'cli');
+    const offenders = readdirSync(cliDir)
+      .filter((f) => f.endsWith('.ts'))
+      .filter((f) => /(?<!Resolved)buildEvolutionLoop\s*\(/.test(readFileSync(join(cliDir, f), 'utf8')));
+    assert.deepEqual(offenders, [], `these CLI files call the raw builder: ${offenders.join(', ')}`);
   });
 });

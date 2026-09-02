@@ -795,11 +795,16 @@ export class DarwinLoop {
    * Budget that governs a given proposal: the SNAPSHOT, and nothing else.
    *
    * Deliberately NOT mirroring {@link effectiveTestBudget}, which falls back to
-   * the agent's current config. That fallback exists there for A/B tests
-   * written before v0.13.1 added the field, a genuine legacy gap. There is no
-   * such gap here: `approvalTimeoutDays` ships in the same release as the
-   * proposal it lives on, so a proposal without a snapshot was written under a
-   * config that had NO budget, which is a decision, not missing data.
+   * the agent's current config. That fallback serves TWO purposes there, both
+   * documented in its own docblock: tests written before v0.13.1 added the
+   * field, AND budgets introduced after a test was already running. The second
+   * is a feature, not a legacy gap, so the fallback stays there.
+   *
+   * It does not belong here, because the two cases are not alike. A running
+   * A/B test burns live traffic every hour it stays open, so letting a
+   * newly-configured budget reach it closes something that is actively costing
+   * something. A waiting proposal is inert: nothing runs, nothing is measured,
+   * nothing is spent. Applying a new budget to it destroys work at no saving.
    *
    * Round 3 of the adversarial review measured what the fallback did with it:
    * a proposal waiting 19 days under "no timeout" was auto-rejected the moment

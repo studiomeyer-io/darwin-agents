@@ -513,18 +513,17 @@ describe('v0.17 approval gate: the timeout auto-rejects, never auto-approves', (
       changeReason: 'landed while the expiry was being decided',
       generatedBy: 'legacy',
     };
-    raceInAfterRead(memory, other);
-
     const sink = makeSink();
     const racing = buildLoop({
       memory,
       agent: makeAgent({ enabled: true, requireApproval: true, approvalTimeoutDays: 3 }),
       metrics: sink,
     });
-    // Re-plant the race for THIS loop's updateState call.
-    raceInAfterRead(memory, other);
+    // forceEvolve reaches the expiry writer on its FIRST updateState.
+    const race = raceInAfterRead(memory, other);
     const res = await racing.forceEvolve('researcher');
 
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.deepEqual(memory._state.pendingApprovals!['researcher'], other, 'nothing discarded');
     assert.ok(!res.message.includes('has been rejected'), res.message);
     assert.ok(res.message.includes('resolved by another process'), res.message);
@@ -532,6 +531,76 @@ describe('v0.17 approval gate: the timeout auto-rejects, never auto-approves', (
       !sink.events.some((e) => e.type === 'approval_rejected'),
       'no rejection may be recorded when none happened',
     );
+  });
+
+  it('a lost expiry race through afterRun also reports the truth', async () => {
+    // Round 4: the round-3 fix had TWO callers and only forceEvolve was pinned.
+    // Reverting the afterRun branch to its pre-fix form (announce the rejection
+    // and emit approval_expired even when the race was lost) left all 833 tests
+    // green. afterRun is, by this suite's own earlier comment, the path a
+    // cron-driven fleet uses exclusively. A fix with N callers needs N probes.
+    const memory = createMockMemory();
+    memory._versions.push(
+      makePromptVersion({ version: 'v1', agentName: 'researcher', active: true, promptText: SAFE_PROMPT }),
+    );
+    memory._state.pendingApprovals = {
+      researcher: {
+        versionA: 'v1',
+        versionB: 'v2',
+        minRuns: 5,
+        proposedAt: new Date(Date.now() - 9 * 86400_000).toISOString(),
+        approvalTimeoutDays: 3,
+        changeReason: 'stale',
+        generatedBy: 'legacy',
+      },
+    };
+    for (let i = 0; i < 12; i++) {
+      memory._experiments.push(
+        makeExperiment({
+          agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+          metrics: { qualityScore: 3, sourceCount: 11, outputLength: 6000, errorCount: 0, durationMs: 30000 },
+        }),
+      );
+    }
+    const other: PendingApproval = {
+      versionA: 'v1',
+      versionB: 'v9',
+      minRuns: 5,
+      proposedAt: new Date().toISOString(),
+      approvalTimeoutDays: 0,
+      changeReason: 'landed while the expiry was being decided',
+      generatedBy: 'legacy',
+    };
+    // afterRun writes the experiment record first, so the expiry write is the
+    // SECOND updateState. Asserted below, so a shift in that count fails here
+    // rather than quietly turning this into a test of nothing.
+    const race = raceInAfterRead(memory, other, { onCall: 2 });
+
+    const sink = makeSink();
+    const loop = buildLoop({
+      memory,
+      agent: makeAgent({ enabled: true, requireApproval: true, approvalTimeoutDays: 3 }),
+      metrics: sink,
+    });
+
+    const result = await loop.afterRun(
+      makeExperiment({
+        agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+        metrics: { qualityScore: 3, sourceCount: 11, outputLength: 6000, errorCount: 0, durationMs: 30000 },
+      }),
+    );
+
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
+    assert.deepEqual(memory._state.pendingApprovals!['researcher'], other, 'nothing discarded');
+    assert.ok(!result.message.includes('was rejected'), result.message);
+    assert.ok(result.message.includes('resolved by another process'), result.message);
+    assert.ok(
+      !sink.events.some(
+        (e) => e.type === 'evolution_skipped' && e.data.reason === 'approval_expired',
+      ),
+      'no expiry may be recorded when none happened',
+    );
+    assert.ok(!sink.events.some((e) => e.type === 'approval_rejected'));
   });
 
   it('a budget introduced LATER does not retroactively kill a waiting proposal', async () => {
@@ -636,16 +705,21 @@ describe('v0.17 approval gate: the timeout auto-rejects, never auto-approves', (
 function raceInAfterRead(
   memory: ReturnType<typeof createMockMemory>,
   replacement: PendingApproval | null,
-): void {
+  opts: { onCall?: number } = {},
+): { fired: () => boolean } {
+  const target = opts.onCall ?? 1;
   const original = memory.updateState.bind(memory);
-  let fired = false;
+  let seen = 0;
+  let didFire = false;
   memory.updateState = async (fn) => {
-    if (!fired) {
-      fired = true;
+    seen++;
+    if (seen === target) {
+      didFire = true;
       memory._state.pendingApprovals!['researcher'] = replacement;
     }
     return original(fn);
   };
+  return { fired: () => didFire };
 }
 
 describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just presence', () => {
@@ -663,10 +737,11 @@ describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just prese
       changeReason: 'a different challenger nobody has looked at',
       generatedBy: 'legacy',
     };
-    raceInAfterRead(memory, swapped);
+    const race = raceInAfterRead(memory, swapped);
 
     const res = await loop.approveChallenger('researcher');
 
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.equal(res.approved, false, 'must not approve a proposal it never read');
     assert.equal(memory._state.abTests['researcher'] ?? null, null, 'no test started');
     assert.deepEqual(
@@ -679,10 +754,11 @@ describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just prese
   it('approving refuses when the proposal disappeared in that window', async () => {
     const { memory, loop } = scenario({ enabled: true, requireApproval: true });
     await loop.forceEvolve('researcher');
-    raceInAfterRead(memory, null);
+    const race = raceInAfterRead(memory, null);
 
     const res = await loop.approveChallenger('researcher');
 
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.equal(res.approved, false);
     assert.equal(memory._state.abTests['researcher'] ?? null, null);
   });
@@ -698,10 +774,11 @@ describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just prese
       changeReason: 'a different challenger nobody has looked at',
       generatedBy: 'legacy',
     };
-    raceInAfterRead(memory, swapped);
+    const race = raceInAfterRead(memory, swapped);
 
     const res = await loop.rejectChallenger('researcher');
 
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.equal(res.rejected, false, 'must not discard a proposal it never read');
     assert.deepEqual(memory._state.pendingApprovals!['researcher'], swapped);
   });
@@ -725,10 +802,11 @@ describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just prese
       changeReason: 'proposed while the expiry was being decided',
       generatedBy: 'legacy',
     };
-    raceInAfterRead(memory, fresh);
+    const race = raceInAfterRead(memory, fresh);
 
     await loop.forceEvolve('researcher');
 
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.deepEqual(
       memory._state.pendingApprovals!['researcher'],
       fresh,
@@ -743,12 +821,13 @@ describe('v0.17 approval gate: the writers pin proposal IDENTITY, not just prese
     const { memory, loop } = scenario({ enabled: true, requireApproval: true });
     await loop.forceEvolve('researcher');
     const live = memory._state.pendingApprovals!['researcher'] as PendingApproval;
-    raceInAfterRead(memory, {
+    const race = raceInAfterRead(memory, {
       ...live,
       proposedAt: new Date(Date.parse(live.proposedAt) + 5000).toISOString(),
     });
 
     const res = await loop.approveChallenger('researcher');
+    assert.ok(race.fired(), 'the injected race never fired: this test proved nothing');
     assert.equal(res.approved, false);
     assert.equal(memory._state.abTests['researcher'] ?? null, null);
   });

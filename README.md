@@ -553,13 +553,14 @@ the next cycle propose fresh.
 Metrics sinks see `approval_requested`, `approval_granted` and
 `approval_rejected` (with `expired: true` when the timeout did it).
 
-Two things the gate does NOT protect against, said plainly:
+Where the gate stops, said plainly:
 
 - **Arming it mid-run.** `darwin run` resolves the agent's config once, before
   the run, and a run takes minutes. Turn the gate on while one is in flight and
   that run can still open an A/B test the old way. It happens once, at the
   moment you arm it; every later run is gated.
-- **`darwin approve` is strict on purpose.** The bare command approves, so an
+- **`darwin approve` is strict on purpose** (this one is a protection, listed
+  here so the strictness is not a surprise). The bare command approves, so an
   unrecognised token is an error rather than a shrug: `--rejct`, `-reject` and
   `--reject=true` all fail loudly instead of quietly approving. A typo in
   `--reject` used to put the challenger on roughly half of live traffic, and the

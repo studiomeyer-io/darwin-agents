@@ -242,8 +242,64 @@ re-propose a rejected challenger verbatim, because Darwin remembers rejected
 version labels and not rejected texts. The second is a piece of work in its own
 right, not a line in this one.
 
-Every fix in all three rounds is checked against the mutation that would undo
-it, including the ones each round named as uncovered.
+### What the fourth round found (all fixed here)
+
+Round 4 found no behaviour bug in any fix. It found five places where a guard
+proved less than it claimed, which by now is the recognisable shape of this
+whole feature: **every single round has found the hole one step further along
+the same chain.**
+
+  round 1: `hasAnyEvolutionFlag` was a hand-maintained list and went stale, so
+           the flag persisted while the CLI printed it as unset.
+  round 2: the new guard reached `resolveEvolutionConfig` and stopped, so
+           dropping the override inside the resolver left the suite green.
+  round 3: the guard called `buildResolvedEvolutionLoop`, but nothing pinned
+           that the COMMANDS call it.
+  round 4: the guard called that function in its FOUR-argument form, so the
+           fifth parameter was dead code as far as any test knew.
+
+- **The one-off flag lane was untested and therefore breakable in silence.**
+  Dropping `cliOverride` from the shared resolver left all 833 tests green
+  while `darwin run writer "task" --require-approval` opened the A/B test
+  ungated and every per-run `--gepa` / `--max-test-days` was ignored. The
+  README documents that lane explicitly. Guarded now, and the lesson is
+  general: the most recently added parameter of a shared function is where the
+  next blind spot sits.
+
+- **Nothing pinned that the commands call the shared function.** Rewiring
+  `run.ts` to `buildEvolutionLoop(agent, ...)` reproduced the round-2
+  production scenario word for word, with a green suite. `darwin run` now has a
+  real integration test that drives the actual command against a mock
+  OpenAI-compatible server, with a negative twin so it cannot pass on an agent
+  that would not have evolved anyway. `darwin evolve` and `darwin approve` are
+  covered by a source guard that also fails when a FOURTH command reaches past
+  the shared builder.
+
+- **A fix with two callers had one probe.** The round-3 race fix touched
+  `afterRun` and `forceEvolve`; only `forceEvolve` was pinned, so reverting the
+  `afterRun` half left the suite green, on the path a cron-driven fleet uses
+  exclusively. Round 1 had already found that exact two-caller trap in this
+  file. The race injector now takes the call index and, more importantly,
+  reports whether it fired at all: every use asserts that, because a probe that
+  never fires proves nothing, and a test that proves nothing is what three
+  rounds in a row have caught here.
+
+- **A justification that was wrong even though the decision was right.** The
+  asymmetry to `effectiveTestBudget` was explained as "that fallback is a
+  legacy gap". Its own docblock names two purposes, and the second (budgets
+  introduced after a test is already running) is a feature. The real reason for
+  the asymmetry is the difference between the two things: a running A/B test
+  burns live traffic every hour it stays open, so a new budget reaching it
+  closes something that is costing something; a waiting proposal is inert, so
+  the same reach only destroys work at no saving.
+
+- **A README counter and a mis-filed bullet.** "Two things the gate does NOT
+  protect against" had grown to four, one of which is a protection.
+
+Every fix in all four rounds is checked against the mutation that would undo
+it, including every one a round named as uncovered. That sentence has now been
+false twice and corrected twice, which is the reason it is worth writing: it is
+a claim someone can check.
 
 ### Fixed
 

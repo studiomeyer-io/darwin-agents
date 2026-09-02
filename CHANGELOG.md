@@ -407,7 +407,7 @@ red, and every single revert has at least one red test naming it. One run
 instead of eleven.
 
 **Verification status, stated precisely** (round 5 asked for it and round 6
-sharpened it, both fair): 887 tests pass on Node 20 AND Node 22, under CI
+sharpened it, both fair): 893 tests pass on Node 20 AND Node 22, under CI
 conditions both times, measured with a PATH containing node but not `claude`
 and with no provider keys exported. Type checks, the adapter guard and the
 benchmark dry run pass on both. The coverage gate passes on Node 22, which is
@@ -531,6 +531,31 @@ three parsers.
   Its first run flagged the comment that documents this fix, because that
   comment quotes the old `args[++i]`. A source guard that reads prose can be
   fed by prose; it strips comments now.
+
+### What the tenth round found, and where the loop stopped
+
+**GO**, after ten adversarial rounds. The last one confirmed the round-9 fix
+under fresh mutation, found no legitimate call broken, and reproduced the
+collective revert loudly (35 red). It found one more thing, graded by the
+reviewer as not a blocker, and it is fixed here anyway because it is the same
+class the loop closed three times already.
+
+- **`darwin run` took a mistyped flag into the task string, silently.**
+  `darwin run writer --no-evolv "Do X"` left `noEvolve` FALSE and put
+  `--no-evolv` into the task, so the run evolved and the critic ran, which is a
+  real model call and real money, at exit 0.
+
+  Unlike `approve` and `evolve`, this one gets a WARNING rather than a refusal.
+  The task is free text: a task may legitimately start with a dash, and quoting
+  it is the documented way, so a hard refusal would be ambiguous where the
+  other two were not. A line on stderr is the right size of tool.
+
+**The two limits of the pattern guard, measured rather than assumed**, and
+written into the guard so nobody mistakes it for the load-bearing layer: its
+`args[i + 1]` arm is FILE-granular (a new unguarded flag in a file that already
+contains a dash check elsewhere passes), and a string literal containing `//`
+blinds its line-comment stripper. The behavioural tests are what actually hold;
+the guard is a tripwire for a new file or a new parser.
 
 ### Fixed
 

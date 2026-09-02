@@ -784,6 +784,21 @@ describe('test files that build a loop clear the environment first', () => {
 // which is weaker than a behavioural one, and it is used here because the
 // defect is textual: an unguarded `args[++i]` or `args[i + 1]`. Every parser
 // that takes a value has to prove it looked at the token first.
+//
+// TWO LIMITS, both measured rather than guessed, so nobody mistakes this for
+// the load-bearing layer:
+//
+//   1. The `args[i + 1]` arm is FILE-granular. Adding a new value flag with an
+//      unguarded `args[i + 1]` to run.ts passes, because `startsWith('-')`
+//      already appears elsewhere in that file. A per-site check would need a
+//      real parser.
+//   2. A string literal containing `//` blinds the line-comment stripper for
+//      the rest of that line, including real code after it.
+//
+// The load-bearing layer is the behavioural tests: one per flag, per following
+// action. This is a tripwire for a NEW file or a NEW parser, and it is worth
+// having for that alone, but a green run here proves less than a green run
+// there.
 describe('every value-taking flag in src/cli guards against a following flag', () => {
   /**
    * Strip comments before scanning.

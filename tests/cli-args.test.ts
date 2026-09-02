@@ -254,3 +254,54 @@ describe('darwin run: no value flag swallows a following flag (v0.17)', () => {
     assert.equal(f.model, 'gpt-5.4');
   });
 });
+
+describe('darwin run warns when a dash token lands in the task (v0.17)', () => {
+  // Round 10, the last finding of the loop and explicitly not a blocker:
+  //
+  //     darwin run writer --no-evolv "Do X"
+  //       -> noEvolve = FALSE, task = "--no-evolv Do X"
+  //
+  // The run then evolved and the critic ran, which is a real model call and
+  // real money, silently and with exit 0. `approve` and `evolve` refuse
+  // unrecognised arguments outright; here the task is FREE TEXT, so refusing
+  // would be genuinely ambiguous (a task may legitimately start with a dash,
+  // and quoting is the documented way). A warning is the right tool.
+
+  function withWarnings<T>(fn: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    try {
+      return { result: fn(), warnings };
+    } finally {
+      console.warn = original;
+    }
+  }
+
+  for (const typo of ['--no-evolv', '--no-critc', '--verbse', '-vv']) {
+    it(`warns about "${typo}" instead of taking it silently`, () => {
+      const { result, warnings } = withWarnings(() =>
+        parseRunArgs(['writer', typo, 'Do X']) as unknown as Record<string, unknown>,
+      );
+      assert.ok(
+        warnings.some((w) => w.includes(typo) && w.includes('not a known flag')),
+        `no warning for "${typo}": ${warnings.join(' | ')}`,
+      );
+      // The token still reaches the task, because the task is free text.
+      assert.ok(String(result.task).includes(typo));
+    });
+  }
+
+  it('stays quiet for an ordinary run', () => {
+    const { warnings } = withWarnings(() => parseRunArgs(['writer', 'Explain the CAP theorem']));
+    assert.deepEqual(warnings, [], `unexpected warnings: ${warnings.join(' | ')}`);
+  });
+
+  it('stays quiet for a task that merely contains a dash', () => {
+    const { result, warnings } = withWarnings(() =>
+      parseRunArgs(['writer', 'Compare cost-per-token across providers']) as unknown as Record<string, unknown>,
+    );
+    assert.deepEqual(warnings, []);
+    assert.equal(result.task, 'Compare cost-per-token across providers');
+  });
+});

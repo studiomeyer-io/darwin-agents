@@ -191,6 +191,26 @@ export function parseRunArgs(args: string[]): RunFlags {
         if (isEvolutionConfigFlag(arg)) {
           i += applyEvolutionFlag(arg, args[i + 1], flags.evolutionOverride);
         } else {
+          // v0.17.0 — warn, do not refuse. The task is free text, so a hard
+          // refusal on a leading dash would be genuinely ambiguous: someone
+          // can legitimately want a task that starts with one, and quoting it
+          // is the documented way. What is NOT legitimate is a mistyped action
+          // flag disappearing into the task. Measured:
+          //
+          //     darwin run writer --no-evolv "Do X"
+          //       -> noEvolve = FALSE, task = "--no-evolv Do X"
+          //
+          // The run then evolved and the critic ran, which is a real model
+          // call and real money, silently and with exit 0. `darwin approve`
+          // and `darwin evolve` refuse unrecognised arguments outright; here
+          // the free-text argument makes that the wrong tool, and a line on
+          // stderr is the right one.
+          if (/^--?[a-zA-Z]/.test(arg)) {
+            console.warn(
+              `[darwin] "${arg}" is not a known flag and was read as part of the task. ` +
+                `Quote the task if that was intended.`,
+            );
+          }
           positional.push(arg);
         }
     }

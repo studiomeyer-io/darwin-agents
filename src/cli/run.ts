@@ -15,8 +15,7 @@ import type { AgentDefinition, DarwinConfig, MemoryProvider, PromptVersion } fro
 import { resolveEvolutionEnabled } from '../evolution/enabled-state.js';
 import { parseCriticScore } from '../evolution/parse-score.js';
 import { checkCriticFamilies, crossFamilyRequired, singleFamilyHint } from '../evolution/critic-families.js';
-import { resolveEvolutionConfig } from '../evolution/enabled-state.js';
-import { buildEvolutionLoop } from '../evolution/build-loop.js';
+import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
 import { isEvolutionConfigFlag, applyEvolutionFlag } from './evolution-flags.js';
 import type { ABTest, EvolutionConfigOverride } from '../types.js';
 
@@ -557,12 +556,9 @@ async function runCommandInner(
     // config drives both the GEPA wiring and the loop. With no overrides set,
     // resolvedEvolution === the static config, so the loop is wired exactly as
     // before (default path unchanged).
-    const resolvedEvolution = resolveEvolutionConfig(agent, preState, flags.evolutionOverride);
-    const evolutionAgent: AgentDefinition = resolvedEvolution
-      ? { ...agent, evolution: resolvedEvolution }
-      : agent;
-
-    const loop = buildEvolutionLoop(evolutionAgent, config, memory);
+    const loop = buildResolvedEvolutionLoop(
+      agent, preState, config, memory, flags.evolutionOverride,
+    );
 
     console.log(`\n[darwin] Evolution: Running Darwin loop...`);
     const evoResult = await loop.afterRun(result.experiment);

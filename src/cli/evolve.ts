@@ -35,9 +35,9 @@ import {
   setEvolutionEnabled,
   setEvolutionConfigOverrides,
 } from '../evolution/enabled-state.js';
-import { buildEvolutionLoop } from '../evolution/build-loop.js';
+import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
 import { parseEvolutionConfigFlags, hasAnyEvolutionFlag } from './evolution-flags.js';
-import type { AgentDefinition, EvolutionConfig, EvolutionConfigOverride } from '../types.js';
+import type { EvolutionConfig, EvolutionConfigOverride } from '../types.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
   const agentName = args[0];
@@ -128,11 +128,7 @@ export async function evolveCommand(args: string[]): Promise<void> {
     // any flags passed on this command line) so `--force --gepa` etc. take
     // effect for the forced cycle.
     const state = await memory.getState();
-    const resolvedEvolution = resolveEvolutionConfig(agent, state);
-    const evolutionAgent: AgentDefinition = resolvedEvolution
-      ? { ...agent, evolution: resolvedEvolution }
-      : agent;
-    const loop = buildEvolutionLoop(evolutionAgent, config, memory);
+    const loop = buildResolvedEvolutionLoop(agent, state, config, memory);
     const evoResult = await loop.forceEvolve(agentName);
     if (evoResult.abTestStarted) {
       console.log(`[darwin] EVOLVED: ${evoResult.message}`);

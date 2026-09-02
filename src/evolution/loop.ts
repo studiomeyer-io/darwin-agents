@@ -323,14 +323,16 @@ export class DarwinLoop {
     const pendingApproval = approvalState.pendingApprovals?.[agent] ?? null;
     if (pendingApproval) {
       if (this.isApprovalExpired(pendingApproval)) {
-        await this.expireApproval(agent, pendingApproval);
-        result.message =
-          `Proposal ${pendingApproval.versionB} expired after ` +
-          `${this.effectiveApprovalBudget(pendingApproval)}d without a decision and was rejected. ` +
-          `${pendingApproval.versionA} stays active; the next cycle can propose a new challenger.`;
+        const expired = await this.expireApproval(agent, pendingApproval);
+        result.message = expired
+          ? `Proposal ${pendingApproval.versionB} expired after ` +
+            `${this.effectiveApprovalBudget(pendingApproval)}d without a decision and was rejected. ` +
+            `${pendingApproval.versionA} stays active; the next cycle can propose a new challenger.`
+          : `Proposal ${pendingApproval.versionB} was resolved by another process while it was ` +
+            `being expired. Nothing was discarded here. Check "darwin status ${agent}".`;
         emitMetric(this.metrics, 'evolution_skipped', agent, {
-          reason: 'approval_expired',
-          rejected: pendingApproval.versionB,
+          reason: expired ? 'approval_expired' : 'approval_resolved_concurrently',
+          ...(expired ? { rejected: pendingApproval.versionB } : {}),
         });
         return result;
       }
@@ -459,11 +461,14 @@ export class DarwinLoop {
     const pendingForce = state.pendingApprovals?.[agentName] ?? null;
     if (pendingForce) {
       if (this.isApprovalExpired(pendingForce)) {
-        await this.expireApproval(agentName, pendingForce);
-        result.message =
-          `Proposal ${pendingForce.versionB} for "${agentName}" was past its ` +
-          `${this.effectiveApprovalBudget(pendingForce)}d approval budget and has been rejected. ` +
-          `Run the same command again to generate a fresh challenger.`;
+        const expired = await this.expireApproval(agentName, pendingForce);
+        result.message = expired
+          ? `Proposal ${pendingForce.versionB} for "${agentName}" was past its ` +
+            `${this.effectiveApprovalBudget(pendingForce)}d approval budget and has been rejected. ` +
+            `Run the same command again to generate a fresh challenger.`
+          : `Proposal ${pendingForce.versionB} for "${agentName}" was resolved by another ` +
+            `process while it was being expired. Nothing was discarded here. ` +
+            `Check "darwin status ${agentName}".`;
         return result;
       }
       result.awaitingApproval = true;
@@ -644,9 +649,9 @@ export class DarwinLoop {
         minRuns: dynamicMinRuns,
         ...(newTest.maxTestDays !== undefined ? { maxTestDays: newTest.maxTestDays } : {}),
         proposedAt: new Date().toISOString(),
-        ...(this.configuredApprovalTimeout() !== undefined
-          ? { approvalTimeoutDays: this.configuredApprovalTimeout() }
-          : {}),
+        // Always written, `0` meaning "no budget", so the proposal carries its
+        // own answer and never has to ask a config that may have changed since.
+        approvalTimeoutDays: this.configuredApprovalTimeout() ?? 0,
         changeReason: newPromptVersion.changeReason,
         generatedBy,
       };
@@ -787,16 +792,33 @@ export class DarwinLoop {
   }
 
   /**
-   * Budget that actually governs a given proposal: the snapshot first, the
-   * agent's current config as the fallback for proposals written before the
-   * field existed. Mirrors {@link effectiveTestBudget} exactly.
+   * Budget that governs a given proposal: the SNAPSHOT, and nothing else.
+   *
+   * Deliberately NOT mirroring {@link effectiveTestBudget}, which falls back to
+   * the agent's current config. That fallback exists there for A/B tests
+   * written before v0.13.1 added the field, a genuine legacy gap. There is no
+   * such gap here: `approvalTimeoutDays` ships in the same release as the
+   * proposal it lives on, so a proposal without a snapshot was written under a
+   * config that had NO budget, which is a decision, not missing data.
+   *
+   * Round 3 of the adversarial review measured what the fallback did with it:
+   * a proposal waiting 19 days under "no timeout" was auto-rejected the moment
+   * an operator introduced `--approval-timeout-days 7` for future proposals,
+   * with the message "was past its 7d approval budget". That contradicts the
+   * documented promise in {@link EvolutionConfig.approvalTimeoutDays} and
+   * destroys a challenger nobody agreed to discard. Reading only the snapshot
+   * keeps the promise: a change applies to proposals made from then on.
+   *
+   * A snapshot of `0` (or absent, for a proposal written by a pre-release
+   * build) means no budget, so it waits until someone decides. Fail-safe: the
+   * unknown case never destroys work.
    */
   private effectiveApprovalBudget(pending: PendingApproval): number | undefined {
     const snapshot = pending.approvalTimeoutDays;
     if (typeof snapshot === 'number' && Number.isFinite(snapshot) && snapshot > 0) {
       return snapshot;
     }
-    return this.configuredApprovalTimeout();
+    return undefined;
   }
 
   /**
@@ -1056,7 +1078,10 @@ export class DarwinLoop {
    * the same reason {@link concludeInconclusive} never promotes: an absent
    * decision is not a decision.
    */
-  private async expireApproval(agentName: string, pending: PendingApproval): Promise<void> {
+  private async expireApproval(
+    agentName: string,
+    pending: PendingApproval,
+  ): Promise<boolean> {
     // Identity-pinned like the other two writers: a proposal that appeared
     // after the expiry decision was made is not the one that expired.
     let raced = false;
@@ -1070,9 +1095,11 @@ export class DarwinLoop {
       return s;
     });
     if (raced) {
-      // Nothing was expired, so nothing is announced. The caller's message
-      // would be wrong, but it is a status line, not an action.
-      return;
+      // Nothing was expired. Round 3: the callers announced the rejection and
+      // emitted `evolution_skipped { reason: 'approval_expired' }` anyway, so a
+      // metrics stream recorded a rejection that did not happen. Report the
+      // miss instead and let them say something true.
+      return false;
     }
 
     notifyApprovalExpired(
@@ -1087,6 +1114,7 @@ export class DarwinLoop {
       expired: true,
       budgetDays: this.effectiveApprovalBudget(pending) ?? 0,
     });
+    return true;
   }
 
   // ─── A/B Test Handling ─────────────────────────────
@@ -1582,10 +1610,18 @@ export class DarwinLoop {
         const guarded = await this.runAlignmentGuard(currentPrompt, merged);
         if (guarded !== null) {
           // v0.11.0: count this merge challenger against the lifetime cap
-          // (GEPA max_merge_invocations). Only accepted merges are counted —
-          // one that failed the guard below consumed no A/B slot. The counter
-          // is written ONLY when a cap is configured, so an uncapped useMerge
-          // agent's persisted state stays byte-for-byte v0.10 (no stray key).
+          // (GEPA max_merge_invocations). Only accepted merges are counted; one
+          // that failed the guard below was never built. The counter is written
+          // ONLY when a cap is configured, so an uncapped useMerge agent's
+          // persisted state stays byte-for-byte v0.10 (no stray key).
+          //
+          // v0.17.0: the cap counts merge challengers CREATED, which under
+          // `requireApproval` now includes ones a human rejects, ones that
+          // expire, and ones that lose the claim race. That is deliberate: the
+          // cap is a cost budget for the reflection calls, and those were paid
+          // whatever happened afterwards. It does mean a cap of 5 plus five
+          // rejections turns merge off for the agent's life. Raise the cap, or
+          // leave it unset, if that is not the trade you want.
           await this.recordMergeInvocation(agentName);
           return { prompt: guarded, via: 'merge' };
         }
@@ -1735,9 +1771,13 @@ export class DarwinLoop {
   /**
    * v0.11.0 — Increment this agent's lifetime merge-invocation count. Called
    * once per merge challenger that passes the alignment guard and is carried
-   * into an A/B test, and ONLY when a cap is configured — an uncapped useMerge
+   * into a challenger, and ONLY when a cap is configured. An uncapped useMerge
    * agent never writes the counter, so its persisted state is unchanged from
    * v0.10. Initialises the map lazily for state rows that predate the field.
+   *
+   * v0.17.0: said "carried into an A/B test", which stopped being true when
+   * `requireApproval` put a human between the challenger and the test. The
+   * counter has always incremented at CREATION; only the comment drifted.
    *
    * The check (`mergeBudgetAvailable`) and this increment are separate state
    * reads, so two cycles running concurrently for the SAME agent could each

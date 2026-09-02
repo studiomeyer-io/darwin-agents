@@ -18,8 +18,15 @@ import { GepaOptimizer } from './optimizer-gepa.js';
 import { SafetyGate } from './safety.js';
 import { loadNotificationConfig } from './notifications.js';
 import { metricsSinkFromEnv } from '../metrics/sink.js';
-import type { AgentDefinition, DarwinConfig, MemoryProvider } from '../types.js';
+import type {
+  AgentDefinition,
+  DarwinConfig,
+  DarwinState,
+  EvolutionConfigOverride,
+  MemoryProvider,
+} from '../types.js';
 import { DEFAULT_SAFETY } from '../types.js';
+import { resolveEvolutionConfig } from './enabled-state.js';
 
 /**
  * Build a DarwinLoop for `agent` against `memory`/`config`. Mirrors the wiring
@@ -106,4 +113,37 @@ export function buildEvolutionLoop(
   const metrics = metricsSinkFromEnv();
 
   return new DarwinLoop({ memory, tracker, optimizer, safety, patterns, agent, notifications, gepa, metrics });
+}
+
+/**
+ * Resolve the effective evolution config for `agent` and build its loop.
+ *
+ * The one way a CLI command should get a loop. `darwin run`, `darwin evolve
+ * --force` and `darwin approve` each used to spell this out themselves:
+ *
+ *     const resolved = resolveEvolutionConfig(agent, state, override);
+ *     const evolutionAgent = resolved ? { ...agent, evolution: resolved } : agent;
+ *     const loop = buildEvolutionLoop(evolutionAgent, config, memory);
+ *
+ * Three copies of a step that has exactly one way to be wrong: passing `agent`
+ * instead of `evolutionAgent`. Round 3 of the adversarial review measured what
+ * that costs. With the typo in place, `darwin evolve <agent>
+ * --require-approval` confirms itself, every later run goes UNGATED, and all
+ * 826 tests stay green, because the guard for that chain rebuilt the wiring in
+ * a test helper instead of calling the thing the CLI calls.
+ *
+ * One function, one place to be wrong, and it is covered.
+ */
+export function buildResolvedEvolutionLoop(
+  agent: AgentDefinition,
+  state: Pick<DarwinState, 'evolutionConfigOverrides'>,
+  config: DarwinConfig,
+  memory: MemoryProvider,
+  cliOverride?: EvolutionConfigOverride,
+): DarwinLoop {
+  const resolved = resolveEvolutionConfig(agent, state, cliOverride);
+  const evolutionAgent: AgentDefinition = resolved
+    ? { ...agent, evolution: resolved }
+    : agent;
+  return buildEvolutionLoop(evolutionAgent, config, memory);
 }

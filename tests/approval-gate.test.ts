@@ -491,6 +491,109 @@ describe('v0.17 approval gate: the timeout auto-rejects, never auto-approves', (
     assert.ok(memory._state.pendingApprovals!['researcher'], 'still pending after 900 days');
   });
 
+  it('a lost expiry race does not report a rejection that did not happen', async () => {
+    // Round 3: when expireApproval lost its identity race the caller still
+    // announced the rejection and emitted evolution_skipped with
+    // reason 'approval_expired', so a metrics stream recorded a rejection that
+    // never occurred. No wrong ACTION, but a wrong record, and the record is
+    // what an operator reads afterwards.
+    const { memory, loop } = scenario({
+      enabled: true, requireApproval: true, approvalTimeoutDays: 3,
+    });
+    await loop.forceEvolve('researcher');
+    const stale = memory._state.pendingApprovals!['researcher'] as PendingApproval;
+    stale.proposedAt = new Date(Date.now() - 9 * 86400_000).toISOString();
+
+    const other: PendingApproval = {
+      versionA: 'v1',
+      versionB: 'v9',
+      minRuns: 5,
+      proposedAt: new Date().toISOString(),
+      approvalTimeoutDays: 0,
+      changeReason: 'landed while the expiry was being decided',
+      generatedBy: 'legacy',
+    };
+    raceInAfterRead(memory, other);
+
+    const sink = makeSink();
+    const racing = buildLoop({
+      memory,
+      agent: makeAgent({ enabled: true, requireApproval: true, approvalTimeoutDays: 3 }),
+      metrics: sink,
+    });
+    // Re-plant the race for THIS loop's updateState call.
+    raceInAfterRead(memory, other);
+    const res = await racing.forceEvolve('researcher');
+
+    assert.deepEqual(memory._state.pendingApprovals!['researcher'], other, 'nothing discarded');
+    assert.ok(!res.message.includes('has been rejected'), res.message);
+    assert.ok(res.message.includes('resolved by another process'), res.message);
+    assert.ok(
+      !sink.events.some((e) => e.type === 'approval_rejected'),
+      'no rejection may be recorded when none happened',
+    );
+  });
+
+  it('a budget introduced LATER does not retroactively kill a waiting proposal', async () => {
+    // Round 3 measured this: a proposal that had been waiting 19 days under
+    // "no timeout" was auto-rejected the moment an operator set
+    // --approval-timeout-days 7 for FUTURE proposals, because
+    // effectiveApprovalBudget fell back to the current config when the proposal
+    // carried no snapshot. That contradicts the documented promise and destroys
+    // a challenger nobody agreed to discard.
+    const { memory, loop } = scenario({ enabled: true, requireApproval: true });
+    await loop.forceEvolve('researcher');
+    const pending = memory._state.pendingApprovals!['researcher'] as PendingApproval;
+    assert.equal(pending.approvalTimeoutDays, 0, 'no budget is snapshotted AS 0, not omitted');
+    pending.proposedAt = new Date(Date.now() - 19 * 86400_000).toISOString();
+
+    // The operator introduces a budget. A loop built from the NEW config sees
+    // the old proposal.
+    const later = buildLoop({
+      memory,
+      agent: makeAgent({ enabled: true, requireApproval: true, approvalTimeoutDays: 7 }),
+    });
+    const res = await later.forceEvolve('researcher');
+
+    assert.ok(
+      memory._state.pendingApprovals!['researcher'],
+      'the proposal was made under "no timeout" and must still be waiting',
+    );
+    assert.equal(res.awaitingApproval, true, res.message);
+    assert.ok(!res.message.includes('expired'), res.message);
+  });
+
+  it('a proposal written by a pre-release build (no snapshot at all) waits, never lapses', async () => {
+    // Fail-safe direction for the unknown case: a missing field means no
+    // budget, so nothing is destroyed on a guess.
+    const memory = createMockMemory();
+    memory._versions.push(
+      makePromptVersion({ version: 'v1', agentName: 'researcher', active: true, promptText: SAFE_PROMPT }),
+    );
+    memory._state.pendingApprovals = {
+      researcher: {
+        versionA: 'v1',
+        versionB: 'v2',
+        minRuns: 5,
+        proposedAt: new Date(Date.now() - 400 * 86400_000).toISOString(),
+        changeReason: 'written before the field existed',
+        generatedBy: 'legacy',
+      },
+    };
+    memory._experiments.push(
+      makeExperiment({ agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true }),
+    );
+    const loop = buildLoop({
+      memory,
+      agent: makeAgent({ enabled: true, requireApproval: true, approvalTimeoutDays: 3 }),
+    });
+
+    const res = await loop.forceEvolve('researcher');
+
+    assert.ok(memory._state.pendingApprovals!['researcher'], 'still waiting after 400 days');
+    assert.equal(res.awaitingApproval, true);
+  });
+
   it('never expires on an unparsable proposedAt', async () => {
     const { memory, loop } = scenario({
       enabled: true, requireApproval: true, approvalTimeoutDays: 1,

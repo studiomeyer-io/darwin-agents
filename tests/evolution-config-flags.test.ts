@@ -26,10 +26,8 @@ import {
   setEvolutionConfigOverrides,
 } from '../src/evolution/enabled-state.js';
 import { SqliteMemoryProvider } from '../src/memory/sqlite-memory.js';
-import { DarwinLoop } from '../src/evolution/loop.js';
-import { SafetyGate } from '../src/evolution/safety.js';
-import { ExperimentTracker } from '../src/evolution/tracker.js';
-import { PatternDetector } from '../src/evolution/patterns.js';
+import type { DarwinLoop } from '../src/evolution/loop.js';
+import { buildResolvedEvolutionLoop } from '../src/evolution/build-loop.js';
 import { PromptOptimizer } from '../src/evolution/optimizer.js';
 import { createMockMemory, makeExperiment, makePromptVersion } from './helpers.js';
 import type { AgentDefinition, DarwinConfig, DarwinState } from '../src/types.js';
@@ -293,21 +291,37 @@ describe('a persisted override reaches the behaviour it controls', () => {
     evolution: { enabled: true },
   };
 
-  /** Build a loop the way the CLI does: static config + persisted overrides. */
+  /**
+   * Call the SAME function the CLI calls, not a rebuild of it.
+   *
+   * The first version of this helper spelled the wiring out itself
+   * (`resolveEvolutionConfig` then `new DarwinLoop`). Round 3 measured what
+   * that proves: with `run.ts` and `evolve.ts` mutated to pass the unresolved
+   * agent, all 826 tests stayed green. A guard that rebuilds the path pins the
+   * building blocks, not the command. The three commands now share
+   * `buildResolvedEvolutionLoop`, so there is one place to be wrong and this
+   * exercises it.
+   *
+   * A stub provider keeps it hermetic: buildEvolutionLoop wires a real provider
+   * from config, and nothing here may reach an LLM.
+   */
   function loopFromState(
     memory: ReturnType<typeof createMockMemory>,
     state: DarwinState,
   ): DarwinLoop {
-    const resolved = resolveEvolutionConfig(gateAgent, state);
-    const agent: AgentDefinition = resolved ? { ...gateAgent, evolution: resolved } : gateAgent;
-    return new DarwinLoop({
-      memory,
-      tracker: new ExperimentTracker(memory),
-      safety: new SafetyGate(),
-      patterns: new PatternDetector(memory),
-      optimizer: new PromptOptimizer(async () => 'You are a meticulous research agent. Never fabricate sources.'),
-      agent,
-    });
+    const config: DarwinConfig = {
+      provider: 'openai',
+      memory: 'custom',
+      memoryProvider: memory,
+      openaiApiKey: 'test-key-not-used',
+    } as DarwinConfig;
+    const loop = buildResolvedEvolutionLoop(gateAgent, state, config, memory);
+    // Swap in a stub optimizer so no request is ever made. The gate decision
+    // happens after generation, so a fixed string is enough.
+    (loop as unknown as { optimizer: PromptOptimizer }).optimizer = new PromptOptimizer(
+      async () => 'You are a meticulous research agent. Never fabricate sources.',
+    );
+    return loop;
   }
 
   function seeded(): ReturnType<typeof createMockMemory> {

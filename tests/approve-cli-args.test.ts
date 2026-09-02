@@ -16,7 +16,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseApproveArgs } from '../src/cli/approve.js';
+import { approveCommand, parseApproveArgs } from '../src/cli/approve.js';
 
 describe('parseApproveArgs: the safe cases', () => {
   it('defaults to approve, no force, no reason, no agent', () => {
@@ -105,5 +105,55 @@ describe('parseApproveArgs: anything unrecognised is an ERROR, never a shrug', (
   it('collects every problem rather than stopping at the first', () => {
     const r = parseApproveArgs(['writer', '--rejct', '--frce']);
     assert.equal(r.errors.length, 2, r.errors.join(' | '));
+  });
+});
+
+describe('approveCommand refuses before it touches anything', () => {
+  // Round 3 found this fix uncovered: the guard existed, was measured live at
+  // exit 1, and no test called `approveCommand` at all. Deleting the guard left
+  // all 825 tests green while the regression (an empty shell variable turning a
+  // rejection into a listing with exit 0) came back.
+  //
+  // These are hermetic on purpose: every refusal below happens BEFORE
+  // loadConfig/createMemory, so nothing here opens a database or reads a file.
+  // If a future edit moves the guards after the I/O, this suite starts touching
+  // disk and that is the signal to look.
+
+  it('throws on an unknown flag rather than approving', async () => {
+    await assert.rejects(
+      () => approveCommand(['writer', '--rejct']),
+      /unknown flag "--rejct"/,
+    );
+  });
+
+  it('throws on a decision flag with no agent, naming the empty-variable trap', async () => {
+    // `darwin approve "$AGENT" --reject` with an unset variable.
+    await assert.rejects(
+      () => approveCommand(['--reject']),
+      /--reject needs an agent to act on/,
+    );
+    await assert.rejects(
+      () => approveCommand(['', '--reject']),
+      /--reject needs an agent to act on/,
+    );
+    await assert.rejects(() => approveCommand(['--force']), /--force needs an agent/);
+    await assert.rejects(
+      () => approveCommand(['--reason', 'too flat']),
+      /--reason needs an agent/,
+    );
+  });
+
+  it('names every offending flag, not just the first', async () => {
+    await assert.rejects(
+      () => approveCommand(['--reject', '--force']),
+      /--reject, --force needs an agent/,
+    );
+  });
+
+  it('throws on a second agent name rather than picking one', async () => {
+    await assert.rejects(
+      () => approveCommand(['writer', 'researcher']),
+      /second agent name/,
+    );
   });
 });

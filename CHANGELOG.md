@@ -187,8 +187,63 @@ half showed on its own:
   not work: the snapshot on the proposal wins. Consistent with every other
   parameter here and fail-safe (it auto-rejects), but it was unqualified.
 
-Every fix in both rounds is checked against the mutation that would undo it,
-including the two the reviewer named as uncovered.
+### What the third round found (all fixed here)
+
+Round 3 confirmed all four round-2 fixes hold and found seven more. None of them
+opens a path to traffic without a human; the three that mattered were a doc
+promise that had become a lie, and two guards that stopped short of what they
+claimed to prove.
+
+- **A timeout introduced later killed a proposal made before it.** The README
+  had just been corrected to promise that changing `approvalTimeoutDays`
+  "applies to proposals made from then on". Measured, it did not: a proposal
+  written with no budget carried no snapshot, and the resolver fell back to the
+  CURRENT config, so introducing a 7-day budget auto-rejected a proposal that
+  had been waiting 19 days under "waits indefinitely". The fallback was copied
+  from `effectiveTestBudget`, where it exists for A/B tests written before
+  v0.13.1 added the field. There is no such legacy here: the field ships in the
+  same release as the proposal it lives on, so an absent snapshot means "no
+  budget was configured", which is a decision. The budget is now always written
+  (`0` for none) and read from the snapshot alone.
+
+- **The wiring guard was still one hop short, and this time the hop was the
+  command.** It had been fixed to reach `resolveEvolutionConfig`, but it
+  rebuilt that wiring in a test helper instead of calling what the CLI calls.
+  Mutating `run.ts` and `evolve.ts` to pass the UNRESOLVED agent left all 826
+  tests green, which is the round-2 failure one level up. The three commands
+  now share `buildResolvedEvolutionLoop`, so the step has one place to be wrong
+  instead of three, and the guard calls that function.
+
+- **A fix with no test, under a CHANGELOG line claiming otherwise.** The
+  decision-flag guard from round 2 was measured live and never pinned:
+  `approveCommand` was called by no test at all, so deleting the guard left the
+  suite green while the regression returned. It now has hermetic tests (every
+  refusal happens before any I/O), and the "checked against its mutation" claim
+  is true of every fix in all three rounds rather than of most of them.
+
+- **A lost expiry race reported a rejection that never happened.**
+  `expireApproval` correctly declined to touch a proposal that had changed under
+  it, then returned void, so both callers announced the rejection and emitted
+  `evolution_skipped { reason: 'approval_expired' }` anyway. It returns a
+  boolean now and the callers say what actually occurred.
+
+- **A comment that stopped being true.** `recordMergeInvocation` said the cap
+  counts merges "carried into an A/B test"; with a human in between it counts
+  merges CREATED, which includes ones that get rejected or lose the claim race.
+  The behaviour is deliberate (the reflection call was paid either way) and now
+  says so, including the consequence: a cap of 5 plus five rejections turns
+  merge off for the agent's life.
+
+Two findings are documented rather than fixed, both in the README under what
+the gate does not protect against: `darwin approve "$AGENT"` with an empty
+variable lists instead of approving (indistinguishable from the legitimate
+listing without making listing its own subcommand), and `useDemos` can
+re-propose a rejected challenger verbatim, because Darwin remembers rejected
+version labels and not rejected texts. The second is a piece of work in its own
+right, not a line in this one.
+
+Every fix in all three rounds is checked against the mutation that would undo
+it, including the ones each round named as uncovered.
 
 ### Fixed
 

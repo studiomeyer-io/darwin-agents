@@ -564,7 +564,20 @@ Two things the gate does NOT protect against, said plainly:
   `--reject=true` all fail loudly instead of quietly approving. A typo in
   `--reject` used to put the challenger on roughly half of live traffic, and the
   only way to stop the resulting test also throws the evolved incumbent back to
-  v1.
+  v1. A decision flag with no agent (`darwin approve "$AGENT" --reject` with an
+  empty variable) fails too.
+- **`darwin approve "$AGENT"` with an empty variable lists instead of
+  approving,** and exits 0. That one cannot be told apart from the legitimate
+  `darwin approve` listing without making listing its own subcommand. It fails
+  safe (nothing is approved) but a script will believe it decided. Quote and
+  check your variables, or use `--reject`/`--force`, which do fail loudly.
+- **`useDemos` plus the gate can re-propose the same challenger.** The demo
+  path builds its challenger from the ACTIVE prompt, and rejecting does not
+  change the active prompt, so a rejected demo challenger comes back on the
+  next `demoEveryK` cycle with a new label and the same text. Nothing reaches
+  traffic, but you get asked the same question again. Darwin remembers rejected
+  version LABELS, not rejected TEXTS; giving it the second kind of memory is a
+  separate piece of work, not a line in this one.
 
 ### Why this is different
 

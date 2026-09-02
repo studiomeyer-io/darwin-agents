@@ -33,8 +33,7 @@
 import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
-import { resolveEvolutionConfig } from '../evolution/enabled-state.js';
-import { buildEvolutionLoop } from '../evolution/build-loop.js';
+import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
 import type { AgentDefinition, MemoryProvider, PendingApproval } from '../types.js';
 
 /** Everything one walk over argv produces. */
@@ -222,7 +221,7 @@ export async function approveCommand(args: string[]): Promise<void> {
       systemPrompt: '',
       model: 'claude-sonnet-4-6',
     };
-    const res = await buildEvolutionLoop(stub, config, memory).rejectChallenger(
+    const res = await buildResolvedEvolutionLoop(stub, state, config, memory).rejectChallenger(
       agentName,
       parsed.reason,
     );
@@ -230,11 +229,7 @@ export async function approveCommand(args: string[]): Promise<void> {
     return;
   }
 
-  const resolvedEvolution = resolveEvolutionConfig(agent, state);
-  const evolutionAgent: AgentDefinition = resolvedEvolution
-    ? { ...agent, evolution: resolvedEvolution }
-    : agent;
-  const loop = buildEvolutionLoop(evolutionAgent, config, memory);
+  const loop = buildResolvedEvolutionLoop(agent, state, config, memory);
 
   if (parsed.reject) {
     const res = await loop.rejectChallenger(agentName, parsed.reason);

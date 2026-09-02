@@ -351,10 +351,60 @@ it. That sentence has been false three times and corrected three times, which
 is exactly why it is worth writing down: it is a claim a reader can check, and
 three readers did.
 
-**Verification status, stated precisely** (round 5 asked for it, and it was a
-fair ask): 846 tests pass locally AND under CI conditions, measured with a PATH
-containing node but not `claude` and with no provider keys exported. The CI
-workflow itself has not run on this work: the branch is not pushed yet.
+### What the sixth round found (all fixed here)
+
+Round 6 found **no defect in the product**. The gate holds, the identity pins
+hold, there is no path around the shared builder, and the repaired integration
+test goes red when the gate is disabled. What it found was six places where the
+record was better than the reality, and the method it used to find the worst of
+them is worth stealing: **revert every suspect fix at once and run the suite a
+single time.** Green means none of them were guarded.
+
+- **Four fixes had no test at all, under a line claiming each was
+  mutation-checked.** All four could be reverted simultaneously with 845 of 846
+  tests still passing: `--reset` clearing a pending proposal, `--reset` moving
+  the active flags as well as the state map, `approve` refusing a proposal it
+  cannot show you, and `approve` being able to reject a proposal whose agent is
+  gone. Nothing called `evolveCommand --reset` or `approveCommand` with a
+  proposal actually present. Four behavioural tests now, checked against the
+  same simultaneous revert.
+
+- **The two summary guards from round 5 checked presence, not binding.**
+  `line.includes(String(value))` catches an omission, which was the round-1
+  failure, and misses the two forms that come next: a rename and a swap.
+  Measured green while a cross-wired `describeConfig` reported "gepa=false,
+  merge=true" for `--gepa`. A confirmation printed under the wrong name is
+  exactly the round-1 trigger, so the guards now assert `label=value`.
+
+- **A third hand-maintained flag list in the same file, with the same hole.**
+  The usage docblock at the top of `cli/evolve.ts` was missing
+  `--require-confidence` and `--confidence-method`, the same two the summaries
+  had been missing for three releases. Round 5's sweep looked for
+  "summaries" and walked past the doc comment next to them. The docblock is
+  walked by a test now.
+
+- **A comment that was known to be false was left in place.** Round 5 named the
+  wrong provider-detection comment in `cli-run-loop-integration.test.ts` and it
+  was not touched, on the grounds that the file belongs to another feature.
+  That was the wrong call: the file is hermetic only by accident of its
+  fixture, and its comment invites the next person to add a case that
+  reproduces the round-5 hole, where the failure mode is a hanging CI job
+  rather than a red assertion. Corrected, with the reason and the working
+  recipe.
+
+- **Two smaller ones:** a comment claiming an empty agent string leaves
+  `parsed.agent` undefined (it does not; the empty string is merely falsy), and
+  `DARWIN_METRICS_JSONL` not cleared in either integration test's setup, so a
+  developer with it exported gets real evolution events appended to their own
+  metrics file by a test run.
+
+**Verification status, stated precisely** (round 5 asked for it and round 6
+sharpened it, both fair): 853 tests pass on Node 20 AND Node 22, under CI
+conditions both times, measured with a PATH containing node but not `claude`
+and with no provider keys exported. Type checks, the adapter guard and the
+benchmark dry run pass on both. The coverage gate passes on Node 22, which is
+the only version CI runs it on. The CI workflow itself has not run on this
+work: the branch is not pushed yet.
 
 ### Fixed
 

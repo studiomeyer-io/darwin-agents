@@ -139,8 +139,13 @@ export async function approveCommand(args: string[]): Promise<void> {
   // anyone. Without a timeout it then blocks evolution forever, silently.
   //
   // The parser already hard-fails on `--rejct`; shrugging at `--reject` with no
-  // agent would be the same failure with better spelling. An empty string is
-  // caught too: it is falsy, so `parsed.agent` stays undefined.
+  // agent would be the same failure with better spelling.
+  //
+  // An empty string is caught too, though not the way an earlier version of
+  // this comment claimed: `parseApproveArgs([''])` does SET `agent` to `''`
+  // (it is a non-flag token). What saves it is that `''` is falsy, so both
+  // `!agentName` checks still fire. Worth stating precisely, because the
+  // wrong version invited someone to rely on `agent === undefined`.
   if (!agentName && (parsed.reject || parsed.force || parsed.reason !== undefined)) {
     const given = [
       parsed.reject ? '--reject' : null,

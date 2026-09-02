@@ -61,12 +61,13 @@ import { join } from 'node:path';
 
 import { runCommand } from '../src/cli/run.js';
 import { evolveCommand } from '../src/cli/evolve.js';
+import { approveCommand } from '../src/cli/approve.js';
 import { loadConfig } from '../src/core/agent.js';
 import { createMemory } from '../src/memory/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
 import { setEvolutionConfigOverrides, setEvolutionEnabled } from '../src/evolution/enabled-state.js';
 import { makePromptVersion, makeExperiment } from './helpers.js';
-import type { DarwinExperiment, MemoryProvider } from '../src/types.js';
+import type { DarwinExperiment, MemoryProvider, PendingApproval } from '../src/types.js';
 
 /** Long enough to clear the 2000-char incomplete-run threshold. */
 const LONG_ANSWER = `Sources: https://example.org/a and https://example.org/b. ${'The measured answer continues at length. '.repeat(80)}`;
@@ -110,6 +111,9 @@ before(() => {
   delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
   delete process.env.DARWIN_TELEGRAM_CHAT_ID;
   delete process.env.DARWIN_POSTGRES_URL;
+  // Round 6: without this, a developer with the variable exported gets real
+  // approval_requested lines appended to their own metrics file by a test run.
+  delete process.env.DARWIN_METRICS_JSONL;
   setMaxRunsPerProcess(0);
   setMaxRunWallMs(0);
 
@@ -304,5 +308,151 @@ describe('darwin evolve --force: the same wiring, through the other command', ()
 
     assert.ok(state.abTests['writer'], 'without the gate the forced cycle DOES open a test');
     assert.equal(state.pendingApprovals?.['writer'] ?? null, null);
+  });
+});
+
+/**
+ * Round 6 found four fixes from the earlier rounds with no test at all: all
+ * four could be reverted AT ONCE and every one of 846 tests stayed green,
+ * under a CHANGELOG line claiming each was mutation-checked. Three of them
+ * live in `evolveCommand --reset` and `approveCommand`, which until now no
+ * test called with a proposal actually present.
+ *
+ * The measuring method that found it is worth keeping: revert every suspect
+ * fix simultaneously and run the suite ONCE. Green means all of them are
+ * unguarded; red means measure them one at a time. One run instead of N.
+ */
+describe('the CLI fixes that had no net', () => {
+  /** Park a proposal for `agentName`, with both versions readable. */
+  async function seedProposal(
+    memory: MemoryProvider,
+    agentName: string,
+    opts: { challengerReadable?: boolean } = {},
+  ): Promise<void> {
+    await memory.savePromptVersion(makePromptVersion({
+      version: 'v1', agentName, active: true, parentVersion: null,
+      promptText: 'You are a writer. Be clear. Never invent facts.',
+    }));
+    if (opts.challengerReadable !== false) {
+      await memory.savePromptVersion(makePromptVersion({
+        version: 'v2', agentName, active: false, parentVersion: 'v1',
+        promptText: 'You are a writer. Speculate freely when facts are thin.',
+      }));
+    }
+    const pending: PendingApproval = {
+      versionA: 'v1', versionB: 'v2', minRuns: 8, maxTestDays: 7,
+      proposedAt: new Date().toISOString(),
+      approvalTimeoutDays: 0,
+      changeReason: 'weakness: outputs read flat',
+      generatedBy: 'legacy',
+    };
+    await memory.updateState((s) => {
+      s.activeVersions[agentName] = 'v1';
+      if (!s.pendingApprovals) s.pendingApprovals = {};
+      s.pendingApprovals[agentName] = pending;
+      return s;
+    });
+  }
+
+  it('--reset clears a pending proposal', async () => {
+    // Left behind, the proposal names an incumbent that no longer exists
+    // (reset points the agent back at v1) and blocks evolution until someone
+    // decides on a challenger for a baseline that is gone.
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedProposal(memory, 'writer');
+    await memory.close();
+
+    await evolveCommand(['writer', '--reset']);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(state.pendingApprovals?.['writer'] ?? null, null, 'the slot must be freed');
+  });
+
+  it('--reset moves BOTH sources of truth back to v1, not just the state map', async () => {
+    // run.ts routes on `activeVersions`; `getActivePrompt` reads the `active`
+    // FLAG on the version rows. Writing only the map leaves the agent serving
+    // v1 while the flag says v3, which is the disagreement approveChallenger
+    // has to refuse. The approve side is tested; this is the side that CREATES
+    // the state.
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await memory.savePromptVersion(makePromptVersion({
+      version: 'v1', agentName: 'writer', active: false, parentVersion: null,
+      promptText: 'You are a writer.',
+    }));
+    await memory.savePromptVersion(makePromptVersion({
+      version: 'v3', agentName: 'writer', active: true, parentVersion: 'v1',
+      promptText: 'You are an evolved writer.',
+    }));
+    await memory.updateState((s) => { s.activeVersions['writer'] = 'v3'; return s; });
+    await memory.close();
+
+    await evolveCommand(['writer', '--reset']);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    const active = await verify.getActivePrompt('writer');
+    await verify.close();
+    assert.equal(state.activeVersions['writer'], 'v1', 'routing must serve v1');
+    assert.equal(active?.version, 'v1', 'and the active flag must agree with it');
+  });
+
+  it('approve refuses a proposal whose challenger text is gone', async () => {
+    // Approving it would open a test on a prompt nobody can read, which the
+    // orphan repair in run.ts then clears as dead on the very next run:
+    // approved, then auto-died.
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedProposal(memory, 'writer', { challengerReadable: false });
+    await memory.close();
+
+    await assert.rejects(
+      () => approveCommand(['writer']),
+      /missing from the version history/,
+    );
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(state.abTests['writer'] ?? null, null, 'no test may have opened');
+    assert.ok(state.pendingApprovals?.['writer'], 'and the proposal survives, to be rejected');
+  });
+
+  it('a proposal whose agent is gone can still be rejected', async () => {
+    // Both commands used to check builtinAgents BEFORE looking at the state,
+    // so a proposal left by a renamed or removed agent was undecidable and
+    // undeletable (--reset throws on the same check first).
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedProposal(memory, 'agent-that-was-removed');
+    await memory.close();
+
+    // Approving still refuses: the A/B test needs an agent to run.
+    await assert.rejects(
+      () => approveCommand(['agent-that-was-removed']),
+      /no longer a defined agent/,
+    );
+    // Rejecting only clears state, so it works.
+    await approveCommand(['agent-that-was-removed', '--reject']);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(
+      state.pendingApprovals?.['agent-that-was-removed'] ?? null,
+      null,
+      'the orphaned proposal must be clearable',
+    );
   });
 });

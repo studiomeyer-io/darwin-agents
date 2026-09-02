@@ -36,15 +36,31 @@ before(async () => {
   const dir = mkdtempSync(join(tmpdir(), 'darwin-cli-e2e-'));
   process.chdir(dir);
   process.env.OPENAI_API_KEY = 'test-key-not-real';
-  // Make the DEFAULT provider deterministic (R7 review): with only
-  // OPENAI_API_KEY set, detectDefaultProvider() resolves 'openai'. If a
-  // regression ever lets the critic run on incomplete output again, its
-  // call goes to the openai provider with a fake key and fails FAST —
-  // instead of silently spawning the real Claude CLI.
+  // WARNING, corrected in round 6 of the v0.17 review: this used to claim that
+  // setting only OPENAI_API_KEY makes detectDefaultProvider() resolve 'openai',
+  // so a stray call would fail fast instead of spawning the real Claude CLI.
+  // That is FALSE. `DEFAULT_CONFIG.provider = detectDefaultProvider()` runs at
+  // MODULE level in src/core/agent.ts, so it reads the environment when this
+  // file is IMPORTED, before this hook runs. In CI, where no keys are set, the
+  // frozen provider is claude-cli and there is no fail-fast at all.
+  //
+  // This file is hermetic today only by accident of its fixture: it seeds an
+  // OPEN A/B test, so afterRun returns at step 3 and never reaches the
+  // optimizer, and the incomplete-run guard blocks the critic. `requestCount`
+  // counts mock-server calls only, so a CLI spawn would not raise it; the
+  // failure mode would be a HANGING CI job, not a red assertion.
+  //
+  // If you add a case here WITHOUT an open A/B test, do not trust this hook.
+  // Pin the provider through a darwin.config.ts in the temp cwd and stub
+  // globalThis.fetch, the way tests/cli-run-approval-gate.test.ts does, and
+  // assert the stub's call count so a route around it fails loudly.
   delete process.env.ANTHROPIC_API_KEY;
   // Isolate from any Telegram config in the developer's environment.
   delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
   delete process.env.DARWIN_TELEGRAM_CHAT_ID;
+  // Round 6: without this, a developer with the variable exported gets real
+  // evolution events appended to their own metrics file by a test run.
+  delete process.env.DARWIN_METRICS_JSONL;
   setMaxRunsPerProcess(0);
   setMaxRunWallMs(0);
 

@@ -496,7 +496,38 @@ describe('the CLI commands use buildResolvedEvolutionLoop, never the raw builder
 // A wrong confirmation is not cosmetic here. `--require-approval` printing
 // `requireApproval=false` right after being set is what sent round 1 looking.
 
-describe('both confirmation summaries cover every OVERRIDE_KEY', () => {
+describe('both confirmation summaries bind every OVERRIDE_KEY to its own label', () => {
+  /**
+   * The LABEL each key is printed under, and a value it accepts.
+   *
+   * Round 6: the first version of this guard asserted only
+   * `line.includes(String(value))`. That catches an OMISSION (one key set per
+   * pass, so every other boolean slot reads false), which was the round-1
+   * failure. It does NOT catch the two failure forms that come next: a
+   * rename, and a swap. Both measured green against the value-only check:
+   * cross-wiring describeConfig so `gepa` reads useMerge and `merge` reads
+   * useGepa left 26/26 passing, while `darwin evolve writer --gepa` then
+   * reported "gepa=false, merge=true". A confirmation under the wrong name is
+   * exactly the round-1 trigger ("requireApproval=false right after being
+   * set"), so the binding is what has to be asserted.
+   */
+  const LABEL: Record<string, string> = {
+    useGepa: 'gepa',
+    useMerge: 'merge',
+    paretoGate: 'paretoGate',
+    useCoverage: 'coverage',
+    reflectionModel: 'reflectionModel',
+    useDemos: 'demos',
+    candidateSelection: 'candidateSelection',
+    skipPerfectFeedback: 'skipPerfect',
+    maxMergeInvocations: 'maxMerge',
+    maxTestDays: 'maxTestDays',
+    requireConfidence: 'requireConfidence',
+    confidenceMethod: 'confidenceMethod',
+    requireApproval: 'requireApproval',
+    approvalTimeoutDays: 'approvalTimeoutDays',
+  };
+
   /** A value each key accepts, in override shape. */
   const SAMPLE: Record<string, unknown> = {
     useGepa: true,
@@ -515,19 +546,26 @@ describe('both confirmation summaries cover every OVERRIDE_KEY', () => {
     approvalTimeoutDays: 5,
   };
 
-  it('describeOverride names every key it was given', () => {
+  it('every key has a label and a sample recorded here', () => {
+    // A new key without an entry fails HERE, not silently in the loops below.
     for (const key of OVERRIDE_KEYS) {
-      assert.notEqual(SAMPLE[key], undefined, `this test has no sample value for "${key}"`);
+      assert.notEqual(LABEL[key], undefined, `no printed label recorded for "${key}"`);
+      assert.notEqual(SAMPLE[key], undefined, `no sample value recorded for "${key}"`);
+    }
+  });
+
+  it('describeOverride prints each key under ITS OWN label', () => {
+    for (const key of OVERRIDE_KEYS) {
       const line = describeOverride({ [key]: SAMPLE[key] } as never);
       assert.ok(
-        line.includes(String(SAMPLE[key])),
-        `describeOverride dropped "${key}": it reported "${line}"`,
+        line.includes(`${LABEL[key]}=${SAMPLE[key]}`),
+        `describeOverride did not report "${LABEL[key]}=${SAMPLE[key]}" for "${key}": got "${line}"`,
       );
       assert.notEqual(line, '(none)', `describeOverride reported "(none)" after "${key}" was set`);
     }
   });
 
-  it('describeConfig reflects every key once it is resolved onto the config', () => {
+  it('describeConfig prints each key under ITS OWN label once resolved', () => {
     for (const key of OVERRIDE_KEYS) {
       const resolved = resolveEvolutionConfig(
         baseAgent,
@@ -536,9 +574,42 @@ describe('both confirmation summaries cover every OVERRIDE_KEY', () => {
       assert.ok(resolved, `resolveEvolutionConfig returned nothing for "${key}"`);
       const line = describeConfig(resolved);
       assert.ok(
-        line.includes(String(SAMPLE[key])),
-        `describeConfig dropped "${key}": it reported "${line}"`,
+        line.includes(`${LABEL[key]}=${SAMPLE[key]}`),
+        `describeConfig did not report "${LABEL[key]}=${SAMPLE[key]}" for "${key}": got "${line}"`,
       );
     }
+  });
+
+  it('the boolean labels are not interchangeable: a swap must be caught', () => {
+    // The explicit statement of what the binding check buys over presence.
+    // With only one key set per pass, a cross-wired describeConfig prints the
+    // right VALUES in the wrong SLOTS, and every value is still "present".
+    const onlyGepa = resolveEvolutionConfig(
+      baseAgent,
+      { evolutionConfigOverrides: { [baseAgent.name]: { useGepa: true } } },
+    );
+    const line = describeConfig(onlyGepa!);
+    assert.ok(line.includes('gepa=true'), line);
+    assert.ok(line.includes('merge=false'), `merge must NOT have picked up the gepa value: ${line}`);
+  });
+});
+
+// The usage docblock at the top of cli/evolve.ts is a THIRD hand-maintained
+// flag list in that file, and round 6 found it missing the v0.14 confidence
+// knobs, exactly as the two summaries had been. A comment nobody checks is a
+// comment that drifts.
+describe('the evolve usage docblock lists every persistable flag', () => {
+  it('mentions the CLI spelling of every OVERRIDE_KEY', () => {
+    const src = readFileSync(
+      join(import.meta.dirname, '..', 'src', 'cli', 'evolve.ts'),
+      'utf8',
+    );
+    const docblock = src.slice(0, src.indexOf('*/'));
+    const missing = OVERRIDE_KEYS.filter((key) => !docblock.includes(FLAG_FOR_KEY[key]![0]));
+    assert.deepEqual(
+      missing,
+      [],
+      `the usage docblock does not mention: ${missing.map((k) => FLAG_FOR_KEY[k]![0]).join(', ')}`,
+    );
   });
 });

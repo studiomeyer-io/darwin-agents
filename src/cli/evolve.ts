@@ -22,8 +22,15 @@
  *   --skip-perfect / --no-skip-perfect   drop perfect-score runs from optimizer feedback (v0.11)
  *   --max-merge <n>               lifetime cap on merge-derived challengers (v0.11)
  *   --max-test-days <n>           wall-clock budget per A/B test in days (v0.13)
+ *   --require-confidence / --no-require-confidence   confidence gate on the A/B margin (v0.14)
+ *   --confidence-method <m>       effect-size | msprt | hoeffding | eb (v0.14; eb v0.16)
  *   --require-approval / --no-require-approval   hold challengers for a human (v0.17)
  *   --approval-timeout-days <n>   auto-reject an untouched proposal after n days (v0.17)
+ *
+ * This list is checked: `tests/evolution-config-flags.test.ts` walks
+ * OVERRIDE_KEYS against it. The two v0.14 lines were missing for three
+ * releases, in a file that already had two other hand-maintained lists with
+ * the same hole.
  */
 
 import { createMemory } from '../memory/index.js';

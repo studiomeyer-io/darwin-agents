@@ -59,6 +59,32 @@ export async function evolveCommand(args: string[]): Promise<void> {
 
   // Separate the advanced evolution-config flags from the action flags.
   const { override, rest: flags } = parseEvolutionConfigFlags(args.slice(1));
+
+  // Anything left that is not one of the four action flags is an error, not a
+  // shrug. Round 7 measured what the shrug cost, at the live CLI:
+  //
+  //   darwin evolve writer --rset            -> prints the status block, exit 0
+  //   darwin evolve writer --gepa --enabel   -> persists gepa, swallows the
+  //                                             typo, exit 0, evolution stays OFF
+  //   darwin evolve writer --disbale         -> "Enabled: yes", exit 0
+  //
+  // The last one is the dangerous arm: someone wanted an evolving agent
+  // stopped, the shell said fine, and it kept evolving. The same class was
+  // closed for `darwin approve` in this release ("anything not recognised is
+  // an ERROR, not a shrug") and left open on the neighbouring command, which
+  // is the worse half of a half-fix. Pre-existing since v0.6, not a v0.17
+  // regression, and there is no legitimate non-flag token after the agent
+  // name, so refusing costs nothing.
+  const ACTIONS = new Set(['--enable', '--disable', '--reset', '--force']);
+  const unknown = flags.filter((f) => !ACTIONS.has(f));
+  if (unknown.length > 0) {
+    throw new Error(
+      `darwin evolve: unrecognised ${unknown.length === 1 ? 'argument' : 'arguments'} ` +
+        `${unknown.map((u) => `"${u}"`).join(', ')}.\n` +
+        `  Actions: --enable, --disable, --reset, --force\n` +
+        `  Run "darwin --help" for the persistable evolution flags.`,
+    );
+  }
   const config = await loadConfig();
   const memory = createMemory(config);
   await memory.init();

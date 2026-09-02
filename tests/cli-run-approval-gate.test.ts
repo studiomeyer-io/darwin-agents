@@ -456,3 +456,90 @@ describe('the CLI fixes that had no net', () => {
     );
   });
 });
+
+describe('darwin evolve refuses what it does not understand', () => {
+  // Round 7, measured at the live CLI before the fix:
+  //   darwin evolve writer --rset          -> status block, exit 0
+  //   darwin evolve writer --gepa --enabel -> persists gepa, swallows the typo,
+  //                                           exit 0, evolution stays OFF
+  //   darwin evolve writer --disbale       -> "Enabled: yes", exit 0
+  // The last one is the dangerous arm: someone wanted an evolving agent
+  // stopped, the shell said fine, and it kept evolving. `darwin approve` had
+  // this class closed in round 2; leaving it open on the neighbour was the
+  // worse half of a half-fix.
+  //
+  // These refusals happen before any I/O, so no workspace is needed.
+
+  for (const typo of ['--rset', '--disbale', '--enabel', '--forse']) {
+    it(`throws on "${typo}" instead of doing something else`, async () => {
+      await assert.rejects(
+        () => evolveCommand(['writer', typo]),
+        new RegExp(`unrecognised argument "\\${typo}"`),
+      );
+    });
+  }
+
+  it('refuses BEFORE persisting a valid flag that came with the typo', async () => {
+    // `--gepa --enabel` used to persist gepa and swallow the typo, so the
+    // operator got a confirmation for half of what they typed.
+    freshWorkspace();
+    await assert.rejects(
+      () => evolveCommand(['writer', '--gepa', '--enabel']),
+      /unrecognised argument "--enabel"/,
+    );
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(
+      state.evolutionConfigOverrides?.['writer'] ?? null,
+      null,
+      'nothing may be persisted when the command was not fully understood',
+    );
+  });
+
+  it('names every unrecognised argument, not just the first', async () => {
+    await assert.rejects(
+      () => evolveCommand(['writer', '--rset', '--forse']),
+      /"--rset", "--forse"/,
+    );
+  });
+
+  it('and the four real actions still work', async () => {
+    freshWorkspace();
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await memory.savePromptVersion(makePromptVersion({
+      version: 'v1', agentName: 'writer', active: true, parentVersion: null,
+      promptText: 'You are a writer.',
+    }));
+    await memory.close();
+
+    await evolveCommand(['writer', '--enable']);
+    await evolveCommand(['writer', '--gepa']);
+    await evolveCommand(['writer', '--reset']);
+    await evolveCommand(['writer', '--disable']);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(state.evolutionEnabled?.['writer'], false, '--disable took effect');
+    assert.equal(state.evolutionConfigOverrides?.['writer']?.useGepa, true, '--gepa persisted');
+  });
+});
+
+describe('the integration tests do not write into a developer\'s metrics file', () => {
+  it('clears DARWIN_METRICS_JSONL, so a real run leaks no events', async () => {
+    // Round 7: this was the one round-6 fix with no test. Reverting the two
+    // delete lines left both integration files 10/10 green while eight real
+    // event lines (run_recorded, approval_requested) landed in whatever file
+    // the developer had the variable pointing at.
+    assert.equal(
+      process.env.DARWIN_METRICS_JSONL,
+      undefined,
+      'the before() hook must clear this, or a test run appends to a real metrics file',
+    );
+  });
+});

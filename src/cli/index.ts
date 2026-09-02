@@ -72,6 +72,9 @@ const HELP = `
     --reflection-model <id>       stronger reflection model for GEPA
     --demos / --no-demos          SIMBA-style demo injection (v0.10)
     --candidate-selection <s>     reflection parent: active|best|pareto|epsilon-greedy
+    --skip-perfect / --no-skip-perfect   drop perfect-score runs from optimizer feedback (v0.11)
+    --max-merge <n>               lifetime cap on merge-derived challengers (v0.11)
+    --max-test-days <n>           close an A/B test after n days if it cannot reach minRuns (v0.13)
     --require-confidence / --no-require-confidence   confidence gate on the A/B margin (v0.14)
     --confidence-method <m>       effect-size | msprt | hoeffding | eb (v0.14; eb v0.16)
     --require-approval / --no-require-approval       hold challengers for a human (v0.17)

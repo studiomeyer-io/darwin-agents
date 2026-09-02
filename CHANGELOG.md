@@ -347,9 +347,10 @@ chain.
   and a negative twin.
 
 Every fix in all five rounds is checked against the mutation that would undo
-it. That sentence has been false three times and corrected three times, which
-is exactly why it is worth writing down: it is a claim a reader can check, and
-three readers did.
+it. That sentence has been false three times and corrected three times by the
+time this round ended; round 6 refuted it a fourth time and round 7 measured
+it clean. The running score is kept deliberately: it is a claim a reader can
+check, and four readers did.
 
 ### What the sixth round found (all fixed here)
 
@@ -398,6 +399,13 @@ single time.** Green means none of them were guarded.
   developer with it exported gets real evolution events appended to their own
   metrics file by a test run.
 
+**How the completeness claim is now measured, not remembered:** round 6
+supplied the method and round 7 ran it over the whole release. Revert every
+behavioural fix from every round AT ONCE and run the suite a single time; if
+it stays green, none of them were guarded. Measured over all eleven: 18 tests
+red, and every single revert has at least one red test naming it. One run
+instead of eleven.
+
 **Verification status, stated precisely** (round 5 asked for it and round 6
 sharpened it, both fair): 853 tests pass on Node 20 AND Node 22, under CI
 conditions both times, measured with a PATH containing node but not `claude`
@@ -405,6 +413,46 @@ and with no provider keys exported. Type checks, the adapter guard and the
 benchmark dry run pass on both. The coverage gate passes on Node 22, which is
 the only version CI runs it on. The CI workflow itself has not run on this
 work: the branch is not pushed yet.
+
+### What the seventh round found (all fixed here)
+
+Round 7 answered the question the loop was actually running for: it reverted
+all eleven behavioural fixes from six rounds simultaneously and ran the suite
+once. **18 tests red, every revert named by at least one of them.** The
+completeness claim holds for the behaviour. What it found instead were two
+pre-existing CLI defects that this release's own standard had already ruled
+on for the neighbouring command, and one stale sentence.
+
+- **`darwin evolve` swallowed unknown arguments, and one arm of that was
+  dangerous.** Measured at the live CLI: `--rset` printed the status block and
+  exited 0, so a script believed the reset happened. `--gepa --enabel`
+  persisted `--gepa`, swallowed the typo, exited 0, and left evolution OFF
+  while confirming half the command. Worst: `--disbale` reported "Enabled:
+  yes" and exited 0, so an agent someone wanted stopped kept evolving with the
+  shell's blessing.
+
+  Pre-existing since v0.6 and not a v0.17 regression, but this release closed
+  exactly that class for `darwin approve` in round 2 ("anything not recognised
+  is an ERROR, not a shrug") and left it open on the command next to it, which
+  is the worse half of a half-fix. `darwin evolve` now refuses, before
+  persisting anything, and names every unrecognised argument rather than the
+  first.
+
+- **A fourth hand-maintained flag list, in the most visible place.** Round 6
+  guarded the usage docblock in `cli/evolve.ts`. Round 7 found `darwin --help`
+  missing `--skip-perfect`, `--max-merge` and `--max-test-days`: a
+  complementary hole in the surface people actually discover flags through.
+  The guard had stopped at the file where the previous drift was found, which
+  documents an incident rather than a class. It now walks all three surfaces
+  that list the flags in prose (the docblock, the help text, the README
+  table), each checked by removing one flag from it.
+
+- **The running score in this changelog had not been kept.** It still said the
+  completeness claim was "false three times"; round 6 was the fourth. And the
+  one fix without a mutation probe was round 6's own last one, the
+  `DARWIN_METRICS_JSONL` clearing, whose absence let a test run append real
+  evolution events to a developer's metrics file while both integration files
+  stayed green. Both corrected.
 
 ### Fixed
 

@@ -594,22 +594,51 @@ describe('both confirmation summaries bind every OVERRIDE_KEY to its own label',
   });
 });
 
-// The usage docblock at the top of cli/evolve.ts is a THIRD hand-maintained
-// flag list in that file, and round 6 found it missing the v0.14 confidence
-// knobs, exactly as the two summaries had been. A comment nobody checks is a
-// comment that drifts.
-describe('the evolve usage docblock lists every persistable flag', () => {
-  it('mentions the CLI spelling of every OVERRIDE_KEY', () => {
-    const src = readFileSync(
-      join(import.meta.dirname, '..', 'src', 'cli', 'evolve.ts'),
-      'utf8',
-    );
-    const docblock = src.slice(0, src.indexOf('*/'));
-    const missing = OVERRIDE_KEYS.filter((key) => !docblock.includes(FLAG_FOR_KEY[key]![0]));
-    assert.deepEqual(
-      missing,
-      [],
-      `the usage docblock does not mention: ${missing.map((k) => FLAG_FOR_KEY[k]![0]).join(', ')}`,
-    );
-  });
+// ─── Every surface that LISTS the flags, not just the one that broke ──────
+//
+// Round 6 found the usage docblock in cli/evolve.ts missing the v0.14 knobs
+// and guarded that file. Round 7 then found the `darwin --help` text missing
+// the v0.11 and v0.13 ones: a complementary hole in a surface the guard did
+// not reach, and the MORE visible of the two, because --help is how anyone
+// actually discovers a flag.
+//
+// The lesson is about guard scope, not about either file: a guard written
+// against the file where a drift was found documents the incident. The class
+// is "human-readable list of the persistable flags", and this walks all of
+// them. A seventh surface added later fails here only if someone adds it to
+// this list, which is the honest limit of a source guard and is stated rather
+// than pretended away.
+describe('every surface that lists the flags lists all of them', () => {
+  const SURFACES: ReadonlyArray<{ what: string; file: string[]; slice?: (s: string) => string }> = [
+    {
+      what: 'the usage docblock of `darwin evolve`',
+      file: ['src', 'cli', 'evolve.ts'],
+      slice: (s) => s.slice(0, s.indexOf('*/')),
+    },
+    {
+      what: 'the `darwin --help` text',
+      file: ['src', 'cli', 'index.ts'],
+      // The HELP template literal; everything before `jobs` of the switch.
+      slice: (s) => s.slice(s.indexOf('const HELP'), s.indexOf('export async function')),
+    },
+    {
+      what: 'the flag table in the README',
+      file: ['README.md'],
+      slice: (s) => s.slice(s.indexOf('### Advanced evolution flags')),
+    },
+  ];
+
+  for (const surface of SURFACES) {
+    it(`${surface.what} mentions every OVERRIDE_KEY`, () => {
+      const raw = readFileSync(join(import.meta.dirname, '..', ...surface.file), 'utf8');
+      const text = surface.slice ? surface.slice(raw) : raw;
+      assert.ok(text.length > 0, `the slice for ${surface.what} came back empty`);
+      const missing = OVERRIDE_KEYS.filter((key) => !text.includes(FLAG_FOR_KEY[key]![0]));
+      assert.deepEqual(
+        missing,
+        [],
+        `${surface.what} does not mention: ${missing.map((k) => FLAG_FOR_KEY[k]![0]).join(', ')}`,
+      );
+    });
+  }
 });

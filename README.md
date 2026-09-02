@@ -544,6 +544,12 @@ evolving forever, silently. Rejecting on timeout frees the slot; approving on
 timeout would make the gate decorative. Absence of a decision is not a
 decision, the same reason an A/B timeout never promotes.
 
+The budget is snapshotted onto the proposal like every other parameter, so
+changing it (`--approval-timeout-days 0` included) applies to proposals made
+from then on and not to one already waiting. Going on holiday does not rescue a
+proposal that is about to lapse; approve it, reject it, or let it lapse and let
+the next cycle propose fresh.
+
 Metrics sinks see `approval_requested`, `approval_granted` and
 `approval_rejected` (with `expired: true` when the timeout did it).
 
@@ -828,7 +834,7 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--max-merge <n>` | Lifetime cap on merge-derived challengers — GEPA `max_merge_invocations` (v0.11) |
 | `--max-test-days <n>` | Close an A/B test after n days if it cannot reach `minRuns`; keeps the incumbent, never promotes. `0` = no budget (v0.13) |
 | `--require-approval` / `--no-require-approval` | Hold every challenger for a human decision instead of opening an A/B test (v0.17) |
-| `--approval-timeout-days <n>` | Auto-**reject** an untouched proposal after n days, freeing the slot. Never auto-approves. `0` = wait forever (v0.17) |
+| `--approval-timeout-days <n>` | Auto-**reject** an untouched proposal after n days, freeing the slot. Never auto-approves. `0` = wait forever, for proposals made from then on (v0.17) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.

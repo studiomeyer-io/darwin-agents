@@ -132,6 +132,29 @@ export async function approveCommand(args: string[]): Promise<void> {
   }
 
   const agentName = parsed.agent;
+
+  // A decision flag with no target is an error, not a listing. Round 2:
+  // `darwin approve "$AGENT" --reject` with an unset or empty shell variable
+  // fell through to the listing branch and exited 0, so the script believed the
+  // rejection happened while the challenger stayed pending and approvable by
+  // anyone. Without a timeout it then blocks evolution forever, silently.
+  //
+  // The parser already hard-fails on `--rejct`; shrugging at `--reject` with no
+  // agent would be the same failure with better spelling. An empty string is
+  // caught too: it is falsy, so `parsed.agent` stays undefined.
+  if (!agentName && (parsed.reject || parsed.force || parsed.reason !== undefined)) {
+    const given = [
+      parsed.reject ? '--reject' : null,
+      parsed.force ? '--force' : null,
+      parsed.reason !== undefined ? '--reason' : null,
+    ].filter(Boolean).join(', ');
+    throw new Error(
+      `darwin approve: ${given} needs an agent to act on, and none was given ` +
+        `(an empty shell variable looks exactly like this).\n` +
+        `  Run "darwin approve" with no flags to list what is pending.`,
+    );
+  }
+
   const config = await loadConfig();
   const memory = createMemory(config);
   await memory.init();

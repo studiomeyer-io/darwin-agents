@@ -746,6 +746,59 @@ describe('v0.17 approval gate: the slot is claimed under the lock, not before th
     assert.ok(memory._state.pendingApprovals!['researcher'], 'the proposal survives');
   });
 
+  it('--force WORKS in the disagreement state it is advertised for', async () => {
+    // Round 2 found the two halves of the round-1 fix reading different
+    // sources: the pre-check picked the FLAG version, the in-lock pin compared
+    // against ROUTING, so in exactly the state whose error message advertises
+    // --force, --force could never succeed. It reported "changed while
+    // approving" (a race diagnosis with no second process in sight) and the
+    // only way out was --reset, which destroys the proposal AND the evolved
+    // incumbent that --force exists to preserve.
+    const { memory, loop } = scenario({ enabled: true, requireApproval: true });
+    await loop.forceEvolve('researcher');
+    // Pre-v0.17 --reset state: routing serves v1, the flag still says v3.
+    memory._versions.push(
+      makePromptVersion({ version: 'v3', agentName: 'researcher', active: false, promptText: SAFE_PROMPT }),
+    );
+    for (const v of memory._versions) v.active = v.version === 'v3';
+    memory._state.activeVersions['researcher'] = 'v1';
+
+    const res = await loop.approveChallenger('researcher', { force: true });
+
+    assert.equal(res.approved, true, `--force must get through here: ${res.message}`);
+    const test = memory._state.abTests['researcher'] as ABTest;
+    assert.equal(
+      test.versionA,
+      'v1',
+      'the arm must be what routing serves, since that is what users get',
+    );
+    assert.equal(test.versionB, 'v2');
+    assert.equal(memory._state.pendingApprovals!['researcher'], null);
+  });
+
+  it('the refusal names the version --force will actually test against', async () => {
+    // The message must not advertise an arm the code will not use. Round 2:
+    // it named the flag version while the code would have used routing.
+    const { memory, loop } = scenario({ enabled: true, requireApproval: true });
+    await loop.forceEvolve('researcher');
+    memory._versions.push(
+      makePromptVersion({ version: 'v3', agentName: 'researcher', active: false, promptText: SAFE_PROMPT }),
+    );
+    for (const v of memory._versions) v.active = v.version === 'v3';
+    memory._state.activeVersions['researcher'] = 'v1';
+
+    const refused = await loop.approveChallenger('researcher');
+    assert.equal(refused.approved, false);
+
+    const forced = await loop.approveChallenger('researcher', { force: true });
+    assert.equal(forced.approved, true);
+    const usedArm = (memory._state.abTests['researcher'] as ABTest).versionA;
+    assert.ok(
+      refused.message.includes(`--force to test against ${usedArm}`),
+      `message promised something other than ${usedArm}: ${refused.message}`,
+    );
+  });
+
   it('approving refuses when routing and the active flag disagree', async () => {
     // The state after a pre-v0.17 `--reset`: routing serves v1, the flag still
     // says v3. Opening a test on either answer is wrong, so it refuses.

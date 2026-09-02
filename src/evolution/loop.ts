@@ -873,10 +873,26 @@ export class DarwinLoop {
           `${routedIncumbent} while the version flag says ${flagIncumbent}. Approving would open ` +
           `a test whose arms do not match what runs. Fix the state first ` +
           `("darwin evolve ${agentName} --reset" returns both to v1), or re-run with --force to ` +
-          `test against ${flagIncumbent}.`,
+          `test against ${routedIncumbent}, the version that actually serves traffic.`,
       };
     }
-    const liveIncumbent = flagIncumbent;
+    // ROUTING, not the flag. Round 2 caught the two halves of the round-1 fix
+    // reading different sources: the pre-check picked the flag version while
+    // the in-lock pin below compares against `activeVersions`, so in exactly
+    // the disagreement state the message advertised --force for, --force could
+    // never succeed. It reported "changed while approving", which is a race
+    // diagnosis for a state with no second process in it, and the only way out
+    // was --reset, destroying both the proposal and the evolved incumbent that
+    // --force exists to preserve.
+    //
+    // Routing is also the right source on the merits: `activeVersions` is what
+    // run.ts serves, so testing against it means testing against what users
+    // actually get. Arms resolve by version LABEL (resolveRunPrompt), not by
+    // the active flag, and whoever wins the test gets the flag through
+    // activateVersion, which repairs the disagreement as a side effect.
+    //
+    // Outside a disagreement the two are equal, so this changes nothing there.
+    const liveIncumbent = routedIncumbent;
     if (liveIncumbent !== pending.versionA && opts.force !== true) {
       return {
         approved: false,
@@ -946,8 +962,9 @@ export class DarwinLoop {
       return {
         approved: false,
         message:
-          `The proposal for "${agentName}" changed while approving (another process approved, ` +
-          `rejected it, or opened a test). Nothing was started. Check "darwin status ${agentName}".`,
+          `The state for "${agentName}" changed while approving (another process resolved the ` +
+          `proposal, opened a test, or moved the active version). Nothing was started. ` +
+          `Check "darwin status ${agentName}".`,
       };
     }
 

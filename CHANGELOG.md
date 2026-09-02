@@ -146,7 +146,49 @@ changed behaviour:
   `forceEvolve`, so the same branch in `afterRun` (the path a cron-driven fleet
   uses exclusively) could be mutated to `if (false)` unnoticed; covered now.
 
-Every fix above is checked against the mutation that would undo it.
+### What the second round found (all fixed here)
+
+Round 2 confirmed all nine round-1 fixes hold, and found four more. The best of
+them is an interaction between the two halves of ONE round-1 fix, which neither
+half showed on its own:
+
+- **`--force` was structurally dead in exactly the state its own error message
+  advertised it for.** The pre-check chose the incumbent from the FLAG source
+  while the in-lock pin compared against the ROUTING source, so in a
+  disagreement (a pre-v0.17 `--reset`, or a crash between the new reset's two
+  writes) `--force` could never succeed. It reported "changed while approving",
+  a race diagnosis for a state with no second process in it, and the only way
+  out was `--reset`, destroying both the proposal and the evolved incumbent
+  that `--force` exists to preserve. Both halves read routing now, which is
+  also right on the merits: `activeVersions` is what run.ts serves, arms
+  resolve by version label, and the eventual winner's activation repairs the
+  disagreement anyway.
+
+- **A decision flag with no target listed instead of deciding, and exited 0.**
+  `darwin approve "$AGENT" --reject` with an unset shell variable fell into the
+  listing branch, so the script believed the rejection happened while the
+  challenger stayed pending and approvable by anyone. The parser hard-failed on
+  `--rejct` but shrugged at `--reject` with no agent, which is the same failure
+  with better spelling.
+
+- **The wiring guard stopped four hops short of the effect.** It walked
+  `OVERRIDE_KEYS`, recognition, parsing and detection; the chain also runs
+  through `resolveEvolutionConfig` into the loop, and that last hop was
+  unpinned. Dropping the persisted `requireApproval` inside the resolver left
+  all 821 tests green while, in production, `darwin evolve <agent>
+  --require-approval` would confirm itself and every later run would go
+  UNGATED. Same shape as the `hasAnyEvolutionFlag` hole one level deeper: a
+  guard that stops before the value changes BEHAVIOUR proves only bookkeeping.
+  There is now an end-to-end test, plus its negative twin so it cannot go
+  vacuous.
+
+- **The timeout budget is snapshotted, and the README did not say so.** Setting
+  `--approval-timeout-days 0` to rescue a proposal that is about to lapse does
+  not work: the snapshot on the proposal wins. Consistent with every other
+  parameter here and fail-safe (it auto-rejects), but it was unqualified.
+
+Every fix in both rounds is checked against the mutation that would undo it,
+including the two the reviewer named as uncovered.
 
 ### Fixed
 

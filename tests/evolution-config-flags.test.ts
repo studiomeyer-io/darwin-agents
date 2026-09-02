@@ -26,6 +26,12 @@ import {
   setEvolutionConfigOverrides,
 } from '../src/evolution/enabled-state.js';
 import { SqliteMemoryProvider } from '../src/memory/sqlite-memory.js';
+import { DarwinLoop } from '../src/evolution/loop.js';
+import { SafetyGate } from '../src/evolution/safety.js';
+import { ExperimentTracker } from '../src/evolution/tracker.js';
+import { PatternDetector } from '../src/evolution/patterns.js';
+import { PromptOptimizer } from '../src/evolution/optimizer.js';
+import { createMockMemory, makeExperiment, makePromptVersion } from './helpers.js';
 import type { AgentDefinition, DarwinConfig, DarwinState } from '../src/types.js';
 
 const baseAgent: AgentDefinition = {
@@ -263,5 +269,114 @@ describe('every OVERRIDE_KEY is wired through all four places', () => {
   it('hasAnyEvolutionFlag is false for an empty override and for explicit undefined', () => {
     assert.equal(hasAnyEvolutionFlag({}), false);
     assert.equal(hasAnyEvolutionFlag({ useGepa: undefined }), false);
+  });
+});
+
+// ─── The chain ends at the EFFECT, not at the bookkeeping ─────────────────
+//
+// The guard above walks four places (OVERRIDE_KEYS, isEvolutionConfigFlag,
+// applyEvolutionFlag, hasAnyEvolutionFlag). Round 2 of the adversarial review
+// found there are FIVE: resolveEvolutionConfig feeds the agent definition that
+// the loop reads, and that last hop was unpinned. A mutation dropping the
+// persisted `requireApproval` inside resolveEvolutionConfig left all 821 tests
+// green, while in production `darwin evolve writer --require-approval` would
+// confirm itself and every later run would go UNGATED, putting challengers on
+// live traffic behind a gate the operator believes is armed.
+//
+// Same shape as round 1's hasAnyEvolutionFlag hole, one level deeper: a guard
+// that stops before the value changes BEHAVIOUR proves only bookkeeping.
+
+describe('a persisted override reaches the behaviour it controls', () => {
+  const gateAgent: AgentDefinition = {
+    ...baseAgent,
+    systemPrompt: 'You are a research agent. Never fabricate sources.',
+    evolution: { enabled: true },
+  };
+
+  /** Build a loop the way the CLI does: static config + persisted overrides. */
+  function loopFromState(
+    memory: ReturnType<typeof createMockMemory>,
+    state: DarwinState,
+  ): DarwinLoop {
+    const resolved = resolveEvolutionConfig(gateAgent, state);
+    const agent: AgentDefinition = resolved ? { ...gateAgent, evolution: resolved } : gateAgent;
+    return new DarwinLoop({
+      memory,
+      tracker: new ExperimentTracker(memory),
+      safety: new SafetyGate(),
+      patterns: new PatternDetector(memory),
+      optimizer: new PromptOptimizer(async () => 'You are a meticulous research agent. Never fabricate sources.'),
+      agent,
+    });
+  }
+
+  function seeded(): ReturnType<typeof createMockMemory> {
+    const memory = createMockMemory();
+    memory._versions.push(
+      makePromptVersion({
+        version: 'v1',
+        agentName: gateAgent.name,
+        active: true,
+        promptText: gateAgent.systemPrompt,
+      }),
+    );
+    for (let i = 0; i < 3; i++) {
+      memory._experiments.push(
+        makeExperiment({
+          agentName: gateAgent.name, promptVersion: 'v1', taskType: 'tech', success: true,
+          metrics: { qualityScore: 9, sourceCount: 12, outputLength: 6000, errorCount: 0, durationMs: 30000 },
+        }),
+      );
+    }
+    return memory;
+  }
+
+  it('persisted --require-approval actually HOLDS the challenger on a later run', async () => {
+    const memory = seeded();
+    // Exactly what `darwin evolve <agent> --require-approval` writes.
+    await setEvolutionConfigOverrides(memory, gateAgent.name, { requireApproval: true });
+
+    // A fresh process: static config says nothing about approval, the override
+    // has to carry it all the way to the loop's behaviour.
+    const state = await memory.getState();
+    const result = await loopFromState(memory, state).forceEvolve(gateAgent.name);
+
+    assert.equal(result.abTestStarted, false, 'the persisted gate must hold the challenger');
+    assert.equal(result.awaitingApproval, true);
+    assert.equal(memory._state.abTests[gateAgent.name] ?? null, null, 'no test may open');
+    assert.ok(memory._state.pendingApprovals?.[gateAgent.name], 'a proposal must be recorded');
+  });
+
+  it('and without the override the same setup opens the test, so the test is not vacuous', async () => {
+    const memory = seeded();
+    const state = await memory.getState();
+    const result = await loopFromState(memory, state).forceEvolve(gateAgent.name);
+
+    assert.equal(result.abTestStarted, true);
+    assert.equal(memory._state.pendingApprovals?.[gateAgent.name] ?? null, null);
+  });
+
+  it('persisted --approval-timeout-days reaches the loop as well', async () => {
+    const memory = seeded();
+    await setEvolutionConfigOverrides(memory, gateAgent.name, {
+      requireApproval: true,
+      approvalTimeoutDays: 2,
+    });
+    const state = await memory.getState();
+    const loop = loopFromState(memory, state);
+    await loop.forceEvolve(gateAgent.name);
+
+    // Backdate past the persisted budget; the snapshot carries it because the
+    // proposal was written by a loop that had resolved the override.
+    const pending = memory._state.pendingApprovals![gateAgent.name]!;
+    assert.equal(pending.approvalTimeoutDays, 2, 'the resolved budget is snapshotted');
+    pending.proposedAt = new Date(Date.now() - 3 * 86400_000).toISOString();
+
+    await loop.forceEvolve(gateAgent.name);
+    assert.equal(
+      memory._state.pendingApprovals![gateAgent.name],
+      null,
+      'the persisted timeout must actually expire the proposal',
+    );
   });
 });

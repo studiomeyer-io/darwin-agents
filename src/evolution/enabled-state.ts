@@ -70,8 +70,16 @@ export async function setEvolutionEnabled(
 
 // ─── Advanced evolution-config overrides (useGepa / useMerge / …) ───
 
-/** The keys the CLI is allowed to override + persist. */
-const OVERRIDE_KEYS = [
+/**
+ * The keys the CLI is allowed to override + persist.
+ *
+ * Exported since v0.17.0 so a guard test can walk it. Adding a flag used to
+ * mean editing four places by hand (this list, `isEvolutionConfigFlag`,
+ * `applyEvolutionFlag`, `hasAnyEvolutionFlag`); the fourth was silently missed
+ * for `--require-approval` and the flag persisted while the CLI reported it as
+ * unset. The test now walks this list and fails on the next omission.
+ */
+export const OVERRIDE_KEYS = [
   'useGepa',
   'useMerge',
   'paretoGate',
@@ -84,6 +92,8 @@ const OVERRIDE_KEYS = [
   'maxTestDays',
   'requireConfidence',
   'confidenceMethod',
+  'requireApproval',
+  'approvalTimeoutDays',
 ] as const;
 
 /**
@@ -133,6 +143,8 @@ export function resolveEvolutionConfig(
           resolved.maxMergeInvocations = value as number;
         } else if (key === 'maxTestDays') {
           resolved.maxTestDays = value as number;
+        } else if (key === 'approvalTimeoutDays') {
+          resolved.approvalTimeoutDays = value as number;
         } else if (key === 'requireConfidence') {
           // The confidence knobs live on the nested safety block (they are
           // SafetyThresholds fields, not loop fields) — merge, don't replace,
@@ -145,7 +157,8 @@ export function resolveEvolutionConfig(
           };
         } else {
           // Remaining override keys are all boolean flags (useGepa / useMerge /
-          // paretoGate / useCoverage / useDemos / skipPerfectFeedback).
+          // paretoGate / useCoverage / useDemos / skipPerfectFeedback /
+          // requireApproval).
           resolved[key] = value as boolean;
         }
       }

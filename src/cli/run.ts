@@ -569,6 +569,12 @@ async function runCommandInner(
 
     if (evoResult.rolledBack) {
       console.log(`[darwin] ROLLBACK: ${evoResult.message}`);
+    } else if (evoResult.awaitingApproval) {
+      // v0.17.0: its own branch, above the generic tail. A held proposal needs
+      // a person, and the plain `[darwin] <message>` line reads like every
+      // other "nothing to do here" status, which is exactly how an agent
+      // quietly stops evolving.
+      console.log(`[darwin] APPROVAL NEEDED: ${evoResult.message}`);
     } else if (evoResult.abTestStarted) {
       console.log(`[darwin] EVOLVED: ${evoResult.message}`);
     } else if (evoResult.abTestCompleted) {

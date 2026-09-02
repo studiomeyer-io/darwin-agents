@@ -40,6 +40,7 @@ export type {
   McpServerConfig,
   MemoryProvider,
   MetricWeights,
+  PendingApproval,
   PromptVersion,
   PromptVersionStats,
   RunResult,

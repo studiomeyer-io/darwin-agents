@@ -481,6 +481,85 @@ Closes the loop in three lines. Defaults to zero-config local memory; one
 config switch points at Mem0 / Zep / Letta / Cognee / a self-hosted MCP
 server / your own.
 
+### Human approval gate (v0.17, opt-in)
+
+Up to v0.16 a generated challenger went straight into the A/B test. That is the
+right default for an unattended loop, and the wrong one when the agent writes
+something a customer reads: half the runs in a test use the challenger, so a
+bad mutation is not a proposal you can look at later, it is already live on
+half your traffic.
+
+Turn the gate on and the loop still does everything except open the test:
+
+```bash
+darwin evolve writer --require-approval
+darwin evolve writer --approval-timeout-days 7    # optional, see below
+```
+
+```ts
+// or in darwin.config.ts / the agent definition
+evolution: { enabled: true, requireApproval: true, approvalTimeoutDays: 7 }
+```
+
+The challenger is generated, persisted as a real prompt version, and parked:
+
+```
+$ darwin status writer
+  AWAITING APPROVAL: v3 to v4
+    proposed 2026-09-02, no test running
+    decide: darwin approve writer
+```
+
+```bash
+darwin approve                          # every proposal across all agents
+darwin approve writer                   # print both prompts in full, then approve
+darwin approve writer --reject          # discard it, free the slot
+darwin approve writer --reject --reason "drops the citation rule"
+```
+
+Four properties worth knowing, because each one is a decision and not an
+accident:
+
+**Approving starts the test that was proposed, not a fresh one.** `minRuns`,
+the wall-clock budget, and the incumbent are all snapshotted at proposal time.
+Recomputing them at approval would open a test with a different bar than the
+one described in the notification. (Same reason `ABTest.maxTestDays` has been
+snapshotted since v0.13.1.) The A/B clock, however, starts when the test
+starts: time spent waiting for a human is not time spent collecting data.
+
+**A pending proposal blocks the next one.** Without that, the next qualifying
+run would generate a second challenger and overwrite the first, throwing away
+exactly the thing you were asked to look at. Both entry points refuse:
+`afterRun` and `darwin evolve --force`.
+
+**A moved incumbent refuses.** If a rollback or a manual activation changed the
+active prompt since the proposal, approving would test the challenger against a
+different baseline than the one it was generated from, which answers a
+different question. Reject it and let the next cycle propose fresh, or
+`darwin approve writer --force` to test against whatever is live now.
+
+**The timeout auto-REJECTS and never auto-approves.** `approvalTimeoutDays` is
+opt-in and exists for one failure mode: a forgotten proposal stops the agent
+evolving forever, silently. Rejecting on timeout frees the slot; approving on
+timeout would make the gate decorative. Absence of a decision is not a
+decision, the same reason an A/B timeout never promotes.
+
+Metrics sinks see `approval_requested`, `approval_granted` and
+`approval_rejected` (with `expired: true` when the timeout did it).
+
+Two things the gate does NOT protect against, said plainly:
+
+- **Arming it mid-run.** `darwin run` resolves the agent's config once, before
+  the run, and a run takes minutes. Turn the gate on while one is in flight and
+  that run can still open an A/B test the old way. It happens once, at the
+  moment you arm it; every later run is gated.
+- **`darwin approve` is strict on purpose.** The bare command approves, so an
+  unrecognised token is an error rather than a shrug: `--rejct`, `-reject` and
+  `--reject=true` all fail loudly instead of quietly approving. A typo in
+  `--reject` used to put the challenger on roughly half of live traffic, and the
+  only way to stop the resulting test also throws the evolved incumbent back to
+  v1.
+
 ### Why this is different
 
 Existing self-evolving agent frameworks pick one memory backend and stay
@@ -715,6 +794,10 @@ darwin evolve writer --disable     # Disable self-evolution (persisted)
 darwin evolve writer --reset       # Reset to v1
 darwin evolve writer --force       # Force one optimization cycle now
 
+darwin approve                     # List challengers held by the approval gate
+darwin approve writer              # Show both prompts, then start the proposed A/B test
+darwin approve writer --reject     # Discard the proposal, free the slot
+
 darwin create my-agent             # Scaffold a new agent
 ```
 
@@ -744,6 +827,8 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--skip-perfect` / `--no-skip-perfect` | Drop perfect-score runs from optimizer feedback — GEPA `skip_perfect_score` (v0.11) |
 | `--max-merge <n>` | Lifetime cap on merge-derived challengers — GEPA `max_merge_invocations` (v0.11) |
 | `--max-test-days <n>` | Close an A/B test after n days if it cannot reach `minRuns`; keeps the incumbent, never promotes. `0` = no budget (v0.13) |
+| `--require-approval` / `--no-require-approval` | Hold every challenger for a human decision instead of opening an A/B test (v0.17) |
+| `--approval-timeout-days <n>` | Auto-**reject** an untouched proposal after n days, freeing the slot. Never auto-approves. `0` = wait forever (v0.17) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.
@@ -800,7 +885,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 - **LLM-as-Judge bias**: Critics use LLMs to evaluate LLM outputs. Each agent is scored by a **multi-dimension critic set** (several scoring rubrics per agent type, not a single number). When more than one provider key is present, the CLI also spreads those critics across model families — e.g. GPT for one, Claude for another — to blunt single-model self-preference; with one provider they all run on it. Inherent judge bias still exists. [Research context](https://openreview.net/forum?id=Ns8zGZ0lmM).
 - **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes from the observed spread, as a throughput heuristic rather than a power calculation. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate, v0.7 added sequential tests (`confidenceMethod: 'msprt'` / `'hoeffding'`), and v0.16 added `'eb'` (empirical Bernstein: calibrated like Hoeffding, variance-adaptive like mSPRT). Since v0.14 they are one config block away: `evolution.safety: { requireConfidence: true, confidenceMethod: 'eb' }` or `darwin evolve <agent> --require-confidence --confidence-method eb`, with no hand-wired `SafetyGate` needed. The default path remains the simple threshold for zero-config use. **What those tests guarantee, what they only approximate, and the boundary we shipped wrong until v0.15, are all in [statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee). Read it before treating a promotion as a significant result.**
 - **Our numbers are our own**: the [benchmark](benchmark/) is reproducible (frozen tasks, both prompts, the scoring loop, all in the repo) but it is ten tasks scored by an LLM judge, and the production figures quoted anywhere in this README come from our own fleet with our own critics. Nobody independent has evaluated Darwin. Treat every number here as a starting point for your own measurement, not as evidence.
-- **No human-in-the-loop approval**: Prompt mutations go directly to A/B testing. Telegram notifications inform you, but there's no approval gate before testing starts.
+- **No human-in-the-loop approval by default**: prompt mutations go straight to A/B testing unless you turn on the v0.17 approval gate (`evolution.requireApproval` / `darwin evolve <agent> --require-approval`). With the gate off (the default, and how every release up to v0.16 behaved) Telegram tells you a challenger started, it does not ask you. See [approval gate](#human-approval-gate-v017-opt-in).
 
 ## Contributing
 

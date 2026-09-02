@@ -30,6 +30,63 @@ export function loadNotificationConfig(): NotificationConfig {
 }
 
 /**
+ * v0.17.0: notify that a challenger is waiting for a human decision.
+ *
+ * Deliberately more urgent in wording than `notifyEvolutionStarted`: with the
+ * approval gate on, NOTHING happens until someone acts, so a message that
+ * reads like a status update would let an agent quietly stop evolving.
+ */
+export async function notifyApprovalRequired(
+  config: NotificationConfig,
+  agentName: string,
+  incumbent: string,
+  challenger: string,
+  changeReason: string,
+  minRuns: number,
+): Promise<void> {
+  const msg = [
+    `⏸️ *Darwin: approval needed*`,
+    ``,
+    `Agent: \`${agentName}\``,
+    `Proposed: *${challenger}* (from ${incumbent})`,
+    `Reason: ${changeReason}`,
+    ``,
+    `No A/B test is running. Nothing changes until you decide.`,
+    ``,
+    `Approve: \`darwin approve ${agentName}\` (starts ${incumbent} vs ${challenger}, ${minRuns} runs per arm)`,
+    `Reject: \`darwin approve ${agentName} --reject\``,
+  ].join('\n');
+
+  await sendTelegram(config, msg);
+}
+
+/**
+ * v0.17.0: notify that a proposal was auto-rejected for want of a decision.
+ *
+ * The counterpart to {@link notifyABTestTimeout}: a slot that frees itself
+ * without a word is invisible to whoever was supposed to decide.
+ */
+export async function notifyApprovalExpired(
+  config: NotificationConfig,
+  agentName: string,
+  incumbent: string,
+  challenger: string,
+  budgetDays: number,
+): Promise<void> {
+  const msg = [
+    `⌛ *Darwin: proposal expired*`,
+    ``,
+    `Agent: \`${agentName}\``,
+    `Rejected: ${challenger} (no decision within ${budgetDays}d)`,
+    ``,
+    `${incumbent} stays active. It was never tested, so nothing was learned about it.`,
+    `The next evolution cycle can propose a new challenger.`,
+  ].join('\n');
+
+  await sendTelegram(config, msg);
+}
+
+/**
  * Notify that an A/B test completed and a winner was activated.
  */
 export async function notifyABTestComplete(

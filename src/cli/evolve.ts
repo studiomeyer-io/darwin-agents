@@ -22,6 +22,8 @@
  *   --skip-perfect / --no-skip-perfect   drop perfect-score runs from optimizer feedback (v0.11)
  *   --max-merge <n>               lifetime cap on merge-derived challengers (v0.11)
  *   --max-test-days <n>           wall-clock budget per A/B test in days (v0.13)
+ *   --require-approval / --no-require-approval   hold challengers for a human (v0.17)
+ *   --approval-timeout-days <n>   auto-reject an untouched proposal after n days (v0.17)
  */
 
 import { createMemory } from '../memory/index.js';
@@ -79,11 +81,41 @@ export async function evolveCommand(args: string[]): Promise<void> {
     await setEvolutionEnabled(memory, agentName, false);
     console.log(`[darwin] Evolution DISABLED for ${agentName}`);
   } else if (flags.includes('--reset')) {
-    const state = await memory.getState();
-    state.activeVersions[agentName] = 'v1';
-    state.abTests[agentName] = null;
-    state.consecutiveFailures[agentName] = 0;
-    await memory.saveState(state);
+    // v0.17.0 — was getState + mutate + saveState, which writes the WHOLE state
+    // blob from a snapshot taken before the awaits. Any write another process
+    // made in between (an A/B test starting for a different agent, a proposal
+    // landing) was silently overwritten: `darwin evolve A --reset` could erase
+    // agent B's pending approval, leaving Telegram saying "approval needed"
+    // while `darwin approve B` says nothing is pending. updateState runs under
+    // the same write lock every other state writer uses.
+    await memory.updateState((state) => {
+      state.activeVersions[agentName] = 'v1';
+      state.abTests[agentName] = null;
+      state.consecutiveFailures[agentName] = 0;
+      // A reset that leaves a pending proposal behind is worse than no reset.
+      // The proposal names an incumbent that no longer exists (we just pointed
+      // the agent back at v1), and until someone decides on it the agent cannot
+      // evolve at all. Clearing it is the same "free the slot" move `--reset`
+      // already makes for a running A/B test.
+      if (state.pendingApprovals?.[agentName]) {
+        state.pendingApprovals[agentName] = null;
+      }
+      return state;
+    });
+    // The state map alone was never the whole reset. run.ts ROUTES on
+    // `activeVersions`, but `getActivePrompt` reads the `active` FLAG on the
+    // version rows, and only the map was being written: after a reset the
+    // agent served v1 while the flag still said v3, so the next cycle proposed
+    // "v3 to v4" and approving it put 50% of traffic back on the version the
+    // reset was trying to leave. Both sources move together now.
+    const versions = await memory.getAllPromptVersions(agentName);
+    for (const pv of versions) {
+      const shouldBeActive = pv.version === 'v1';
+      if (pv.active !== shouldBeActive) {
+        pv.active = shouldBeActive;
+        await memory.savePromptVersion(pv);
+      }
+    }
     console.log(`[darwin] Evolution RESET for ${agentName}. Back to v1.`);
   } else if (flags.includes('--force')) {
     // On-demand manual trigger: run the loop's variant-generation + A/B-start
@@ -104,6 +136,11 @@ export async function evolveCommand(args: string[]): Promise<void> {
     const evoResult = await loop.forceEvolve(agentName);
     if (evoResult.abTestStarted) {
       console.log(`[darwin] EVOLVED: ${evoResult.message}`);
+    } else if (evoResult.awaitingApproval) {
+      // v0.17.0: same reason as in run.ts. `--force` that produced a proposal
+      // did something and needs a decision; the plain tail below reads like a
+      // refusal.
+      console.log(`[darwin] APPROVAL NEEDED: ${evoResult.message}`);
     } else {
       console.log(`[darwin] ${evoResult.message}`);
     }
@@ -150,6 +187,14 @@ function describeOverride(o: EvolutionConfigOverride): string {
   if (o.skipPerfectFeedback !== undefined) parts.push(`skipPerfect=${o.skipPerfectFeedback}`);
   if (o.maxMergeInvocations !== undefined) parts.push(`maxMerge=${o.maxMergeInvocations}`);
   if (o.maxTestDays !== undefined) parts.push(`maxTestDays=${o.maxTestDays}`);
+  // v0.14's two confidence knobs were persistable from the day they shipped but
+  // never made it into this summary, so `--require-confidence` confirmed itself
+  // with "(none)". Added here alongside the v0.17 pair rather than left as the
+  // one hole next to the fix.
+  if (o.requireConfidence !== undefined) parts.push(`requireConfidence=${o.requireConfidence}`);
+  if (o.confidenceMethod !== undefined) parts.push(`confidenceMethod=${o.confidenceMethod}`);
+  if (o.requireApproval !== undefined) parts.push(`requireApproval=${o.requireApproval}`);
+  if (o.approvalTimeoutDays !== undefined) parts.push(`approvalTimeoutDays=${o.approvalTimeoutDays}`);
   return parts.length > 0 ? parts.join(', ') : '(none)';
 }
 
@@ -163,6 +208,10 @@ function describeConfig(evo: EvolutionConfig | undefined): string {
     `coverage=${evo.useCoverage ?? false}`,
     `demos=${evo.useDemos ?? false}`,
     `skipPerfect=${evo.skipPerfectFeedback ?? false}`,
+    // v0.17: an always-shown slot, not an only-when-set one. This flag decides
+    // whether the loop measures anything at all, so "not mentioned" must not be
+    // readable as "not relevant".
+    `requireApproval=${evo.requireApproval ?? false}`,
   ];
   if (evo.reflectionModel) parts.push(`reflectionModel=${evo.reflectionModel}`);
   if (evo.candidateSelection && evo.candidateSelection !== 'active') {
@@ -174,5 +223,17 @@ function describeConfig(evo: EvolutionConfig | undefined): string {
   // Same rule as maxMerge — unset means "no wall-clock budget", so it is only
   // worth a slot in the summary once someone has set it.
   if (evo.maxTestDays !== undefined) parts.push(`maxTestDays=${evo.maxTestDays}`);
+  // Same only-when-set rule as maxTestDays: unset means the proposal waits
+  // indefinitely, which is the default and needs no slot.
+  if (evo.approvalTimeoutDays !== undefined) {
+    parts.push(`approvalTimeoutDays=${evo.approvalTimeoutDays}`);
+  }
+  // v0.14 knobs, same omission as in describeOverride above.
+  if (evo.safety?.requireConfidence !== undefined) {
+    parts.push(`requireConfidence=${evo.safety.requireConfidence}`);
+  }
+  if (evo.safety?.confidenceMethod !== undefined) {
+    parts.push(`confidenceMethod=${evo.safety.confidenceMethod}`);
+  }
   return parts.join(', ');
 }

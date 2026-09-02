@@ -39,9 +39,13 @@ export async function statusCommand(args: string[]): Promise<void> {
       const version = state.activeVersions[name] ?? 'v1';
       const failures = state.consecutiveFailures[name] ?? 0;
       const abTest = state.abTests[name];
+      // v0.17.0: its own icon, ahead of the A/B one. A held proposal is not
+      // "running" and not "fine": it needs a person, and the overview is the
+      // place where that has to be noticeable without asking per agent.
+      const held = state.pendingApprovals?.[name];
 
       const bar = count > 0 ? '█'.repeat(Math.min(count, 20)) + '░'.repeat(Math.max(0, 20 - count)) : '░'.repeat(20);
-      const statusIcon = failures > 2 ? '⚠' : abTest ? '🔄' : count > 0 ? '✓' : '·';
+      const statusIcon = failures > 2 ? '⚠' : held ? '⏸' : abTest ? '🔄' : count > 0 ? '✓' : '·';
 
       console.log(`║  ${statusIcon} ${name.padEnd(15)} ${version.padEnd(4)} ${bar} ${String(count).padStart(3)} runs ║`);
     }
@@ -113,6 +117,20 @@ async function showAgentStatus(
     console.log(`║  A/B Test: ${abTest.versionA} vs ${abTest.versionB} (${abTest.runsA}/${abTest.runsB} runs)${' '.repeat(Math.max(0, 20))}║`);
   }
 
+  // v0.17.0: a proposal held by the approval gate stops evolution entirely
+  // until someone decides, so it has to be visible here. A silent block is
+  // exactly the failure mode the timeout exists to prevent, and the timeout
+  // is opt-in.
+  const pending = typedState.pendingApprovals?.[agentName];
+  if (pending) {
+    // Padded by measurement, not by a hand-counted constant. The first draft
+    // of these three lines was off by 9, 2 and 1 columns respectively, which
+    // is what hand-counting into a fixed-width box reliably produces.
+    console.log(boxLine(`  AWAITING APPROVAL: ${pending.versionA} to ${pending.versionB}`));
+    console.log(boxLine(`    proposed ${pending.proposedAt.slice(0, 10)}, no test running`));
+    console.log(boxLine(`    decide: darwin approve ${agentName}`));
+  }
+
   // Version history
   if (versions.length > 1) {
     console.log('║  Evolution History:                                      ║');
@@ -143,4 +161,20 @@ async function showAgentStatus(
 
   console.log('║                                                          ║');
   console.log('╚══════════════════════════════════════════════════════════╝');
+}
+
+/** Interior width of the per-agent status box, measured from its own border. */
+const BOX_INTERIOR = 58;
+
+/**
+ * Pad `content` into one row of the status box.
+ *
+ * Over-long content is truncated rather than allowed to blow the border out,
+ * because a ragged box is how the surrounding lines already look and the point
+ * here was to stop adding to that.
+ */
+function boxLine(content: string): string {
+  const body =
+    content.length > BOX_INTERIOR ? content.slice(0, BOX_INTERIOR - 1) + '\u2026' : content;
+  return `\u2551${body.padEnd(BOX_INTERIOR)}\u2551`;
 }

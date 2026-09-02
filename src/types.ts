@@ -75,6 +75,42 @@ export interface EvolutionConfig {
    */
   maxTestDays?: number;
   /**
+   * v0.17.0: hold every generated challenger for a human decision before it
+   * enters the A/B test.
+   *
+   * Off by default, which is the behaviour every release up to v0.16 had and
+   * which the README listed under Known Limitations: "Prompt mutations go
+   * directly to A/B testing. Telegram notifications inform you, but there's no
+   * approval gate before testing starts."
+   *
+   * When on, {@link DarwinLoop} still generates the challenger and still
+   * persists it as a real {@link PromptVersion} (so it can be read, diffed and
+   * judged), but instead of opening an A/B test it records a
+   * {@link PendingApproval} and stops. `darwin approve <agent>` opens exactly
+   * the test that was planned; `darwin approve <agent> --reject` frees the
+   * slot so the next cycle can try a different challenger.
+   *
+   * The gate sits BEFORE the test, not before activation: a challenger that
+   * runs is a challenger that costs tokens and touches real traffic on half
+   * the runs, so that is the point where a human veto is worth anything.
+   */
+  requireApproval?: boolean;
+  /**
+   * v0.17.0: wall-clock budget for a pending approval, in days. An untouched
+   * proposal older than this is auto-REJECTED on the next cycle, freeing the
+   * slot.
+   *
+   * Deliberately auto-reject and never auto-approve, for the same reason
+   * {@link maxTestDays} never promotes on timeout: absence of a decision is
+   * not a decision. Without a budget a forgotten proposal stops the agent
+   * evolving forever and does it silently, which is the failure mode the
+   * timeout exists to prevent, not a safety property.
+   *
+   * Unset (the default) means a proposal waits indefinitely, and `darwin status`
+   * shows it either way.
+   */
+  approvalTimeoutDays?: number;
+  /**
    * v0.14.0 — Per-agent safety-gate thresholds, merged over
    * {@link DEFAULT_SAFETY}. This is the config-level door to the v0.6/v0.7
    * statistical rigor knobs ({@link SafetyThresholds.requireConfidence},
@@ -557,6 +593,41 @@ export interface ABTest {
   maxTestDays?: number;
 }
 
+/**
+ * v0.17.0: a challenger that has been generated and persisted but is waiting
+ * for a human decision before its A/B test starts. Written only when
+ * {@link EvolutionConfig.requireApproval} is on.
+ *
+ * Every field the test would have carried is SNAPSHOTTED here rather than
+ * recomputed at approval time, for the same reason `ABTest.maxTestDays` is
+ * snapshotted (v0.13.1): the human approves the test that was described to
+ * them. `minRuns` in particular comes from `computeDynamicMinRuns` over the
+ * experiment history AT PROPOSAL TIME; recomputing it on approval would open
+ * a test with a different bar than the one shown in the notification.
+ */
+export interface PendingApproval {
+  /** The incumbent this challenger was generated against. */
+  versionA: string;
+  /** The generated challenger, already saved as an inactive PromptVersion. */
+  versionB: string;
+  /** Sample budget per arm, snapshotted at proposal time. */
+  minRuns: number;
+  /** Wall-clock budget for the A/B test itself, snapshotted at proposal time. */
+  maxTestDays?: number;
+  /** ISO timestamp of the proposal: the clock the approval timeout runs on. */
+  proposedAt: string;
+  /**
+   * Wall-clock budget for THIS proposal in days, snapshotted the same way
+   * `ABTest.maxTestDays` is, so a one-off CLI value does not evaporate on the
+   * next plain invocation.
+   */
+  approvalTimeoutDays?: number;
+  /** Same human-readable reason the A/B test would have carried. */
+  changeReason: string;
+  /** Which generator produced the challenger. */
+  generatedBy: 'gepa' | 'merge' | 'demos' | 'legacy';
+}
+
 export interface DarwinState {
   /** Active prompt version per agent */
   activeVersions: Record<string, string>;
@@ -594,6 +665,16 @@ export interface DarwinState {
    * state rows lack it).
    */
   evolutionConfigOverrides?: Record<string, EvolutionConfigOverride>;
+  /**
+   * v0.17.0: challenger awaiting a human decision, per agent. `null` or a
+   * missing key both mean "nothing pending"; state rows written before this
+   * field existed simply lack it, so old installs behave exactly as before.
+   *
+   * Mutually exclusive with `abTests[agent]` by construction: a proposal is
+   * only ever written when no test is open, and approving swaps one for the
+   * other inside a single `updateState` callback.
+   */
+  pendingApprovals?: Record<string, PendingApproval | null>;
 }
 
 /**
@@ -625,6 +706,10 @@ export interface EvolutionConfigOverride {
   /** v0.14.0: statistic backing the confidence gate (`--confidence-method <m>`).
    *  v0.16.0 adds `'eb'`; see {@link SafetyThresholds.confidenceMethod}. */
   confidenceMethod?: 'effect-size' | 'msprt' | 'hoeffding' | 'eb';
+  /** v0.17.0: human approval gate before the A/B test (`--require-approval`). */
+  requireApproval?: boolean;
+  /** v0.17.0: auto-reject an untouched proposal after n days (`--approval-timeout-days <n>`). */
+  approvalTimeoutDays?: number;
 }
 
 // ─── Patterns ───────────────────────────────────────

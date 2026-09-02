@@ -26,7 +26,15 @@ export type DarwinMetricEventType =
   | 'ab_test_started'
   | 'ab_test_completed'
   | 'ab_test_timeout'
-  | 'evolution_skipped';
+  | 'evolution_skipped'
+  /** v0.17.0: a challenger was generated and is waiting for a human decision. */
+  | 'approval_requested'
+  /** v0.17.0: a human approved a pending challenger; an A/B test follows. */
+  | 'approval_granted'
+  /** v0.17.0: a pending challenger was discarded, by a human or by timeout
+   *  (`data.expired` says which). Never emitted for an auto-approval: there
+   *  is no such thing. */
+  | 'approval_rejected';
 
 export interface DarwinMetricEvent {
   /** What happened. */

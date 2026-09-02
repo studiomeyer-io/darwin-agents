@@ -17,6 +17,8 @@
  *   --skip-perfect / --no-skip-perfect                         (v0.11.0)
  *   --max-merge <n>                                            (v0.11.0)
  *   --max-test-days <n>                                        (v0.13.0)
+ *   --require-approval / --no-require-approval                 (v0.17.0)
+ *   --approval-timeout-days <n>                                (v0.17.0)
  */
 
 import type { EvolutionConfigOverride } from '../types.js';
@@ -59,6 +61,9 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--require-confidence':
     case '--no-require-confidence':
     case '--confidence-method':
+    case '--require-approval':
+    case '--no-require-approval':
+    case '--approval-timeout-days':
       return true;
     default:
       return false;
@@ -212,6 +217,33 @@ export function applyEvolutionFlag(
       }
       console.warn('[darwin] --confidence-method needs a value (effect-size | msprt | hoeffding | eb); ignored.');
       return 0;
+    case '--require-approval':
+      target.requireApproval = true;
+      return 0;
+    case '--no-require-approval':
+      target.requireApproval = false;
+      return 0;
+    case '--approval-timeout-days': {
+      // Same footguns as --max-test-days: a missing value or a following flag
+      // (double- or single-dash) is not this flag's argument, and Number()
+      // would coerce '' to 0.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
+        console.warn('[darwin] --approval-timeout-days needs a non-negative integer value; ignored.');
+        return 0;
+      }
+      // `0` is the OFF switch, exactly as for --max-test-days: overrides are
+      // merged and never deleted, so without an in-band "no budget" value a
+      // once-persisted timeout could never be removed. `effectiveApprovalBudget`
+      // already reads 0 as "no budget", so nothing downstream needs a case.
+      if (/^\d+$/.test(nextArg.trim())) {
+        target.approvalTimeoutDays = Number(nextArg.trim());
+      } else {
+        console.warn(
+          `[darwin] --approval-timeout-days "${nextArg}" is not a non-negative integer; ignored.`,
+        );
+      }
+      return 1;
+    }
     default:
       return 0;
   }
@@ -241,20 +273,21 @@ export function parseEvolutionConfigFlags(args: string[]): {
   return { override, rest };
 }
 
-/** True when the override carries at least one set flag. */
+/**
+ * True when the override carries at least one set flag.
+ *
+ * v0.17.0: derived from the object rather than from a hand-maintained
+ * disjunction. The list version silently went stale the moment
+ * `--require-approval` was added: the flag parsed, applied and persisted
+ * correctly, but `hasAnyEvolutionFlag` returned false, so `darwin evolve
+ * <agent> --require-approval` skipped its own confirmation line AND fell into
+ * the status branch, printing `requireApproval=false` right after setting it.
+ * Nothing threw; the command just quietly did half its job.
+ *
+ * `EvolutionConfigOverride` contains override keys and nothing else, so "has a
+ * defined value" is exactly the question being asked. Adding a flag now needs
+ * no edit here, which is the point.
+ */
 export function hasAnyEvolutionFlag(override: EvolutionConfigOverride): boolean {
-  return (
-    override.useGepa !== undefined ||
-    override.useMerge !== undefined ||
-    override.paretoGate !== undefined ||
-    override.useCoverage !== undefined ||
-    override.reflectionModel !== undefined ||
-    override.useDemos !== undefined ||
-    override.candidateSelection !== undefined ||
-    override.skipPerfectFeedback !== undefined ||
-    override.maxMergeInvocations !== undefined ||
-    override.maxTestDays !== undefined ||
-    override.requireConfidence !== undefined ||
-    override.confidenceMethod !== undefined
-  );
+  return Object.values(override).some((v) => v !== undefined);
 }

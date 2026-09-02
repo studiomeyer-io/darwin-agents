@@ -2,6 +2,193 @@
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-02
+
+The README has carried this under Known Limitations since the first release:
+"Prompt mutations go directly to A/B testing. Telegram notifications inform
+you, but there's no approval gate before testing starts." This release ships
+the gate. It is opt-in, and with it off the loop behaves exactly as v0.16 did.
+
+### Added
+
+- **`evolution.requireApproval`**: hold every generated challenger for a human
+  decision instead of opening an A/B test. The challenger is still generated
+  and still persisted as a real `PromptVersion` (readable, diffable, judgeable);
+  what does not happen is the test. A `PendingApproval` goes into
+  `DarwinState.pendingApprovals` instead.
+
+  The gate sits before the TEST, not before activation, because that is where a
+  veto is worth anything: an A/B test puts the challenger on half the runs, so
+  by the time a bad mutation could be caught at activation it has already been
+  in front of users.
+
+- **`darwin approve [agent] [--reject] [--reason <text>] [--force]`**: the human
+  half. Bare `darwin approve` lists every proposal across all agents; with an
+  agent it prints the incumbent and the challenger prompt IN FULL (no
+  truncation: an elided middle is exactly where a bad mutation hides) and then
+  acts. Also `DarwinLoop.approveChallenger()` / `.rejectChallenger()` for
+  programmatic use, and the `PendingApproval` type from the package root.
+
+- **`evolution.approvalTimeoutDays`**: auto-**reject** an untouched proposal
+  after n days, freeing the slot. Never auto-approves, for the same reason
+  `maxTestDays` never promotes on timeout (v0.13.0): absence of a decision is
+  not a decision. Opt-in, and it exists for one failure mode, namely that a
+  forgotten proposal otherwise stops the agent evolving forever and does it
+  silently.
+
+- **CLI flags**, persisted like the other advanced knobs:
+  `--require-approval` / `--no-require-approval` and
+  `--approval-timeout-days <n>` on both `darwin evolve` and `darwin run`. `0`
+  is the OFF switch for the timeout, mirroring `--max-test-days 0`, because
+  overrides are merged and never deleted.
+
+- **Metrics**: `approval_requested`, `approval_granted`, `approval_rejected`
+  (the last carries `expired: true` when the timeout did it). There is
+  deliberately no `approval_auto_granted`: no such event can occur.
+
+- **Telegram**: `notifyApprovalRequired` and `notifyApprovalExpired`. The first
+  is worded as a request, not a status update, because with the gate on nothing
+  happens until someone acts, and a message that reads like a status line would
+  let an agent quietly stop evolving.
+
+- **`darwin status`** shows a held proposal, both in the per-agent view and as
+  its own icon in the overview, ahead of the A/B one. A held proposal is
+  neither "running" nor "fine": it needs a person.
+
+### Four decisions inside the feature
+
+- **Approving starts the test that was PROPOSED, not a fresh one.** `minRuns`,
+  the A/B wall-clock budget and the incumbent are snapshotted at proposal time.
+  Recomputing `computeDynamicMinRuns` at approval would open a test with a
+  different bar than the one the notification described. The A/B clock is the
+  exception and starts at approval: time spent waiting for a human is not time
+  spent collecting data.
+
+- **A pending proposal blocks the next one**, on BOTH entry points (`afterRun`
+  and `forceEvolve`). Without it the next qualifying run would generate a second
+  challenger and overwrite the first, discarding exactly the thing a human was
+  asked to look at. Same class of bug as v0.13.0's overwritten rejected
+  challenger. `--force` means "evolve even though the automatic gates say no",
+  not "throw away the proposal someone is reading".
+
+- **A moved incumbent refuses.** If a rollback or a manual activation changed the
+  active prompt since the proposal, approving would test the challenger against
+  a different baseline than the one it was generated from, which answers a
+  different question than the one approved. `--force` overrides and then tests
+  against the live incumbent.
+
+- **A rejected challenger stays in the version history** with `active: false`.
+  `nextFreeVersion` clears the whole history rather than just the active version
+  (v0.13.0), so its label is never reused and the record of what was proposed
+  and turned down survives.
+
+### The three writers pin proposal IDENTITY, not presence
+
+`approveChallenger`, `rejectChallenger` and the timeout all read the state
+once, then re-check inside the `updateState` callback. Both real providers run
+that callback under a write lock (SQLite `transaction.immediate()`, Postgres
+`SELECT … FOR UPDATE`), so what the callback reads is live, while the read
+before it is not. Another process resolving the proposal, and the next cycle
+proposing a fresh one, both land in exactly that window.
+
+Checking presence alone would then accept a DIFFERENT proposal: approving
+would start the test for the challenger read earlier while silently deleting
+the new one nobody has looked at. The callbacks therefore compare `versionB`
+AND `proposedAt`, and refuse otherwise.
+
+Pinned by tests that inject the replacement in the window itself (swapping the
+state before the call tests nothing: the caller then reads the new proposal as
+its own and every check trivially matches), each one checked against the
+presence-only mutation.
+
+### What one adversarial round found (all fixed here)
+
+Round 1 came back NO-GO with nine findings. The severe one and the four that
+changed behaviour:
+
+- **A typo in `--reject` used to APPROVE.** `--rejct`, `-reject` and
+  `--reject=true` all parsed to `{reject: false}`, and the bare command
+  approves, so a mistyped rejection put the challenger on roughly half of live
+  traffic. Stopping the resulting test means `darwin evolve <agent> --reset`,
+  which also throws the evolved incumbent back to v1. For a command whose whole
+  purpose is informed consent, unrecognised input falling through to the
+  consenting action is the wrong default. `darwin approve` now hard-fails on
+  anything it does not recognise, including a second positional and the
+  `--flag=value` spelling this CLI does not use, and the two argv walks (flags,
+  agent name) were merged into one so they cannot disagree.
+
+- **Claiming the slot was check-then-act across an LLM call.** The guard that
+  decides "no proposal, no test" runs before the challenger is generated, which
+  is seconds to minutes earlier. Two concurrent cycles both passed it and the
+  second silently overwrote the first, so a human with two notifications could
+  only decide on the later one. Both writers (gated and ungated) now re-check
+  inside the lock and refuse; the losing challenger keeps its version row,
+  because it cost a model call and its label is never reused.
+
+- **Approving did not pin the incumbent.** The staleness check read the active
+  prompt outside the transaction, so a rollback landing in that window opened
+  the test against the version that had just been rolled away, and arm routing
+  served it again. Pinned in the callback, the same way the proposal identity is.
+
+- **Two sources disagree about "active", and approving now says so.**
+  `activeVersions` is what run.ts routes on; the `active` flag on the version
+  rows is what `getActivePrompt` reads. `--reset` wrote only the first, so after
+  a reset the agent served v1 while the flag said v3, the next cycle proposed
+  "v3 to v4", and approving that put half of traffic back on exactly the version
+  the reset was leaving. `--reset` now moves both, and approving refuses when
+  they disagree rather than picking one.
+
+- **A test that pinned nothing.** "The timeout auto-rejects, never
+  auto-approves" read `activeVersions[...] ?? 'v1'` in a scenario that never
+  sets `activeVersions`, so the `??` made it vacuous: adding an
+  `activateVersion(challenger)` call inside the timeout left the whole suite
+  green. It now asserts BOTH sources. The timeout suite also ran only through
+  `forceEvolve`, so the same branch in `afterRun` (the path a cron-driven fleet
+  uses exclusively) could be mutated to `if (false)` unnoticed; covered now.
+
+Every fix above is checked against the mutation that would undo it.
+
+### Fixed
+
+- **`hasAnyEvolutionFlag` no longer drifts.** It was a hand-maintained
+  disjunction and went stale the moment `--require-approval` was added: the
+  flag parsed, applied and persisted correctly, but the function returned
+  false, so `darwin evolve <agent> --require-approval` skipped its confirmation
+  line AND fell through to the status branch, printing `requireApproval=false`
+  immediately after setting it. Nothing threw; the command quietly did half its
+  job. It is now derived from the object (`Object.values(...).some(...)`), so
+  adding a flag needs no edit there at all. `OVERRIDE_KEYS` is exported and a
+  new guard test walks it through all four wiring points, checked against two
+  mutations.
+
+- **`darwin evolve <agent> --reset` is atomic and clears a pending proposal.**
+  It was `getState` + mutate + `saveState`, writing the WHOLE state blob from a
+  snapshot taken before its awaits, so a write another process made in between
+  was silently overwritten: `darwin evolve A --reset` could erase agent B's
+  pending approval, leaving Telegram saying "approval needed" while
+  `darwin approve B` said nothing was pending. Now `updateState`, under the same
+  lock every other state writer uses. And it clears the proposal: Left behind,
+  it would name an incumbent that no longer exists (reset points the agent back
+  at v1) and would block evolution until someone decided on a challenger for a
+  baseline that is gone. Freeing the slot is the same move `--reset` already
+  makes for a running A/B test.
+
+- **`darwin approve` can decide a proposal whose agent is gone.** Both commands
+  checked `builtinAgents` before looking at the state, so a proposal left behind
+  by a removed or renamed agent was undecidable and undeletable (`--reset`
+  threw on the same check first). Rejecting needs no agent definition and now
+  works; approving still refuses, because the A/B test needs an agent to run.
+
+- **`darwin approve` refuses a proposal it cannot show you.** When a prompt row
+  is missing from the version history, the command used to warn "approving would
+  start a test on a prompt nobody can read" and then approve anyway. The test it
+  opened would be cleared as dead by the orphan repair on the very next run.
+
+- **`darwin evolve` reports the confidence knobs.** `--require-confidence` and
+  `--confidence-method` have been persistable since v0.14 but never appeared in
+  either summary, so setting one confirmed itself with `(none)`. Fixed here
+  rather than left as the one hole next to the v0.17 pair.
+
 ## [0.16.0] - 2026-08-15
 
 v0.15 measured its own two sequential methods honestly and left the

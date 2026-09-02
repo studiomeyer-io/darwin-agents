@@ -16,6 +16,7 @@ import type {
   DarwinExperiment,
   DarwinPattern,
   MemoryProvider,
+  PendingApproval,
   PromptVersion,
   PromptVersionStats,
 } from '../types.js';
@@ -24,7 +25,14 @@ import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
 import type { SafetyGate, ABTestSamples } from './safety.js';
 import type { PatternDetector } from './patterns.js';
 import type { NotificationConfig } from './notifications.js';
-import { notifyABTestComplete, notifyABTestTimeout, notifyEvolutionStarted, notifyRollback } from './notifications.js';
+import {
+  notifyABTestComplete,
+  notifyABTestTimeout,
+  notifyApprovalExpired,
+  notifyApprovalRequired,
+  notifyEvolutionStarted,
+  notifyRollback,
+} from './notifications.js';
 import type { GepaOptimizer, ScoredVariant } from './optimizer-gepa.js';
 import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
@@ -45,6 +53,16 @@ export interface EvolutionResult {
   rolledBack: boolean;
   newVersion?: string;
   message: string;
+  /**
+   * v0.17.0: a challenger was generated and persisted, but is waiting for a
+   * human decision instead of entering an A/B test
+   * ({@link EvolutionConfig.requireApproval}). When true, `promptEvolved` is
+   * true and `abTestStarted` is FALSE: nothing is being measured yet.
+   *
+   * Optional so callers written against <=0.16 keep compiling; absent means
+   * false.
+   */
+  awaitingApproval?: boolean;
 }
 
 // ─── Dependencies ──────────────────────────────────────
@@ -292,6 +310,44 @@ export class DarwinLoop {
       return result;
     }
 
+    // ── Step 3b: pending approval (v0.17.0) ───────────
+    // Reached only when no A/B test is open, which is exactly when a proposal
+    // can exist. A pending proposal blocks generation: without this the next
+    // qualifying run would build a SECOND challenger and overwrite the first,
+    // discarding the very thing a human was asked to look at (the same class
+    // of bug v0.13.0 fixed for rejected challengers).
+    //
+    // Read from the state loaded in Step 2 is not good enough here: the
+    // approval could have landed between then and now, so re-read.
+    const approvalState = await this.memory.getState();
+    const pendingApproval = approvalState.pendingApprovals?.[agent] ?? null;
+    if (pendingApproval) {
+      if (this.isApprovalExpired(pendingApproval)) {
+        await this.expireApproval(agent, pendingApproval);
+        result.message =
+          `Proposal ${pendingApproval.versionB} expired after ` +
+          `${this.effectiveApprovalBudget(pendingApproval)}d without a decision and was rejected. ` +
+          `${pendingApproval.versionA} stays active; the next cycle can propose a new challenger.`;
+        emitMetric(this.metrics, 'evolution_skipped', agent, {
+          reason: 'approval_expired',
+          rejected: pendingApproval.versionB,
+        });
+        return result;
+      }
+      result.awaitingApproval = true;
+      result.newVersion = pendingApproval.versionB;
+      result.message =
+        `${pendingApproval.versionB} is waiting for approval (proposed ` +
+        `${pendingApproval.proposedAt}). No A/B test is running and no new challenger will be ` +
+        `generated until it is approved or rejected: "darwin approve ${agent}" / ` +
+        `"darwin approve ${agent} --reject".`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'awaiting_approval',
+        versionB: pendingApproval.versionB,
+      });
+      return result;
+    }
+
     // ── Step 4: Check if we should evolve ─────────────
     const stats = await this.tracker.getStats(agent);
 
@@ -393,6 +449,29 @@ export class DarwinLoop {
           `The next run through the loop closes it. ` +
           `("darwin evolve ${agentName} --reset" clears it immediately, but also resets the active version to v1.)`
         : `An A/B test is already running for "${agentName}" — let it finish before forcing another.`;
+      return result;
+    }
+
+    // v0.17.0: a proposal blocks a forced cycle too. `--force` means "evolve
+    // now even though the automatic gates say no"; it does not mean "throw
+    // away the challenger a human is currently looking at". The way past a
+    // proposal is to decide on it.
+    const pendingForce = state.pendingApprovals?.[agentName] ?? null;
+    if (pendingForce) {
+      if (this.isApprovalExpired(pendingForce)) {
+        await this.expireApproval(agentName, pendingForce);
+        result.message =
+          `Proposal ${pendingForce.versionB} for "${agentName}" was past its ` +
+          `${this.effectiveApprovalBudget(pendingForce)}d approval budget and has been rejected. ` +
+          `Run the same command again to generate a fresh challenger.`;
+        return result;
+      }
+      result.awaitingApproval = true;
+      result.newVersion = pendingForce.versionB;
+      result.message =
+        `${pendingForce.versionB} is already awaiting approval for "${agentName}" ` +
+        `(proposed ${pendingForce.proposedAt}). Decide on it first: ` +
+        `"darwin approve ${agentName}" or "darwin approve ${agentName} --reject".`;
       return result;
     }
 
@@ -552,10 +631,115 @@ export class DarwinLoop {
         : {}),
     };
 
+    // ── v0.17.0: human approval gate ───────────────────────────────────
+    // When on, the challenger is already persisted above (readable, diffable)
+    // but no test opens. Every parameter of the test that WOULD have started
+    // is snapshotted onto the proposal, so `approveChallenger` opens exactly
+    // the test described in the notification rather than recomputing a
+    // different one from newer data.
+    if (this.requireApproval()) {
+      const pending: PendingApproval = {
+        versionA: activePrompt.version,
+        versionB: newVersion,
+        minRuns: dynamicMinRuns,
+        ...(newTest.maxTestDays !== undefined ? { maxTestDays: newTest.maxTestDays } : {}),
+        proposedAt: new Date().toISOString(),
+        ...(this.configuredApprovalTimeout() !== undefined
+          ? { approvalTimeoutDays: this.configuredApprovalTimeout() }
+          : {}),
+        changeReason: newPromptVersion.changeReason,
+        generatedBy,
+      };
+
+      // The guard that got us here ran BEFORE the challenger was generated, and
+      // generation is an LLM call: seconds to minutes, not microseconds. Two
+      // concurrent cycles for the same agent both pass that guard, and an
+      // unconditional write would let the second silently overwrite the first
+      // proposal, so the human who got two notifications can only decide on
+      // the later one and the earlier challenger stays behind as an orphaned
+      // inactive version. Re-check inside the lock.
+      let claimed = true;
+      await this.memory.updateState((s) => {
+        if (s.pendingApprovals?.[agent] || s.abTests[agent]) {
+          claimed = false;
+          return s;
+        }
+        if (!s.pendingApprovals) s.pendingApprovals = {};
+        s.pendingApprovals[agent] = pending;
+        return s;
+      });
+      if (!claimed) {
+        // The generated version row stays: it cost a model call, it is inert
+        // (active: false, in no test), and `nextFreeVersion` will not reuse its
+        // label. Losing the race is not a reason to lose the record.
+        result.promptEvolved = false;
+        result.message =
+          `Generated ${newVersion} for "${agent}", but another cycle claimed the slot first ` +
+          `(a proposal or an A/B test now exists). ${newVersion} was left inactive and unused. ` +
+          `Check "darwin status ${agent}".`;
+        emitMetric(this.metrics, 'evolution_skipped', agent, {
+          reason: 'slot_claimed_concurrently',
+          discarded: newVersion,
+        });
+        return result;
+      }
+
+      result.promptEvolved = true;
+      result.abTestStarted = false;
+      result.awaitingApproval = true;
+      result.newVersion = newVersion;
+      const genLabelP = this.agent?.evolution?.useGepa || this.agent?.evolution?.useDemos
+        ? ` via ${generatedBy}`
+        : '';
+      result.message =
+        `New prompt ${newVersion} generated${genLabelP}, awaiting approval. ` +
+        `Nothing is being measured yet. ` +
+        `Approve with "darwin approve ${agent}" to start ${activePrompt.version} vs ${newVersion} ` +
+        `(minRuns: ${dynamicMinRuns}), or "darwin approve ${agent} --reject" to discard it.`;
+
+      notifyApprovalRequired(
+        this.notifications, agent, activePrompt.version, newVersion,
+        newPromptVersion.changeReason, dynamicMinRuns,
+      ).catch(() => {/* swallow */});
+
+      emitMetric(this.metrics, 'approval_requested', agent, {
+        versionA: activePrompt.version,
+        versionB: newVersion,
+        generatedBy,
+        minRuns: dynamicMinRuns,
+      });
+
+      return result;
+    }
+
+    // Same check-then-act window as the gated branch above, and the same fix.
+    // Unconditional before v0.17: two concurrent cycles would both open a test
+    // and the second would overwrite the first, throwing away whatever runs
+    // the first had already collected. Refusing also keeps `abTests` and
+    // `pendingApprovals` from ever both being set, which is what the comment on
+    // PendingApproval promises (a mixed fleet where one process has the gate on
+    // and another does not is the way that happens).
+    let started = true;
     await this.memory.updateState((s) => {
+      if (s.abTests[agent] || s.pendingApprovals?.[agent]) {
+        started = false;
+        return s;
+      }
       s.abTests[agent] = newTest;
       return s;
     });
+    if (!started) {
+      result.promptEvolved = false;
+      result.message =
+        `Generated ${newVersion} for "${agent}", but another cycle claimed the slot first ` +
+        `(an A/B test or a pending proposal now exists). ${newVersion} was left inactive and ` +
+        `unused. Check "darwin status ${agent}".`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'slot_claimed_concurrently',
+        discarded: newVersion,
+      });
+      return result;
+    }
 
     result.promptEvolved = true;
     result.abTestStarted = true;
@@ -579,6 +763,313 @@ export class DarwinLoop {
     });
 
     return result;
+  }
+
+  // ─── v0.17.0: Human approval gate ──────────────────
+
+  /** Is the approval gate on for this agent? Absent config means off. */
+  private requireApproval(): boolean {
+    return this.agent?.evolution?.requireApproval === true;
+  }
+
+  /**
+   * The agent's currently CONFIGURED approval budget in days, or undefined
+   * when there is none. Only consulted when a proposal is written; evaluation
+   * reads the snapshot on the proposal itself (see
+   * {@link effectiveApprovalBudget}).
+   */
+  private configuredApprovalTimeout(): number | undefined {
+    const configured = this.agent?.evolution?.approvalTimeoutDays;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+    return undefined;
+  }
+
+  /**
+   * Budget that actually governs a given proposal: the snapshot first, the
+   * agent's current config as the fallback for proposals written before the
+   * field existed. Mirrors {@link effectiveTestBudget} exactly.
+   */
+  private effectiveApprovalBudget(pending: PendingApproval): number | undefined {
+    const snapshot = pending.approvalTimeoutDays;
+    if (typeof snapshot === 'number' && Number.isFinite(snapshot) && snapshot > 0) {
+      return snapshot;
+    }
+    return this.configuredApprovalTimeout();
+  }
+
+  /**
+   * Has this proposal outlived its budget? No budget → never (the default).
+   * An unparsable `proposedAt` also never expires: a clock we cannot read is
+   * no reason to throw away a challenger a human may still want.
+   */
+  private isApprovalExpired(pending: PendingApproval, now: number = Date.now()): boolean {
+    const maxDays = this.effectiveApprovalBudget(pending);
+    if (maxDays === undefined) return false;
+    const proposed = Date.parse(pending.proposedAt);
+    if (!Number.isFinite(proposed)) return false;
+    return now - proposed > maxDays * 24 * 60 * 60 * 1000;
+  }
+
+  /**
+   * Approve a pending challenger: open EXACTLY the A/B test that was proposed.
+   *
+   * Refuses, rather than guessing, in three cases:
+   *  - nothing pending;
+   *  - an A/B test is already open (the two are mutually exclusive; a test
+   *    that appeared alongside a proposal means something else wrote state,
+   *    and silently discarding either side would lose work);
+   *  - the incumbent moved since the proposal (a rollback, a manual
+   *    activation, or a concluded test). The measured comparison was
+   *    `pending.versionA` vs the challenger; running it against a DIFFERENT
+   *    incumbent answers a different question than the one approved.
+   *    `force: true` overrides, and then tests against the live incumbent.
+   */
+  async approveChallenger(
+    agentName: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ approved: boolean; message: string }> {
+    const state = await this.memory.getState();
+    const pending = state.pendingApprovals?.[agentName] ?? null;
+    if (!pending) {
+      return { approved: false, message: `No challenger is awaiting approval for "${agentName}".` };
+    }
+    if (state.abTests[agentName]) {
+      return {
+        approved: false,
+        message:
+          `An A/B test is already open for "${agentName}", so the pending proposal ` +
+          `(${pending.versionA} vs ${pending.versionB}) cannot start. Let the test finish, ` +
+          `then approve or reject the proposal.`,
+      };
+    }
+
+    // Two sources say what is "active", and they can disagree: `activeVersions`
+    // is what run.ts ROUTES on, while the `active` flag on the PromptVersion
+    // rows is what `getActivePrompt` reads. `darwin evolve --reset` writes only
+    // the first, so after a reset the state says v1 while the flag still says
+    // v3. Judging staleness against one of them alone would then approve a test
+    // against a version that serves no traffic, or refuse one that does.
+    const activePrompt = await this.memory.getActivePrompt(agentName);
+    const flagIncumbent = activePrompt?.version;
+    // `?? 'v1'` and NOT a skip-when-undefined guard: run.ts routes on exactly
+    // `activeVersions[agent] ?? 'v1'`, so an unset entry means v1 is being
+    // served, not that there is nothing to compare. Skipping on undefined
+    // would make this check vacuous for every fresh agent, which is the
+    // failure mode round 1 found in a test assertion of the same shape.
+    const routedIncumbent = state.activeVersions[agentName] ?? 'v1';
+    if (!flagIncumbent) {
+      return {
+        approved: false,
+        message: `No active prompt for "${agentName}", so the approved test cannot start.`,
+      };
+    }
+    if (routedIncumbent !== flagIncumbent && opts.force !== true) {
+      return {
+        approved: false,
+        message:
+          `"${agentName}" disagrees with itself about the active prompt: routing serves ` +
+          `${routedIncumbent} while the version flag says ${flagIncumbent}. Approving would open ` +
+          `a test whose arms do not match what runs. Fix the state first ` +
+          `("darwin evolve ${agentName} --reset" returns both to v1), or re-run with --force to ` +
+          `test against ${flagIncumbent}.`,
+      };
+    }
+    const liveIncumbent = flagIncumbent;
+    if (liveIncumbent !== pending.versionA && opts.force !== true) {
+      return {
+        approved: false,
+        message:
+          `The proposal for "${agentName}" was measured against ${pending.versionA}, but the ` +
+          `active prompt is now ${liveIncumbent}. Approving would test ${pending.versionB} against ` +
+          `a different incumbent than the one it was generated from. Reject it and let the next ` +
+          `cycle propose a fresh challenger, or re-run with --force to test against ` +
+          `${liveIncumbent} anyway.`,
+      };
+    }
+
+    const versionA = opts.force === true ? liveIncumbent : pending.versionA;
+    const startedAt = new Date().toISOString();
+    const newTest: ABTest = {
+      versionA,
+      versionB: pending.versionB,
+      runsA: 0,
+      runsB: 0,
+      failsA: 0,
+      failsB: 0,
+      minRuns: pending.minRuns,
+      // The A/B wall-clock budget starts when the TEST starts, not when the
+      // challenger was proposed. Time spent waiting for a human is not time
+      // spent collecting data.
+      startedAt,
+      ...(pending.maxTestDays !== undefined ? { maxTestDays: pending.maxTestDays } : {}),
+    };
+
+    // One callback: the proposal disappears and the test appears together, so
+    // a concurrent reader never sees both or neither. Both real providers run
+    // this callback under a write lock (SQLite `transaction.immediate()`,
+    // Postgres `SELECT … FOR UPDATE`), so what it reads is live.
+    //
+    // The check is on IDENTITY, not just presence. Presence alone would accept
+    // a DIFFERENT proposal: if another process rejected this one and the next
+    // cycle proposed a fresh challenger between the getState above and this
+    // callback, `pendingApprovals[agent]` is non-null again, and approving
+    // would start the test for the challenger read earlier while silently
+    // deleting the new one nobody has looked at. versionB plus proposedAt pins
+    // it: version labels are never reused (nextFreeVersion clears the whole
+    // history), so a match means the same proposal.
+    let raced = false;
+    await this.memory.updateState((s) => {
+      const live = s.pendingApprovals?.[agentName];
+      if (!live || live.versionB !== pending.versionB || live.proposedAt !== pending.proposedAt) {
+        raced = true;
+        return s;
+      }
+      if (s.abTests[agentName]) {
+        raced = true;
+        return s;
+      }
+      // The staleness decision above read the incumbent OUTSIDE this lock. A
+      // rollback landing in that window would open the test against a version
+      // that was just rolled away, and arm routing would serve it again. Same
+      // TOCTOU class as the proposal identity, pinned the same way.
+      if ((s.activeVersions[agentName] ?? 'v1') !== versionA) {
+        raced = true;
+        return s;
+      }
+      s.abTests[agentName] = newTest;
+      s.pendingApprovals![agentName] = null;
+      return s;
+    });
+    if (raced) {
+      return {
+        approved: false,
+        message:
+          `The proposal for "${agentName}" changed while approving (another process approved, ` +
+          `rejected it, or opened a test). Nothing was started. Check "darwin status ${agentName}".`,
+      };
+    }
+
+    notifyEvolutionStarted(
+      this.notifications, agentName, versionA, pending.versionB, pending.changeReason,
+    ).catch(() => {/* swallow */});
+
+    emitMetric(this.metrics, 'approval_granted', agentName, {
+      versionA,
+      versionB: pending.versionB,
+      minRuns: pending.minRuns,
+      forced: opts.force === true,
+    });
+    emitMetric(this.metrics, 'ab_test_started', agentName, {
+      versionA,
+      versionB: pending.versionB,
+      generatedBy: pending.generatedBy,
+      minRuns: pending.minRuns,
+    });
+
+    return {
+      approved: true,
+      message:
+        `Approved. A/B test started: ${versionA} vs ${pending.versionB} ` +
+        `(minRuns: ${pending.minRuns}).`,
+    };
+  }
+
+  /**
+   * Reject a pending challenger and free the slot.
+   *
+   * The rejected {@link PromptVersion} deliberately STAYS in history with
+   * `active: false`. `nextFreeVersion` clears the whole version history, not
+   * just the active one, so its label is never reused (v0.13.0) and the record
+   * of what was proposed and turned down survives.
+   */
+  async rejectChallenger(
+    agentName: string,
+    reason?: string,
+  ): Promise<{ rejected: boolean; message: string }> {
+    const state = await this.memory.getState();
+    const pending = state.pendingApprovals?.[agentName] ?? null;
+    if (!pending) {
+      return { rejected: false, message: `No challenger is awaiting approval for "${agentName}".` };
+    }
+
+    // Identity-pinned for the same reason approveChallenger is: clearing
+    // whatever happens to be pending would silently discard a NEWER proposal
+    // that this caller never saw, and a rejection nobody read is worse than a
+    // refusal.
+    let raced = false;
+    await this.memory.updateState((s) => {
+      const live = s.pendingApprovals?.[agentName];
+      if (!live || live.versionB !== pending.versionB || live.proposedAt !== pending.proposedAt) {
+        raced = true;
+        return s;
+      }
+      s.pendingApprovals![agentName] = null;
+      return s;
+    });
+    if (raced) {
+      return {
+        rejected: false,
+        message:
+          `The proposal for "${agentName}" changed while rejecting (another process resolved it, ` +
+          `or a different challenger is now pending). Nothing was discarded. ` +
+          `Check "darwin approve ${agentName}".`,
+      };
+    }
+
+    emitMetric(this.metrics, 'approval_rejected', agentName, {
+      versionA: pending.versionA,
+      versionB: pending.versionB,
+      ...(reason !== undefined ? { reason } : {}),
+      expired: false,
+    });
+
+    return {
+      rejected: true,
+      message:
+        `Rejected ${pending.versionB}. ${pending.versionA} stays active and the next evolution ` +
+        `cycle can propose a different challenger.` +
+        (reason !== undefined ? ` Reason recorded: ${reason}` : ''),
+    };
+  }
+
+  /**
+   * Auto-reject a proposal that outlived its budget. Never auto-APPROVES, for
+   * the same reason {@link concludeInconclusive} never promotes: an absent
+   * decision is not a decision.
+   */
+  private async expireApproval(agentName: string, pending: PendingApproval): Promise<void> {
+    // Identity-pinned like the other two writers: a proposal that appeared
+    // after the expiry decision was made is not the one that expired.
+    let raced = false;
+    await this.memory.updateState((s) => {
+      const live = s.pendingApprovals?.[agentName];
+      if (!live || live.versionB !== pending.versionB || live.proposedAt !== pending.proposedAt) {
+        raced = true;
+        return s;
+      }
+      s.pendingApprovals![agentName] = null;
+      return s;
+    });
+    if (raced) {
+      // Nothing was expired, so nothing is announced. The caller's message
+      // would be wrong, but it is a status line, not an action.
+      return;
+    }
+
+    notifyApprovalExpired(
+      this.notifications, agentName, pending.versionA, pending.versionB,
+      this.effectiveApprovalBudget(pending) ?? 0,
+    ).catch(() => {/* swallow: notification is best-effort */});
+
+    emitMetric(this.metrics, 'approval_rejected', agentName, {
+      versionA: pending.versionA,
+      versionB: pending.versionB,
+      reason: 'timeout',
+      expired: true,
+      budgetDays: this.effectiveApprovalBudget(pending) ?? 0,
+    });
   }
 
   // ─── A/B Test Handling ─────────────────────────────

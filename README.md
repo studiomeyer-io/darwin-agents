@@ -847,6 +847,8 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--skip-perfect` / `--no-skip-perfect` | Drop perfect-score runs from optimizer feedback — GEPA `skip_perfect_score` (v0.11) |
 | `--max-merge <n>` | Lifetime cap on merge-derived challengers — GEPA `max_merge_invocations` (v0.11) |
 | `--max-test-days <n>` | Close an A/B test after n days if it cannot reach `minRuns`; keeps the incumbent, never promotes. `0` = no budget (v0.13) |
+| `--require-confidence` / `--no-require-confidence` | Gate the A/B margin on a confidence statistic instead of the plain threshold (v0.14) |
+| `--confidence-method <m>` | Which statistic backs that gate: `effect-size` \| `msprt` \| `hoeffding` \| `eb` (v0.14; `eb` v0.16) |
 | `--require-approval` / `--no-require-approval` | Hold every challenger for a human decision instead of opening an A/B test (v0.17) |
 | `--approval-timeout-days <n>` | Auto-**reject** an untouched proposal after n days, freeing the slot. Never auto-approves. `0` = wait forever, for proposals made from then on (v0.17) |
 

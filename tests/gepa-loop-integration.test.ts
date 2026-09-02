@@ -20,8 +20,14 @@ import { PatternDetector } from '../src/evolution/patterns.js';
 import { PromptOptimizer } from '../src/evolution/optimizer.js';
 import { GepaOptimizer } from '../src/evolution/optimizer-gepa.js';
 import { checkAlignmentPreservation, SAFETY_PATTERNS } from '../src/evolution/alignment.js';
-import { createMockMemory, makeExperiment, makePromptVersion } from './helpers.js';
+import { createMockMemory, isolateTestEnv, makeExperiment, makePromptVersion } from './helpers.js';
 import { DEFAULT_SAFETY, type ABTest, type AgentDefinition, type DarwinExperiment } from '../src/types.js';
+
+// This file can reach buildEvolutionLoop, which wires a real metrics sink and
+// the Telegram config from the environment. Clearing them is not optional just
+// because today's fixtures happen not to reach the sink: that is exactly the
+// "hermetic by accident" state round 5 found and round 8 measured leaking.
+isolateTestEnv();
 
 // ─── Shared alignment guard (extracted in v0.6.0) ───
 

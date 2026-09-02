@@ -24,7 +24,7 @@ import { runCommand } from '../src/cli/run.js';
 import { loadConfig } from '../src/core/agent.js';
 import { createMemory } from '../src/memory/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
-import { makePromptVersion } from './helpers.js';
+import { isolateTestEnv, makePromptVersion } from './helpers.js';
 
 let server: Server;
 let baseUrl = '';
@@ -56,11 +56,8 @@ before(async () => {
   // assert the stub's call count so a route around it fails loudly.
   delete process.env.ANTHROPIC_API_KEY;
   // Isolate from any Telegram config in the developer's environment.
-  delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
-  delete process.env.DARWIN_TELEGRAM_CHAT_ID;
-  // Round 6: without this, a developer with the variable exported gets real
-  // evolution events appended to their own metrics file by a test run.
-  delete process.env.DARWIN_METRICS_JSONL;
+  // One spelling for all of it (helpers.ts): metrics sink, Telegram, Postgres.
+  isolateTestEnv();
   setMaxRunsPerProcess(0);
   setMaxRunWallMs(0);
 

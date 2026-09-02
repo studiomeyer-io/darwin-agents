@@ -150,3 +150,32 @@ export function makePromptVersion(
     ...overrides,
   };
 }
+
+// ─── Test-environment hygiene ─────────────────────────
+
+/**
+ * Clear the environment variables that make a test reach into the developer's
+ * own setup.
+ *
+ * Round 6 found `DARWIN_METRICS_JSONL` unhandled in the two integration
+ * tests: a developer with it exported got real evolution events
+ * (`run_recorded`, `approval_requested`) appended to their own metrics file by
+ * a test run, with every test green. Round 8 found the fix had cleaned the
+ * incident and not the class: a third file leaked five lines the same way.
+ *
+ * One spelling, in one place, called by every file that can build a loop.
+ * `tests/evolution-config-flags.test.ts` walks that set, so a new file which
+ * builds a loop and does not call this fails there rather than in someone's
+ * metrics file.
+ */
+export function isolateTestEnv(): void {
+  // metricsSinkFromEnv() wires a real JSONL sink from this.
+  delete process.env.DARWIN_METRICS_JSONL;
+  // Notifications: a test must never post to a real Telegram chat.
+  delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
+  delete process.env.DARWIN_TELEGRAM_CHAT_ID;
+  delete process.env.TELEGRAM_BOT_TOKEN;
+  delete process.env.TELEGRAM_ADMIN_CHAT_ID;
+  // A test must never open the developer's production database.
+  delete process.env.DARWIN_POSTGRES_URL;
+}

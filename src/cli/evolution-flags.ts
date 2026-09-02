@@ -109,11 +109,21 @@ export function applyEvolutionFlag(
       target.useCoverage = false;
       return 0;
     case '--reflection-model':
-      if (nextArg !== undefined) {
-        target.reflectionModel = nextArg;
-        return 1;
+      // v0.17.0 — the dash guard, eleven versions late. `--max-merge` and
+      // `--max-test-days` got it in v0.13.2 and every flag since was written
+      // with it, but the two oldest value-takers never were. Measured at the
+      // live CLI: `darwin evolve writer --reflection-model --disable` exited 0,
+      // persisted "--disable" as the reflection MODEL ID, and swallowed the
+      // disable, so an agent someone wanted stopped kept evolving. That is the
+      // same arm the v0.17 refuse-unknown-arguments gate was added to close,
+      // walking in through the door beside it: a value flag consumes its token
+      // in the parser, BEFORE the gate ever sees it.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
+        console.warn('[darwin] --reflection-model needs a model id; ignored.');
+        return 0;
       }
-      return 0;
+      target.reflectionModel = nextArg;
+      return 1;
     case '--demos':
       target.useDemos = true;
       return 0;
@@ -121,21 +131,29 @@ export function applyEvolutionFlag(
       target.useDemos = false;
       return 0;
     case '--candidate-selection':
-      // Value is consumed either way (it was clearly meant as this flag's
-      // argument); it is only APPLIED when it names a known strategy — an
-      // unknown value warns instead of silently persisting a config the loop
-      // would then silently treat as 'active'.
-      if (nextArg !== undefined) {
-        if (CANDIDATE_SELECTION_VALUES.has(nextArg)) {
-          target.candidateSelection = nextArg as EvolutionConfigOverride['candidateSelection'];
-        } else {
-          console.warn(
-            `[darwin] --candidate-selection "${nextArg}" is not one of: ${[...CANDIDATE_SELECTION_VALUES].join(', ')} — ignored.`,
-          );
-        }
-        return 1;
+      // v0.17.0 — same dash guard as --reflection-model above, and for the same
+      // measured reason: `darwin evolve writer --candidate-selection --disable`
+      // exited 0 with the agent still enabled, because this branch consumed
+      // `--disable` as its value. "Consumed either way" was written about a
+      // wrong VALUE ("actve"), not about a following FLAG.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
+        console.warn(
+          `[darwin] --candidate-selection needs one of: ${[...CANDIDATE_SELECTION_VALUES].join(', ')}; ignored.`,
+        );
+        return 0;
       }
-      return 0;
+      // A wrong value IS still consumed (it was clearly meant as this flag's
+      // argument) and only APPLIED when it names a known strategy, so a typo
+      // warns instead of silently persisting a config the loop would then
+      // treat as 'active'.
+      if (CANDIDATE_SELECTION_VALUES.has(nextArg)) {
+        target.candidateSelection = nextArg as EvolutionConfigOverride['candidateSelection'];
+      } else {
+        console.warn(
+          `[darwin] --candidate-selection "${nextArg}" is not one of: ${[...CANDIDATE_SELECTION_VALUES].join(', ')}; ignored.`,
+        );
+      }
+      return 1;
     case '--skip-perfect':
       target.skipPerfectFeedback = true;
       return 0;
@@ -202,9 +220,12 @@ export function applyEvolutionFlag(
       target.requireConfidence = false;
       return 0;
     case '--confidence-method':
-      // Same consume-but-validate contract as --candidate-selection: the value
-      // token was clearly meant for this flag, but only a known method is
-      // persisted — a typo warns instead of silently gating on 'effect-size'.
+      // Consume-but-validate: the value token was clearly meant for this flag,
+      // but only a known method is persisted, so a typo warns instead of
+      // silently gating on 'effect-size'. (This comment used to say "same
+      // contract as --candidate-selection". Until v0.17 that was false in the
+      // one place it mattered: this branch had the dash guard and that one did
+      // not. They match now.)
       if (nextArg !== undefined && !nextArg.startsWith('-')) {
         if (CONFIDENCE_METHOD_VALUES.has(nextArg)) {
           target.confidenceMethod = nextArg as EvolutionConfigOverride['confidenceMethod'];

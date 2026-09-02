@@ -66,7 +66,7 @@ import { loadConfig } from '../src/core/agent.js';
 import { createMemory } from '../src/memory/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
 import { setEvolutionConfigOverrides, setEvolutionEnabled } from '../src/evolution/enabled-state.js';
-import { makePromptVersion, makeExperiment } from './helpers.js';
+import { isolateTestEnv, makeExperiment, makePromptVersion } from './helpers.js';
 import type { DarwinExperiment, MemoryProvider, PendingApproval } from '../src/types.js';
 
 /** Long enough to clear the 2000-char incomplete-run threshold. */
@@ -108,12 +108,8 @@ before(() => {
   // The OpenAI provider's constructor reads this at CONSTRUCTION time, not at
   // import, so setting it here works. No request leaves the process anyway.
   process.env.OPENAI_API_KEY = 'test-key-never-sent';
-  delete process.env.DARWIN_TELEGRAM_BOT_TOKEN;
-  delete process.env.DARWIN_TELEGRAM_CHAT_ID;
-  delete process.env.DARWIN_POSTGRES_URL;
-  // Round 6: without this, a developer with the variable exported gets real
-  // approval_requested lines appended to their own metrics file by a test run.
-  delete process.env.DARWIN_METRICS_JSONL;
+  // One spelling for all of it (helpers.ts): metrics sink, Telegram, Postgres.
+  isolateTestEnv();
   setMaxRunsPerProcess(0);
   setMaxRunWallMs(0);
 

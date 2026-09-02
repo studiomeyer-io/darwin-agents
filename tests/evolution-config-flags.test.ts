@@ -30,8 +30,16 @@ import type { DarwinLoop } from '../src/evolution/loop.js';
 import { buildResolvedEvolutionLoop } from '../src/evolution/build-loop.js';
 import { describeConfig, describeOverride } from '../src/cli/evolve.js';
 import { PromptOptimizer } from '../src/evolution/optimizer.js';
-import { createMockMemory, makeExperiment, makePromptVersion } from './helpers.js';
+import { createMockMemory, isolateTestEnv, makeExperiment, makePromptVersion } from './helpers.js';
 import type { AgentDefinition, DarwinConfig, DarwinState } from '../src/types.js';
+
+// Round 8: this file builds real loops (buildResolvedEvolutionLoop wires the
+// env metrics sink), and it leaked five measured event lines into a developer's
+// own metrics file when DARWIN_METRICS_JSONL was exported. Round 6 had fixed
+// the same thing in two other files and missed this one, which is the incident
+// rather than the class; the guard at the bottom of this file now walks the
+// class.
+isolateTestEnv();
 
 const baseAgent: AgentDefinition = {
   name: 'researcher',
@@ -258,6 +266,43 @@ describe('every OVERRIDE_KEY is wired through the bookkeeping places', () => {
         true,
         `hasAnyEvolutionFlag missed override key "${key}"`,
       );
+    }
+  });
+
+  it('no value flag swallows a FOLLOWING FLAG as its value', () => {
+    // Round 8: the v0.17 "unrecognised arguments are an error" gate on
+    // `darwin evolve` had an open door beside it. A value flag consumes its
+    // token in the PARSER, before the gate ever sees argv, so a value flag
+    // without a dash guard eats the very action the gate exists to protect.
+    // Measured at the live CLI:
+    //
+    //   darwin evolve writer --candidate-selection --disable
+    //     -> exit 0, agent still ENABLED
+    //   darwin evolve writer --reflection-model --disable
+    //     -> exit 0, "--disable" persisted as the reflection MODEL ID,
+    //        agent still ENABLED
+    //
+    // `--max-merge` and `--max-test-days` got this guard in v0.13.2 and every
+    // flag since was written with it; the two oldest value-takers never were.
+    // This walks all of them so the next one cannot be missed either.
+    for (const key of OVERRIDE_KEYS) {
+      const [flag, value] = FLAG_FOR_KEY[key]!;
+      if (value === undefined) continue; // booleans take no value
+      for (const following of ['--disable', '--enable', '--reset', '--force', '-v']) {
+        const target: Record<string, unknown> = {};
+        const consumed = applyEvolutionFlag(flag, following, target as never);
+        assert.equal(
+          consumed,
+          0,
+          `"${flag}" consumed the following flag "${following}" as its value, ` +
+            `which hides that action from the command`,
+        );
+        assert.equal(
+          target[key],
+          undefined,
+          `"${flag}" stored "${following}" as its value`,
+        );
+      }
     }
   });
 
@@ -609,36 +654,117 @@ describe('both confirmation summaries bind every OVERRIDE_KEY to its own label',
 // this list, which is the honest limit of a source guard and is stated rather
 // than pretended away.
 describe('every surface that lists the flags lists all of them', () => {
-  const SURFACES: ReadonlyArray<{ what: string; file: string[]; slice?: (s: string) => string }> = [
+  /**
+   * Cut a section out of a file by its start and end anchors.
+   *
+   * Round 8: the first version used `indexOf` without checking the result, and
+   * the HELP surface's end anchor (`export async function`) does not exist in
+   * cli/index.ts at all. `indexOf` returned -1, so the slice silently ran to
+   * end-of-file: the guard was measuring a different surface than it claimed,
+   * and a stray flag mention anywhere later in the file would have hidden a
+   * real gap. A missing anchor now fails loudly.
+   *
+   * The same round found the README slice running past its own section into
+   * "Known Limitations", where both v0.14 flags happen to be mentioned in
+   * prose. The table was missing them and the guard was green. Slice ends are
+   * narrow now, and the README check demands a TABLE ROW rather than a
+   * mention anywhere in the section.
+   */
+  function section(raw: string, from: string, to: string | null, what: string): string {
+    const start = raw.indexOf(from);
+    assert.notEqual(start, -1, `${what}: start anchor "${from}" no longer exists`);
+    if (to === null) return raw.slice(start);
+    const end = raw.indexOf(to, start + from.length);
+    assert.notEqual(end, -1, `${what}: end anchor "${to}" no longer exists`);
+    return raw.slice(start, end);
+  }
+
+  interface Surface {
+    what: string;
+    file: string[];
+    slice: (raw: string, what: string) => string;
+    /** How a flag must appear: anywhere in the slice, or as a table row. */
+    shape?: (text: string, flag: string) => boolean;
+  }
+
+  const SURFACES: ReadonlyArray<Surface> = [
     {
       what: 'the usage docblock of `darwin evolve`',
       file: ['src', 'cli', 'evolve.ts'],
-      slice: (s) => s.slice(0, s.indexOf('*/')),
+      slice: (raw, what) => section(raw, '/**', '*/', what),
     },
     {
       what: 'the `darwin --help` text',
       file: ['src', 'cli', 'index.ts'],
-      // The HELP template literal; everything before `jobs` of the switch.
-      slice: (s) => s.slice(s.indexOf('const HELP'), s.indexOf('export async function')),
+      // The HELP template literal only, ending at its own closing backtick.
+      slice: (raw, what) => section(raw, 'const HELP = `', '\n`;', what),
     },
     {
       what: 'the flag table in the README',
       file: ['README.md'],
-      slice: (s) => s.slice(s.indexOf('### Advanced evolution flags')),
+      // Ends at the next section, so a mention two headings away cannot count.
+      slice: (raw, what) => section(raw, '### Advanced evolution flags', '\n## ', what),
+      // And it has to be a ROW, not a passing mention in the bash example
+      // above the table: removing the --reflection-model row used to leave
+      // this green because the example still used the flag.
+      //
+      // A row opens with "| `--flag", and what follows is either the closing
+      // backtick (booleans) or a space before the value placeholder
+      // (`| \`--max-merge <n>\``). Matching the bare backtick form alone
+      // missed all six value-taking flags, which is how this check first
+      // reported six false gaps.
+      shape: (text, flag) =>
+        text.includes(`| \`${flag}\``) || text.includes(`| \`${flag} `),
     },
   ];
 
   for (const surface of SURFACES) {
     it(`${surface.what} mentions every OVERRIDE_KEY`, () => {
       const raw = readFileSync(join(import.meta.dirname, '..', ...surface.file), 'utf8');
-      const text = surface.slice ? surface.slice(raw) : raw;
+      const text = surface.slice(raw, surface.what);
       assert.ok(text.length > 0, `the slice for ${surface.what} came back empty`);
-      const missing = OVERRIDE_KEYS.filter((key) => !text.includes(FLAG_FOR_KEY[key]![0]));
+      const has = surface.shape ?? ((t: string, f: string) => t.includes(f));
+      const missing = OVERRIDE_KEYS.filter((key) => !has(text, FLAG_FOR_KEY[key]![0]));
       assert.deepEqual(
         missing,
         [],
-        `${surface.what} does not mention: ${missing.map((k) => FLAG_FOR_KEY[k]![0]).join(', ')}`,
+        `${surface.what} does not list: ${missing.map((k) => FLAG_FOR_KEY[k]![0]).join(', ')}`,
       );
     });
   }
+});
+
+// ─── Every file that can build a loop isolates its environment ────────────
+//
+// `buildEvolutionLoop` wires a real JSONL metrics sink from
+// DARWIN_METRICS_JSONL, and the notification config from the Telegram
+// variables. A test file that runs a loop without clearing those writes real
+// events into whatever the developer had exported, with every test green.
+//
+// Round 6 fixed two files, round 8 measured a third still leaking five lines.
+// Fixing the incident twice is what this guard exists to stop: it walks the
+// CLASS, so a new file that builds a loop and forgets `isolateTestEnv()` fails
+// here instead of in someone's metrics file.
+describe('test files that build a loop clear the environment first', () => {
+  // Anything that can reach buildEvolutionLoop, directly or through a command.
+  const BUILDS_A_LOOP = /buildResolvedEvolutionLoop\s*\(|buildEvolutionLoop\s*\(|runCommand\s*\(|evolveCommand\s*\(|approveCommand\s*\(/;
+
+  it('calls isolateTestEnv(), or does not build a loop at all', () => {
+    const dir = join(import.meta.dirname);
+    const offenders = readdirSync(dir)
+      .filter((f) => f.endsWith('.test.ts'))
+      .filter((f) => {
+        const src = readFileSync(join(dir, f), 'utf8');
+        if (!BUILDS_A_LOOP.test(src)) return false;
+        // metrics-sink.test.ts sets the variable ON PURPOSE: it is the test
+        // for the sink. It does not build a loop, so it never reaches here,
+        // and if it ever does it should say so rather than be exempted here.
+        return !src.includes('isolateTestEnv(');
+      });
+    assert.deepEqual(
+      offenders,
+      [],
+      `these files build a loop without isolateTestEnv(): ${offenders.join(', ')}`,
+    );
+  });
 });

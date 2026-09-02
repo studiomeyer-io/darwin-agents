@@ -17,6 +17,13 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { approveCommand, parseApproveArgs } from '../src/cli/approve.js';
+import { isolateTestEnv } from './helpers.js';
+
+// This file can reach buildEvolutionLoop, which wires a real metrics sink and
+// the Telegram config from the environment. Clearing them is not optional just
+// because today's fixtures happen not to reach the sink: that is exactly the
+// "hermetic by accident" state round 5 found and round 8 measured leaking.
+isolateTestEnv();
 
 describe('parseApproveArgs: the safe cases', () => {
   it('defaults to approve, no force, no reason, no agent', () => {

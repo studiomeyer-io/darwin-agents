@@ -407,7 +407,7 @@ red, and every single revert has at least one red test naming it. One run
 instead of eleven.
 
 **Verification status, stated precisely** (round 5 asked for it and round 6
-sharpened it, both fair): 853 tests pass on Node 20 AND Node 22, under CI
+sharpened it, both fair): 865 tests pass on Node 20 AND Node 22, under CI
 conditions both times, measured with a PATH containing node but not `claude`
 and with no provider keys exported. Type checks, the adapter guard and the
 benchmark dry run pass on both. The coverage gate passes on Node 22, which is
@@ -453,6 +453,55 @@ on for the neighbouring command, and one stale sentence.
   `DARWIN_METRICS_JSONL` clearing, whose absence let a test run append real
   evolution events to a developer's metrics file while both integration files
   stayed green. Both corrected.
+
+### What the eighth round found (all fixed here)
+
+Round 8 found something in the product again, after three rounds of no. It is
+the same shape as round 7's finding and it is mine: a gate with an open door
+beside it.
+
+- **Two value flags ate the very action the new gate exists to protect.**
+  Round 7 made `darwin evolve` refuse unrecognised arguments. A value flag
+  consumes its token in the PARSER, before the gate ever sees argv, and the
+  two oldest value-takers never got the dash guard that `--max-merge` and
+  `--max-test-days` received in v0.13.2. Measured at the live CLI:
+
+      darwin evolve writer --candidate-selection --disable
+        -> exit 0, agent still ENABLED
+      darwin evolve writer --reflection-model --disable
+        -> exit 0, "--disable" persisted as the reflection MODEL ID,
+           agent still ENABLED
+
+  That is exactly the arm round 7 called the dangerous one, walking in through
+  the door next to the one that was just locked. Both flags have the guard now,
+  and a test walks EVERY value-taking flag against five following actions, so
+  the next one added cannot be missed either. The comment on
+  `--confidence-method` claiming "same contract as --candidate-selection" was
+  false in the one place it mattered, and now is not.
+
+- **The README flag table was missing the same two v0.14 knobs, and the new
+  surface guard read straight past the gap.** Its slice ran to end of file and
+  picked up a mention of both flags in "Known Limitations", two sections
+  later. Worse, removing the `--reflection-model` row left the guard green
+  because the flag still appeared in the bash example above the table. Slice
+  ends are narrow now, and the README check demands a table ROW rather than a
+  mention anywhere nearby. Both mutations verified.
+
+- **A guard anchor that never existed.** The help-text slice ended at
+  `export async function`, which is not in `cli/index.ts` at all: `indexOf`
+  returned -1 and the slice silently ran to end of file, so the guard measured
+  a different surface than it claimed. Missing anchors now fail loudly instead
+  of widening the slice, which is the failure mode a non-empty check does not
+  cover.
+
+- **The metrics-leak fix had cleaned the incident, not the class.** Round 6
+  fixed two files; a third leaked five measured event lines into a developer's
+  own metrics file with all 31 of its tests green. There is one spelling now
+  (`isolateTestEnv()` in the test helpers, covering the metrics sink, both
+  Telegram variables and the Postgres URL), every file that can build a loop
+  calls it, and a guard walks that class rather than that file. Three further
+  files were pulled in that did not leak today and could have tomorrow.
+  Measured over the whole suite with the variable exported: zero lines.
 
 ### Fixed
 

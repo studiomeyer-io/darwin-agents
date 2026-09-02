@@ -768,3 +768,63 @@ describe('test files that build a loop clear the environment first', () => {
     );
   });
 });
+
+// ─── No value flag anywhere in the CLI swallows a following flag ──────────
+//
+// This class was found and closed three times in this release, one parser
+// further along each time: `darwin approve` (round 2), `darwin evolve`'s two
+// oldest value flags (round 8), and `darwin run`'s five (round 9). Each fix
+// guarded the module where the incident happened, so the next round found the
+// same shape next door. Measured cost of the last one:
+//
+//     darwin run writer --task-type --no-evolve "Do X"
+//       -> taskType = "--no-evolve", noEvolve = FALSE, the run evolves anyway
+//
+// So this guards the PATTERN across the whole directory. It is a source check,
+// which is weaker than a behavioural one, and it is used here because the
+// defect is textual: an unguarded `args[++i]` or `args[i + 1]`. Every parser
+// that takes a value has to prove it looked at the token first.
+describe('every value-taking flag in src/cli guards against a following flag', () => {
+  /**
+   * Strip comments before scanning.
+   *
+   * The first version of this guard read them, and its first run flagged the
+   * comment that DOCUMENTS the fix, because that comment quotes the old
+   * `args[++i]`. A source guard that reads prose can be fed by prose: exactly
+   * the bypass shape an earlier round pointed at, arriving from the friendly
+   * direction. Strings are left alone; no flag parser hides its consumption
+   * inside a string literal, and stripping those too would need a real parser.
+   */
+  function code(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .split('\n')
+      .map((l) => l.replace(/(^|[^:])\/\/.*$/, '$1'))
+      .join('\n');
+  }
+
+  it('has no unguarded args[++i] or args[i + 1] consumption', () => {
+    const dir = join(import.meta.dirname, '..', 'src', 'cli');
+    const offenders: string[] = [];
+
+    for (const file of readdirSync(dir).filter((f) => f.endsWith('.ts'))) {
+      const src = code(readFileSync(join(dir, file), 'utf8'));
+      // `args[++i]` consumes without ever looking at what it took.
+      for (const m of src.matchAll(/\[\+\+\s*\w+\]/g)) {
+        offenders.push(`${file}: "${m[0]}" consumes a token without inspecting it`);
+      }
+      // `args[i + 1]` is fine, but only where a startsWith('-') check exists
+      // in the same file. Coarse on purpose: a file that reads the next token
+      // anywhere and never tests for a dash is the shape being hunted.
+      if (/\[\s*\w+\s*\+\s*1\s*\]/.test(src) && !/startsWith\('-'\)/.test(src)) {
+        offenders.push(`${file}: reads the next token but never checks it for a leading dash`);
+      }
+    }
+
+    assert.deepEqual(
+      offenders,
+      [],
+      `unguarded value consumption:\n  ${offenders.join('\n  ')}`,
+    );
+  });
+});

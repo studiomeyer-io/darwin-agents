@@ -214,3 +214,43 @@ describe('abTestArmsResolvable', () => {
     assert.equal(abTestArmsResolvable(test('v3', 'v4'), []), false);
   });
 });
+
+describe('darwin run: no value flag swallows a following flag (v0.17)', () => {
+  // Round 9 measured this, the third appearance of the same class in one
+  // release and the last parser in src/cli that still had it:
+  //
+  //     darwin run writer --task-type --no-evolve "Do X"
+  //       -> taskType = "--no-evolve", noEvolve = FALSE
+  //
+  // The run then went ahead with A/B routing and the evolution loop and
+  // counted into the statistics the operator had just asked to be left alone.
+  // `--task-type --no-critic` likewise ran the critic, a real model call.
+  const VALUE_FLAGS = ['--task-type', '--model', '--path', '--provider', '--base-url'];
+  const FOLLOWING = ['--no-evolve', '--no-critic', '--verbose', '-v'];
+
+  for (const flag of VALUE_FLAGS) {
+    for (const following of FOLLOWING) {
+      it(`"${flag}" does not eat "${following}"`, () => {
+        const f = parseRunArgs(['writer', flag, following, 'do something']) as unknown as Record<string, unknown>;
+        // The following flag must have taken effect...
+        if (following === '--no-evolve') assert.equal(f.noEvolve, true);
+        if (following === '--no-critic') assert.equal(f.noCritic, true);
+        if (following === '--verbose' || following === '-v') assert.equal(f.verbose, true);
+        // ...and must not have been stored as a value.
+        for (const key of ['taskType', 'model', 'path', 'provider', 'baseUrl']) {
+          assert.notEqual(
+            f[key],
+            following,
+            `"${flag}" stored "${following}" as ${key}`,
+          );
+        }
+      });
+    }
+  }
+
+  it('and a real value still works', () => {
+    const f = parseRunArgs(['writer', '--task-type', 'tech', '--model', 'gpt-5.4', 'do it']) as unknown as Record<string, unknown>;
+    assert.equal(f.taskType, 'tech');
+    assert.equal(f.model, 'gpt-5.4');
+  });
+});

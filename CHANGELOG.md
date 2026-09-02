@@ -407,7 +407,7 @@ red, and every single revert has at least one red test naming it. One run
 instead of eleven.
 
 **Verification status, stated precisely** (round 5 asked for it and round 6
-sharpened it, both fair): 865 tests pass on Node 20 AND Node 22, under CI
+sharpened it, both fair): 887 tests pass on Node 20 AND Node 22, under CI
 conditions both times, measured with a PATH containing node but not `claude`
 and with no provider keys exported. Type checks, the adapter guard and the
 benchmark dry run pass on both. The coverage gate passes on Node 22, which is
@@ -502,6 +502,35 @@ beside it.
   calls it, and a guard walks that class rather than that file. Three further
   files were pulled in that did not leak today and could have tomorrow.
   Measured over the whole suite with the variable exported: zero lines.
+
+### What the ninth round found (fixed here)
+
+One finding, and it closes a class this release opened and then chased across
+three parsers.
+
+- **`darwin run`'s five value flags swallowed the following flag.** Measured:
+
+      darwin run writer --task-type --no-evolve "Do X"
+        -> taskType = "--no-evolve", noEvolve = FALSE
+
+  The run then went ahead with A/B routing and the evolution loop, and counted
+  into the statistics the operator had just asked to be left alone. Silent,
+  exit 0, and the junk label went into the experiment record.
+  `--task-type --no-critic` likewise ran the critic, which is a real model call
+  and real money. Pre-existing, not introduced here.
+
+  It is the same class as the round-2 fix for `darwin approve` and the round-8
+  fix for `darwin evolve`'s two oldest value flags, one parser further along
+  each time. The reason it kept reappearing is that each fix guarded the module
+  where the incident happened: **a parser guard ends at the file boundary, the
+  class does not.** There is now a guard over the PATTERN across all of
+  `src/cli` (an unguarded `args[++i]`, or reading the next token without ever
+  testing it for a leading dash), so a new command with the same shape fails
+  there rather than in someone's run.
+
+  Its first run flagged the comment that documents this fix, because that
+  comment quotes the old `args[++i]`. A source guard that reads prose can be
+  fed by prose; it strips comments now.
 
 ### Fixed
 

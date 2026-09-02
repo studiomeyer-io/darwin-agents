@@ -115,30 +115,74 @@ export function parseRunArgs(args: string[]): RunFlags {
   };
 
   const positional: string[] = [];
+  /**
+   * The value of a value-taking flag, or undefined when the next token is a
+   * FLAG rather than a value.
+   *
+   * v0.17.0 — these five flags took `args[++i]` unconditionally, so a missing
+   * value swallowed whatever came next. Measured:
+   *
+   *     darwin run writer --task-type --no-evolve "Do X"
+   *       -> taskType = "--no-evolve", noEvolve = FALSE
+   *
+   * The run then went ahead with A/B routing and the evolution loop, and
+   * counted into the statistics the operator had just asked to be left alone.
+   * Silent, exit 0, and the junk label went into the experiment record.
+   * `--task-type --no-critic` likewise ran the critic, which is a real model
+   * call and real money.
+   *
+   * The identical class was found and closed twice in this release, first for
+   * `darwin approve` and then for `darwin evolve`'s two oldest value flags. It
+   * was pre-existing here, and it is the last parser in src/cli that had it.
+   * `tests/evolution-config-flags.test.ts` now guards the PATTERN across the
+   * whole directory rather than one module's flag list, which is what the
+   * previous two fixes should have done.
+   *
+   * Single-dash counts: `-v` is a real flag in this very parser.
+   */
+  const valueFor = (i: number, flag: string): string | undefined => {
+    const next = args[i + 1];
+    if (next === undefined || next.startsWith('-')) {
+      console.warn(`[darwin] ${flag} needs a value; ignored.`);
+      return undefined;
+    }
+    return next;
+  };
+
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     switch (arg) {
-      case '--task-type':
-        flags.taskType = args[++i] ?? 'general';
+      case '--task-type': {
+        const v = valueFor(i, '--task-type');
+        if (v !== undefined) { flags.taskType = v; i++; }
         break;
+      }
       case '--no-evolve':
         flags.noEvolve = true;
         break;
       case '--no-critic':
         flags.noCritic = true;
         break;
-      case '--model':
-        flags.model = args[++i];
+      case '--model': {
+        const v = valueFor(i, '--model');
+        if (v !== undefined) { flags.model = v; i++; }
         break;
-      case '--path':
-        flags.path = args[++i];
+      }
+      case '--path': {
+        const v = valueFor(i, '--path');
+        if (v !== undefined) { flags.path = v; i++; }
         break;
-      case '--provider':
-        flags.provider = args[++i] as ProviderConfig['type'];
+      }
+      case '--provider': {
+        const v = valueFor(i, '--provider');
+        if (v !== undefined) { flags.provider = v as ProviderConfig['type']; i++; }
         break;
-      case '--base-url':
-        flags.baseUrl = args[++i];
+      }
+      case '--base-url': {
+        const v = valueFor(i, '--base-url');
+        if (v !== undefined) { flags.baseUrl = v; i++; }
         break;
+      }
       case '--verbose':
       case '-v':
         flags.verbose = true;

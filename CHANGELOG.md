@@ -411,8 +411,12 @@ sharpened it, both fair): 893 tests pass on Node 20 AND Node 22, under CI
 conditions both times, measured with a PATH containing node but not `claude`
 and with no provider keys exported. Type checks, the adapter guard and the
 benchmark dry run pass on both. The coverage gate passes on Node 22, which is
-the only version CI runs it on. The CI workflow itself has not run on this
-work: the branch is not pushed yet.
+the only version CI runs it on.
+
+**And then CI ran it for real.** Pushed as `f6a9b31`; the workflow is green on
+both matrix legs (`build (20)`, `build (22)`) plus the `audit` job. Until that
+moment every number above was a local measurement under reconstructed CI
+conditions, which is a different claim and was labelled as one.
 
 ### What the seventh round found (all fixed here)
 

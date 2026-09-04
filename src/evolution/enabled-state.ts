@@ -94,6 +94,7 @@ export const OVERRIDE_KEYS = [
   'confidenceMethod',
   'requireApproval',
   'approvalTimeoutDays',
+  'rejectionNoteLimit',
 ] as const;
 
 /**
@@ -145,6 +146,8 @@ export function resolveEvolutionConfig(
           resolved.maxTestDays = value as number;
         } else if (key === 'approvalTimeoutDays') {
           resolved.approvalTimeoutDays = value as number;
+        } else if (key === 'rejectionNoteLimit') {
+          resolved.rejectionNoteLimit = value as number;
         } else if (key === 'requireConfidence') {
           // The confidence knobs live on the nested safety block (they are
           // SafetyThresholds fields, not loop fields) — merge, don't replace,

@@ -19,6 +19,7 @@ import type {
   PendingApproval,
   PromptVersion,
   PromptVersionStats,
+  RejectedChallenger,
 } from '../types.js';
 import type { ExperimentTracker } from './tracker.js';
 import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
@@ -41,6 +42,17 @@ import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoO
 import { selectDemoCandidates, buildDemoSection, applyDemoSection } from './demos.js';
 import { selectParentVariant } from './selection.js';
 import { isPerfectScore, resolvePerfectFeedbackScore } from './feedback-filter.js';
+import {
+  fingerprintPromptText,
+  findRejectedMatch,
+  forgetRejections,
+  formatRejectionNotes,
+  rejectionNotes,
+  rejectionsFor,
+  rememberRejection,
+  REJECTION_NOTES_LIMIT,
+  type RejectionNote,
+} from './rejections.js';
 import { emitMetric, type MetricsSink } from '../metrics/sink.js';
 
 // ─── Result Type ───────────────────────────────────────
@@ -63,6 +75,15 @@ export interface EvolutionResult {
    * false.
    */
   awaitingApproval?: boolean;
+  /**
+   * v0.18.0: every generator produced text a human had already rejected, so
+   * nothing was proposed. `promptEvolved` and `abTestStarted` are both false.
+   *
+   * Its own field rather than a shade of "nothing happened", because this one
+   * RECURS: the same inputs produce the same text next cycle, so an agent in
+   * this state stays there until someone acts. `message` names the way out.
+   */
+  rejectedRepeat?: boolean;
 }
 
 // ─── Dependencies ──────────────────────────────────────
@@ -521,6 +542,13 @@ export class DarwinLoop {
 
     const catStats = await this.tracker.getStatsByCategory(agent);
 
+    // v0.18.0: what a human already turned down for this agent. Read ONCE per
+    // cycle and threaded through both generators, so the legacy meta-prompt
+    // and the GEPA reflector are told the same thing. Reading it later, per
+    // generator, would let two paths in the same cycle see different memory.
+    const rejected = rejectionsFor(await this.memory.getState(), agent);
+    const notes = this.rejectionNotesFor(rejected);
+
     // Extract recent critic feedback reports for the optimizer.
     // The optimizer previously only saw aggregated stats but not WHY runs scored poorly.
     // v0.7.0: feedback window is configurable (default 15, was hard-coded 5).
@@ -550,9 +578,28 @@ export class DarwinLoop {
         const demoPrompt = await this.tryDemoVariant(agent, activePrompt.promptText);
         if (demoPrompt !== null) {
           const guarded = await this.runAlignmentGuard(activePrompt.promptText, demoPrompt);
-          if (guarded !== null) {
+          const repeat = guarded === null ? null : findRejectedMatch(rejected, guarded);
+          if (guarded !== null && repeat === null) {
             newPromptText = guarded;
             generatedBy = 'demos';
+          } else if (repeat !== null) {
+            // v0.18.0: this is the case the whole release is about. The demo
+            // section is built deterministically from the active prompt plus
+            // the agent's best runs, and rejecting changes neither, so without
+            // this the identical text comes back every demoEveryK cycles with
+            // a new label. Falling through (rather than ending the cycle) is
+            // what keeps the agent evolving: GEPA and the legacy optimizer are
+            // both non-deterministic and both now know why this was turned
+            // down.
+            console.warn(
+              `[darwin] demo variant for "${agent}" repeats rejected ${repeat.version}, ` +
+                `falling through.`,
+            );
+            emitMetric(this.metrics, 'rejected_repeat', agent, {
+              generator: 'demos',
+              rejectedVersion: repeat.version,
+              action: 'fell_through',
+            });
           } else {
             // Mirrors the merge-path breadcrumb: a consistently guard-failing
             // demo section should be visible, not silently skipped forever.
@@ -570,10 +617,28 @@ export class DarwinLoop {
       // rotates which feedback subset the reflector sees per cycle, and the
       // merge cadence fires every mergeEveryK-th cycle.
       const epoch = this.versionInt(activePrompt.version);
-      const gen = await this.generateVariantGepa(agent, activePrompt.promptText, epoch);
+      const gen = await this.generateVariantGepa(agent, activePrompt.promptText, epoch, notes);
       if (gen !== null) {
-        newPromptText = gen.prompt;
-        generatedBy = gen.via;
+        const repeat = findRejectedMatch(rejected, gen.prompt);
+        if (repeat === null) {
+          newPromptText = gen.prompt;
+          generatedBy = gen.via;
+        } else {
+          // Falls through to the legacy optimizer, same as an alignment-guard
+          // failure. A merge that got this far was already counted against
+          // `maxMergeInvocations`, deliberately: the cap budgets the reflection
+          // CALLS, and that call was paid before anyone knew the text was a
+          // repeat.
+          console.warn(
+            `[darwin] GEPA ${gen.via} variant for "${agent}" repeats rejected ${repeat.version}, ` +
+              `falling through to legacy.`,
+          );
+          emitMetric(this.metrics, 'rejected_repeat', agent, {
+            generator: gen.via,
+            rejectedVersion: repeat.version,
+            action: 'fell_through',
+          });
+        }
       }
     }
     if (newPromptText === null) {
@@ -584,7 +649,35 @@ export class DarwinLoop {
         toolContext,
         catStats,
         recentFeedback,
+        formatRejectionNotes(notes),
       );
+    }
+
+    // v0.18.0: every generator has now had its turn. A repeat that survives to
+    // here is refused rather than proposed, and no version row is written: the
+    // whole point of the memory is that a human is not asked the same question
+    // twice.
+    //
+    // This deliberately fires with the approval gate OFF as well. Rejections
+    // only ever come FROM the gate, but someone can reject a challenger and
+    // then turn the gate off, and pushing a text that was explicitly turned
+    // down straight onto half of live traffic is worse than asking again.
+    const finalRepeat = findRejectedMatch(rejected, newPromptText);
+    if (finalRepeat !== null) {
+      result.promptEvolved = false;
+      result.abTestStarted = false;
+      result.rejectedRepeat = true;
+      result.message =
+        `Every generator for "${agent}" produced text that was already rejected ` +
+        `(${finalRepeat.version}, ${finalRepeat.rejectedAt.slice(0, 10)}), so nothing was ` +
+        `proposed. This usually means the agent's runs have not changed enough to suggest ` +
+        `anything new. Let it collect more runs, or clear the memory with ` +
+        `"darwin approve ${agent} --forget ${finalRepeat.version}".`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'rejected_repeat',
+        rejectedVersion: finalRepeat.version,
+      });
+      return result;
     }
 
     // Create a new prompt version. The label must clear the WHOLE version
@@ -663,9 +756,21 @@ export class DarwinLoop {
       // proposal, so the human who got two notifications can only decide on
       // the later one and the earlier challenger stays behind as an orphaned
       // inactive version. Re-check inside the lock.
+      //
+      // v0.18.0: the rejection memory is re-checked here for the same reason.
+      // It was read BEFORE generation, so a rejection landing during the model
+      // call would otherwise put an already-refused text back in front of the
+      // same person. The check is a hash comparison over a list capped at 100,
+      // so it costs nothing inside the lock.
       let claimed = true;
+      let racedRejection: RejectedChallenger | null = null;
       await this.memory.updateState((s) => {
         if (s.pendingApprovals?.[agent] || s.abTests[agent]) {
+          claimed = false;
+          return s;
+        }
+        racedRejection = findRejectedMatch(rejectionsFor(s, agent), newPromptText!);
+        if (racedRejection !== null) {
           claimed = false;
           return s;
         }
@@ -673,6 +778,9 @@ export class DarwinLoop {
         s.pendingApprovals[agent] = pending;
         return s;
       });
+      if (racedRejection !== null) {
+        return this.refuseRacedRejection(agent, newVersion, racedRejection, result);
+      }
       if (!claimed) {
         // The generated version row stays: it cost a model call, it is inert
         // (active: false, in no test), and `nextFreeVersion` will not reuse its
@@ -724,15 +832,28 @@ export class DarwinLoop {
     // `pendingApprovals` from ever both being set, which is what the comment on
     // PendingApproval promises (a mixed fleet where one process has the gate on
     // and another does not is the way that happens).
+    //
+    // v0.18.0: and the rejection re-check, as in the gated branch. Here it
+    // matters more, not less: without the gate the challenger would go
+    // straight onto half the traffic.
     let started = true;
+    let racedReject: RejectedChallenger | null = null;
     await this.memory.updateState((s) => {
       if (s.abTests[agent] || s.pendingApprovals?.[agent]) {
+        started = false;
+        return s;
+      }
+      racedReject = findRejectedMatch(rejectionsFor(s, agent), newPromptText!);
+      if (racedReject !== null) {
         started = false;
         return s;
       }
       s.abTests[agent] = newTest;
       return s;
     });
+    if (racedReject !== null) {
+      return this.refuseRacedRejection(agent, newVersion, racedReject, result);
+    }
     if (!started) {
       result.promptEvolved = false;
       result.message =
@@ -1042,6 +1163,12 @@ export class DarwinLoop {
     // whatever happens to be pending would silently discard a NEWER proposal
     // that this caller never saw, and a rejection nobody read is worse than a
     // refusal.
+    // v0.18.0: the fingerprint is read BEFORE the lock, because reading a
+    // prompt row is a backend round-trip and the state callback must stay
+    // short. A missing row yields no fingerprint, and an entry without one can
+    // never match: the memory would rather forget than block the wrong text.
+    const entry = await this.buildRejectionEntry(agentName, pending, 'human', reason);
+
     let raced = false;
     await this.memory.updateState((s) => {
       const live = s.pendingApprovals?.[agentName];
@@ -1050,7 +1177,11 @@ export class DarwinLoop {
         return s;
       }
       s.pendingApprovals![agentName] = null;
-      return s;
+      // Written inside the SAME callback that clears the proposal. Two writes
+      // would leave a window where the proposal is gone and the memory of it
+      // does not exist yet, which is exactly when the next cycle would
+      // re-propose the text nobody wanted.
+      return rememberRejection(s, agentName, entry);
     });
     if (raced) {
       return {
@@ -1079,6 +1210,151 @@ export class DarwinLoop {
   }
 
   /**
+   * Refuse a challenger whose text was rejected WHILE it was being generated.
+   *
+   * Distinct from the pre-generation refusal only in when it was noticed. The
+   * generated version row stays for the same reason a lost claim race keeps
+   * its row: it cost a model call, it is inert, and its label is never reused.
+   */
+  private refuseRacedRejection(
+    agent: string,
+    newVersion: string,
+    rejected: RejectedChallenger,
+    result: EvolutionResult,
+  ): EvolutionResult {
+    result.promptEvolved = false;
+    result.abTestStarted = false;
+    result.rejectedRepeat = true;
+    result.message =
+      `Generated ${newVersion} for "${agent}", but that text was rejected ` +
+      `(as ${rejected.version}) while it was being generated, so nothing was proposed. ` +
+      `${newVersion} was left inactive and unused. Check "darwin status ${agent}".`;
+    emitMetric(this.metrics, 'rejected_repeat', agent, {
+      generator: 'unknown',
+      rejectedVersion: rejected.version,
+      action: 'refused',
+      discarded: newVersion,
+    });
+    return result;
+  }
+
+  /**
+   * Build the {@link RejectedChallenger} record for a proposal being turned
+   * down. Reads the challenger's prompt row to fingerprint it; a row that
+   * cannot be read yields an entry WITHOUT a fingerprint, which is a record
+   * of the decision that can never match a future text. Deliberate: blocking
+   * on a hash we could not compute would block the wrong thing.
+   */
+  private async buildRejectionEntry(
+    agentName: string,
+    pending: PendingApproval,
+    rejectedBy: 'human' | 'timeout',
+    reason?: string,
+  ): Promise<RejectedChallenger> {
+    let textHash: string | undefined;
+    try {
+      const versions = await this.memory.getAllPromptVersions(agentName);
+      const challenger = versions.find((v) => v.version === pending.versionB);
+      if (challenger?.promptText) textHash = fingerprintPromptText(challenger.promptText);
+    } catch {
+      // A backend hiccup must not stop a rejection: the human said no, and
+      // that answer is what has to land.
+    }
+    return {
+      version: pending.versionB,
+      versionA: pending.versionA,
+      ...(textHash !== undefined ? { textHash } : {}),
+      rejectedAt: new Date().toISOString(),
+      rejectedBy,
+      ...(rejectedBy === 'human' && reason !== undefined && reason.trim() !== ''
+        ? { reason: reason.trim() }
+        : {}),
+      generatedBy: pending.generatedBy,
+    };
+  }
+
+  /**
+   * The reviewer notes this agent's optimizers get, honouring
+   * `evolution.rejectionNoteLimit`. `0` means "block repeats but quote
+   * nothing"; unset means the default window.
+   */
+  private rejectionNotesFor(entries: ReadonlyArray<RejectedChallenger>): RejectionNote[] {
+    const configured = this.agent?.evolution?.rejectionNoteLimit;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured <= 0) {
+      return [];
+    }
+    const limit =
+      typeof configured === 'number' && Number.isFinite(configured) && configured >= 1
+        ? Math.floor(configured)
+        : REJECTION_NOTES_LIMIT;
+    return rejectionNotes(entries, { limit });
+  }
+
+  /**
+   * Append the reviewer notes to a reflective-feedback set as one extra entry.
+   * Returns the input unchanged when there is nothing to add, so a run with no
+   * rejections builds a byte-identical reflection prompt to v0.17.
+   */
+  private appendRejectionFeedback(
+    feedbacks: ReadonlyArray<ReflectiveFeedback>,
+    notes: ReadonlyArray<RejectionNote>,
+  ): ReflectiveFeedback[] {
+    const block = formatRejectionNotes(notes);
+    if (block === '') return [...feedbacks];
+    return [
+      ...feedbacks,
+      {
+        variantId: notes.map((n) => n.version).join(', '),
+        // Not a critic score. Zero is the lowest thing this field can say, and
+        // "a human rejected it" is the strongest reason in the set to not go
+        // back there. The reflector ranks by it; the text says what it is.
+        score: 0,
+        textFeedback: `REJECTED BY A HUMAN REVIEWER\n${block}`,
+      },
+    ];
+  }
+
+  /**
+   * Forget remembered rejections for an agent: one version label, or `'all'`.
+   *
+   * The escape hatch for the one way this memory can hurt: a deterministic
+   * generator that can only produce the rejected text stops proposing
+   * anything, and without this the only way out would be `--reset`, which
+   * throws the evolved incumbent back to v1.
+   */
+  async forgetRejection(
+    agentName: string,
+    which: string | 'all',
+  ): Promise<{ forgotten: number; message: string }> {
+    let forgotten = 0;
+    await this.memory.updateState((s) => {
+      forgotten = forgetRejections(s, agentName, which);
+      return s;
+    });
+    if (forgotten === 0) {
+      return {
+        forgotten: 0,
+        message:
+          which === 'all'
+            ? `Nothing remembered for "${agentName}"; nothing to forget.`
+            : `"${agentName}" has no remembered rejection for ${which}.`,
+      };
+    }
+    emitMetric(this.metrics, 'rejection_forgotten', agentName, {
+      which,
+      forgotten,
+    });
+    return {
+      forgotten,
+      message:
+        which === 'all'
+          ? `Forgot ${forgotten} remembered rejection(s) for "${agentName}". Any of those texts ` +
+            `can be proposed again.`
+          : `Forgot the rejection of ${which} for "${agentName}". That text can be proposed again.`,
+    };
+  }
+
+  /**
    * Auto-reject a proposal that outlived its budget. Never auto-APPROVES, for
    * the same reason {@link concludeInconclusive} never promotes: an absent
    * decision is not a decision.
@@ -1089,6 +1365,13 @@ export class DarwinLoop {
   ): Promise<boolean> {
     // Identity-pinned like the other two writers: a proposal that appeared
     // after the expiry decision was made is not the one that expired.
+    //
+    // v0.18.0: a lapsed proposal is remembered too, so the same text does not
+    // come straight back and lapse again. It is stored as `rejectedBy:
+    // 'timeout'` and carries no reason, which keeps it out of the notes the
+    // optimizers see: nobody read this text, so it has nothing to teach.
+    const entry = await this.buildRejectionEntry(agentName, pending, 'timeout');
+
     let raced = false;
     await this.memory.updateState((s) => {
       const live = s.pendingApprovals?.[agentName];
@@ -1097,7 +1380,7 @@ export class DarwinLoop {
         return s;
       }
       s.pendingApprovals![agentName] = null;
-      return s;
+      return rememberRejection(s, agentName, entry);
     });
     if (raced) {
       // Nothing was expired. Round 3: the callers announced the rejection and
@@ -1592,6 +1875,7 @@ export class DarwinLoop {
     agentName: string,
     currentPrompt: string,
     epoch: number = 0,
+    notes: ReadonlyArray<RejectionNote> = [],
   ): Promise<{ prompt: string; via: 'gepa' | 'merge' } | null> {
     if (!this.gepa) {
       return null;
@@ -1692,9 +1976,17 @@ export class DarwinLoop {
       return null;
     }
 
+    // v0.18.0: the reviewer's reasons enter GEPA the way GEPA takes anything,
+    // as feedback. A rejection is the strongest signal in the set (a human
+    // looked at the text and said no), so it goes in as its own entry with
+    // score 0 rather than being appended to somebody else's report, where the
+    // reflector would read it as part of that run's critique. `variantId`
+    // names the rejected version so the model can tell the two apart.
+    const withNotes = this.appendRejectionFeedback(feedbacks, notes);
+
     let mutated: string;
     try {
-      const variants = await this.gepa.generate(parentPrompt, feedbacks, {
+      const variants = await this.gepa.generate(parentPrompt, withNotes, {
         numVariants: 1,
         feedbackStrategy: 'single',
       });

@@ -49,8 +49,11 @@ export class PromptOptimizer {
     toolContext?: AgentToolContext,
     categoryStats?: CategoryStats[],
     recentFeedback?: string[],
+    rejectionNotes?: string,
   ): Promise<string> {
-    const metaPrompt = this.buildMetaPrompt(currentPrompt, patterns, stats, toolContext, categoryStats, recentFeedback);
+    const metaPrompt = this.buildMetaPrompt(
+      currentPrompt, patterns, stats, toolContext, categoryStats, recentFeedback, rejectionNotes,
+    );
     const result = await this.runPrompt(metaPrompt);
 
     // Strip any markdown fences the LLM might wrap around the output
@@ -91,6 +94,7 @@ export class PromptOptimizer {
     toolContext?: AgentToolContext,
     categoryStats?: CategoryStats[],
     recentFeedback?: string[],
+    rejectionNotes?: string,
   ): string {
     const patternSummary = this.formatPatterns(patterns);
     const statsSummary = this.formatStats(stats);
@@ -193,6 +197,15 @@ export class PromptOptimizer {
         sections.push(recentFeedback[i]);
         sections.push('');
       }
+    }
+
+    // v0.18.0: what a human already turned down, and why. Placed LAST, right
+    // before the task line, because a constraint the model has to still be
+    // holding when it starts writing belongs next to the instruction, not
+    // buried above the statistics. Absent when there is nothing to say, so a
+    // fresh agent's meta-prompt is byte-identical to v0.17.
+    if (rejectionNotes !== undefined && rejectionNotes.trim() !== '') {
+      sections.push('', '--- REJECTED BY A HUMAN REVIEWER ---', rejectionNotes);
     }
 
     sections.push(

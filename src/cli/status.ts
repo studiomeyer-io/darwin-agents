@@ -7,6 +7,7 @@
 import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
+import { rejectionsFor } from '../evolution/rejections.js';
 import type { DarwinState, MemoryProvider } from '../types.js';
 
 export async function statusCommand(args: string[]): Promise<void> {
@@ -129,6 +130,20 @@ async function showAgentStatus(
     console.log(boxLine(`  AWAITING APPROVAL: ${pending.versionA} to ${pending.versionB}`));
     console.log(boxLine(`    proposed ${pending.proposedAt.slice(0, 10)}, no test running`));
     console.log(boxLine(`    decide: darwin approve ${agentName}`));
+  }
+
+  // v0.18.0: the rejection memory, one line. It changes what the loop will
+  // propose next (a remembered text is refused), so a status view that omits
+  // it explains an agent's silence with the wrong reason.
+  const remembered = rejectionsFor(typedState, agentName);
+  if (remembered.length > 0) {
+    const last = remembered[remembered.length - 1]!;
+    console.log(
+      boxLine(
+        `  Rejected: ${remembered.length} remembered, last ${last.version} ` +
+          `on ${last.rejectedAt.slice(0, 10)}`,
+      ),
+    );
   }
 
   // Version history

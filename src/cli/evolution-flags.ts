@@ -19,6 +19,7 @@
  *   --max-test-days <n>                                        (v0.13.0)
  *   --require-approval / --no-require-approval                 (v0.17.0)
  *   --approval-timeout-days <n>                                (v0.17.0)
+ *   --rejection-notes <n>                                      (v0.18.0)
  */
 
 import type { EvolutionConfigOverride } from '../types.js';
@@ -64,6 +65,7 @@ export function isEvolutionConfigFlag(arg: string): boolean {
     case '--require-approval':
     case '--no-require-approval':
     case '--approval-timeout-days':
+    case '--rejection-notes':
       return true;
     default:
       return false;
@@ -261,6 +263,25 @@ export function applyEvolutionFlag(
       } else {
         console.warn(
           `[darwin] --approval-timeout-days "${nextArg}" is not a non-negative integer; ignored.`,
+        );
+      }
+      return 1;
+    }
+    case '--rejection-notes': {
+      // Same shape as --approval-timeout-days, same reasons: the dash guard so
+      // the flag cannot eat its neighbour, and `0` as the in-band OFF value
+      // because overrides are merged and never deleted. `0` quotes nothing to
+      // the optimizer; it does NOT stop Darwin refusing to re-propose a
+      // rejected text, which is not a preference and has no flag.
+      if (nextArg === undefined || nextArg.startsWith('-')) {
+        console.warn('[darwin] --rejection-notes needs a non-negative integer value; ignored.');
+        return 0;
+      }
+      if (/^\d+$/.test(nextArg.trim())) {
+        target.rejectionNoteLimit = Number(nextArg.trim());
+      } else {
+        console.warn(
+          `[darwin] --rejection-notes "${nextArg}" is not a non-negative integer; ignored.`,
         );
       }
       return 1;

@@ -572,13 +572,71 @@ Where the gate stops, said plainly:
   `darwin approve` listing without making listing its own subcommand. It fails
   safe (nothing is approved) but a script will believe it decided. Quote and
   check your variables, or use `--reject`/`--force`, which do fail loudly.
-- **`useDemos` plus the gate can re-propose the same challenger.** The demo
-  path builds its challenger from the ACTIVE prompt, and rejecting does not
-  change the active prompt, so a rejected demo challenger comes back on the
-  next `demoEveryK` cycle with a new label and the same text. Nothing reaches
-  traffic, but you get asked the same question again. Darwin remembers rejected
-  version LABELS, not rejected TEXTS; giving it the second kind of memory is a
-  separate piece of work, not a line in this one.
+- **`useDemos` plus the gate could re-propose the same challenger.** Fixed in
+  v0.18 by the rejection memory below, which is where the second kind of memory
+  lives.
+
+### Rejection memory (v0.18, always on once you reject something)
+
+Up to v0.17 Darwin remembered which version LABELS a human had turned down. It
+did not remember the TEXTS. That reads like a detail until you meet the demo
+generator, which builds its challenger deterministically from the active prompt
+plus the agent's best runs: rejecting changes neither input, so the identical
+prompt came back on the next cadence cycle under a fresh label, and you were
+asked the same question again.
+
+From v0.18 a rejection is remembered by its text, and two things follow.
+
+**The same text is not proposed twice.** Rejecting fingerprints the prompt
+(SHA-256 over the text, whitespace normalised) and stores it against the agent.
+When a generator produces that text again the cycle does not stop: it falls
+through to the next generator, which is why the agent keeps evolving. Only when
+EVERY generator repeats is the cycle refused, with nothing written and a message
+naming the way out.
+
+The refusal holds even if you later turn the approval gate off. Rejections only
+ever come from the gate, but pushing a text somebody explicitly turned down onto
+half of live traffic is worse than asking again.
+
+**The reviewer's reason reaches the next generation.** `--reason` was recorded
+for the human's benefit up to v0.17. Now it is quoted back to whichever
+optimizer runs next: as its own block before the task line in the legacy
+meta-prompt, and as its own feedback entry (score 0, labelled with the rejected
+version) for the GEPA reflector. A "no" buys one cycle. A "no, because it drops
+the citation rule" buys the rest of them.
+
+```bash
+darwin approve writer --reject --reason "drops the citation rule"
+
+# later, if you want that text to be proposable again
+darwin approve writer --forget v4
+darwin approve writer --forget all
+```
+
+`darwin status <agent>` shows how many rejections are remembered and the most
+recent one; `darwin approve <agent>` lists the last three above the diff, so the
+same objection is not typed twice.
+
+Where it stops, said plainly:
+
+- **It is exact-match memory, not semantic memory.** Whitespace is ignored;
+  everything else is not. A challenger that differs by one word is a NEW
+  proposal and will be shown to you. That is deliberate: a fuzzy match would
+  eventually refuse something a reviewer wanted to see, and a refusal nobody can
+  predict is worse than one question too many.
+- **A timeout is remembered too, and teaches nothing.** A lapsed proposal blocks
+  its own text from coming straight back, but carries no reason into the next
+  generation, because nobody read it.
+- **The list is capped at 100 per agent**, oldest dropped first. Every entry
+  costs a human decision or a lapsed budget to create, so it grows at human
+  speed; the cap exists because the state is read on every run.
+- **`--rejection-notes <n>`** controls how many reasons are quoted (default 5,
+  `0` for none). The refusal to re-propose is unconditional and has no flag: it
+  is a correctness property, not a preference.
+- **A deterministic generator can run out of ideas.** If the only text your
+  agent can produce has been rejected, it stops proposing and says so on every
+  run. That is the honest state of affairs rather than a bug, and `--forget` is
+  how you take it back.
 
 ### Why this is different
 
@@ -758,6 +816,8 @@ appeared — worth knowing, and each good at what it does:
 | Offline dataset evals | Yes (v0.14) | **Yes** | **Yes** | Cold-start harness |
 | Cost/latency as objectives | No (roadmap) | No | **Yes** (+ USD budget caps) | Pareto (quality/cost/latency) |
 | Metrics export | JSONL + OTel bridge (v0.14) | WandB | Logger hook | **Prometheus/Grafana** |
+| Human approval before a challenger gets traffic | **Yes** (v0.17, opt-in) | n/a (offline) | n/a (offline) | No |
+| Remembers a rejected prompt, not just its label | **Yes** (v0.18) | n/a (offline) | n/a (offline) | No |
 | Zero hard deps | **Yes** | No | No | ~ (SQLite) |
 
 The one thing none of the others ship — and Darwin's actual point — is the
@@ -817,6 +877,8 @@ darwin evolve writer --force       # Force one optimization cycle now
 darwin approve                     # List challengers held by the approval gate
 darwin approve writer              # Show both prompts, then start the proposed A/B test
 darwin approve writer --reject     # Discard the proposal, free the slot
+darwin approve writer --reject --reason "drops the citation rule"   # ... and tell the next optimizer why
+darwin approve writer --forget v4  # Let a rejected text be proposed again
 
 darwin create my-agent             # Scaffold a new agent
 ```
@@ -851,6 +913,7 @@ darwin run writer "Explain consensus" --gepa --pareto-gate
 | `--confidence-method <m>` | Which statistic backs that gate: `effect-size` \| `msprt` \| `hoeffding` \| `eb` (v0.14; `eb` v0.16) |
 | `--require-approval` / `--no-require-approval` | Hold every challenger for a human decision instead of opening an A/B test (v0.17) |
 | `--approval-timeout-days <n>` | Auto-**reject** an untouched proposal after n days, freeing the slot. Never auto-approves. `0` = wait forever, for proposals made from then on (v0.17) |
+| `--rejection-notes <n>` | How many past rejection reasons the optimizer is shown when generating the next challenger. `0` quotes none; refusing to re-propose a rejected text is unconditional either way (v0.18) |
 
 All default to **off** — the baseline single-objective evolution loop is
 unchanged unless you opt in.
@@ -908,6 +971,7 @@ The safety gate prevents regressions. If a new variant scores >20% lower, Darwin
 - **Statistical simplicity (default)**: A/B tests use mean comparison with a 5% threshold by default, not formal significance tests. `computeDynamicMinRuns()` adjusts sample sizes from the observed spread, as a throughput heuristic rather than a power calculation. For rigor, v0.6 added an opt-in `requireConfidence` effect-size gate, v0.7 added sequential tests (`confidenceMethod: 'msprt'` / `'hoeffding'`), and v0.16 added `'eb'` (empirical Bernstein: calibrated like Hoeffding, variance-adaptive like mSPRT). Since v0.14 they are one config block away: `evolution.safety: { requireConfidence: true, confidenceMethod: 'eb' }` or `darwin evolve <agent> --require-confidence --confidence-method eb`, with no hand-wired `SafetyGate` needed. The default path remains the simple threshold for zero-config use. **What those tests guarantee, what they only approximate, and the boundary we shipped wrong until v0.15, are all in [statistical scope](#statistical-scope-what-the-sequential-tests-do-and-do-not-guarantee). Read it before treating a promotion as a significant result.**
 - **Our numbers are our own**: the [benchmark](benchmark/) is reproducible (frozen tasks, both prompts, the scoring loop, all in the repo) but it is ten tasks scored by an LLM judge, and the production figures quoted anywhere in this README come from our own fleet with our own critics. Nobody independent has evaluated Darwin. Treat every number here as a starting point for your own measurement, not as evidence.
 - **No human-in-the-loop approval by default**: prompt mutations go straight to A/B testing unless you turn on the v0.17 approval gate (`evolution.requireApproval` / `darwin evolve <agent> --require-approval`). With the gate off (the default, and how every release up to v0.16 behaved) Telegram tells you a challenger started, it does not ask you. See [approval gate](#human-approval-gate-v017-opt-in).
+- **Rejection memory is exact-match**: v0.18 stops a rejected prompt TEXT coming back, by fingerprinting it. A challenger that differs by one word is a new proposal and will be shown to you again. Nothing here understands what a reviewer meant, only the reason they typed is carried forward, and only to whichever optimizer runs next. See [rejection memory](#rejection-memory-v018-always-on-once-you-reject-something).
 
 ## Contributing
 

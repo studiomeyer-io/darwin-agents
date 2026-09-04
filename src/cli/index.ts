@@ -50,6 +50,7 @@ const HELP = `
     darwin approve                          List proposals awaiting approval
     darwin approve researcher               Show the diff, then approve it
     darwin approve researcher --reject      Discard it and free the slot
+    darwin approve researcher --forget v4   Forget that v4 was rejected
 
   Evolve flags:
     --enable / --disable  Persistently turn self-evolution on/off for an agent
@@ -79,11 +80,13 @@ const HELP = `
     --confidence-method <m>       effect-size | msprt | hoeffding | eb (v0.14; eb v0.16)
     --require-approval / --no-require-approval       hold challengers for a human (v0.17)
     --approval-timeout-days <n>   auto-reject an untouched proposal after n days (v0.17)
+    --rejection-notes <n>         how many past rejection reasons the optimizer sees, 0 = none (v0.18)
 
   Approve flags (darwin approve):
     --reject                      Discard the proposal instead of starting its A/B test
-    --reason <text>               Recorded with the rejection
+    --reason <text>               Recorded with the rejection, and shown to the next optimizer
     --force                       Approve even though the active prompt moved since the proposal
+    --forget <version|all>        Forget a remembered rejection so that text can be proposed again
 
   Eval flags (darwin eval):
     --tasks <file.json>           Frozen task set ([{id, type, task}, …])

@@ -66,6 +66,7 @@ import { loadConfig } from '../src/core/agent.js';
 import { createMemory } from '../src/memory/index.js';
 import { setMaxRunsPerProcess, setMaxRunWallMs } from '../src/core/runner.js';
 import { setEvolutionConfigOverrides, setEvolutionEnabled } from '../src/evolution/enabled-state.js';
+import { fingerprintPromptText } from '../src/evolution/rejections.js';
 import { isolateTestEnv, makeExperiment, makePromptVersion } from './helpers.js';
 import type { DarwinExperiment, MemoryProvider, PendingApproval } from '../src/types.js';
 
@@ -523,6 +524,117 @@ describe('darwin evolve refuses what it does not understand', () => {
     await verify.close();
     assert.equal(state.evolutionEnabled?.['writer'], false, '--disable took effect');
     assert.equal(state.evolutionConfigOverrides?.['writer']?.useGepa, true, '--gepa persisted');
+  });
+});
+
+describe('v0.18 rejection memory, through the real commands', () => {
+  /**
+   * The whole loop end to end: `darwin run` proposes, `darwin approve
+   * --reject --reason` turns it down, and the next `darwin run` refuses the
+   * repeat instead of asking again.
+   *
+   * The stubbed provider answers every call with the SAME text, so the
+   * optimizer is deterministic here. That is not a contrivance for the test,
+   * it is the case the release is about: the demo generator is deterministic
+   * by construction, and rejecting changes neither of its two inputs.
+   */
+  async function proposeOnce(): Promise<MemoryProvider> {
+    const memory = createMemory(await loadConfig());
+    await memory.init();
+    await seedWeakAgent(memory, 'writer');
+    await setEvolutionConfigOverrides(memory, 'writer', { requireApproval: true });
+    await memory.close();
+    await runCommand(['writer', 'Write about caching', '--no-critic']);
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    return verify;
+  }
+
+  it('remembers the rejected TEXT and refuses to re-propose it', async () => {
+    freshWorkspace();
+    const after1 = await proposeOnce();
+    const pending = (await after1.getState()).pendingApprovals?.['writer'];
+    assert.ok(pending, 'the gate must have parked a proposal');
+    const challengerText = (await after1.getAllPromptVersions('writer'))
+      .find((v) => v.version === pending!.versionB)?.promptText;
+    assert.ok(challengerText, 'the challenger must be readable');
+    await after1.close();
+
+    await approveCommand(['writer', '--reject', '--reason', 'drops the citation rule']);
+
+    const afterReject = createMemory(await loadConfig());
+    await afterReject.init();
+    const remembered = (await afterReject.getState()).rejectedChallengers?.['writer'] ?? [];
+    await afterReject.close();
+    assert.equal(remembered.length, 1, 'the rejection must be remembered');
+    assert.equal(remembered[0]!.reason, 'drops the citation rule');
+    assert.equal(
+      remembered[0]!.textHash,
+      fingerprintPromptText(challengerText!),
+      'and it must be remembered by its TEXT',
+    );
+
+    // Second run: same inputs, so the same challenger text. Before v0.18 this
+    // parked a fresh proposal under a new label and asked the same question.
+    await runCommand(['writer', 'Write about caching again', '--no-critic']);
+
+    const afterRepeat = createMemory(await loadConfig());
+    await afterRepeat.init();
+    const state = await afterRepeat.getState();
+    const versions = await afterRepeat.getAllPromptVersions('writer');
+    await afterRepeat.close();
+
+    assert.equal(state.pendingApprovals?.['writer'] ?? null, null, 'nothing new may be parked');
+    assert.equal(state.abTests['writer'] ?? null, null, 'and no test may open');
+    assert.equal(
+      versions.filter((v) => v.version === 'v3').length,
+      0,
+      'a refused repeat writes no version row',
+    );
+  });
+
+  it('and --forget releases it, so the same text can be proposed again', async () => {
+    freshWorkspace();
+    const after1 = await proposeOnce();
+    const pending = (await after1.getState()).pendingApprovals?.['writer'];
+    assert.ok(pending);
+    const rejectedLabel = pending!.versionB;
+    await after1.close();
+
+    await approveCommand(['writer', '--reject']);
+    await runCommand(['writer', 'Write about caching again', '--no-critic']);
+
+    const blocked = createMemory(await loadConfig());
+    await blocked.init();
+    assert.equal(
+      (await blocked.getState()).pendingApprovals?.['writer'] ?? null,
+      null,
+      'still blocked before forgetting',
+    );
+    await blocked.close();
+
+    await approveCommand(['writer', '--forget', rejectedLabel]);
+    await runCommand(['writer', 'Write about caching once more', '--no-critic']);
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.ok(
+      state.pendingApprovals?.['writer'],
+      'after forgetting, the same text is proposable again',
+    );
+    assert.deepEqual(
+      state.rejectedChallengers?.['writer'] ?? [],
+      [],
+      'and the memory is empty',
+    );
+  });
+
+  it('nothing here reached the network beyond the stub', () => {
+    // Same counter the rest of this file uses: if a future change routes the
+    // optimizer back through a spawned CLI, this stays at zero and says so.
+    assert.ok(fetchCalls > 0, 'the stub must have been exercised');
   });
 });
 

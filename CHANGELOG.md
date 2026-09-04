@@ -2,6 +2,93 @@
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-09-04
+
+v0.17 shipped the approval gate and, in the same README, named what it did not
+do: "`useDemos` plus the gate can re-propose the same challenger. Darwin
+remembers rejected version LABELS, not rejected TEXTS; giving it the second kind
+of memory is a separate piece of work, not a line in this one." This is that
+piece of work.
+
+### Added
+
+- **Rejection memory.** Turning a challenger down fingerprints its prompt
+  (SHA-256 over the text, whitespace normalised) and stores it against the agent
+  in `DarwinState.rejectedChallengers`. When a generator produces that text
+  again, it is not proposed.
+
+  Two properties matter more than the fingerprint:
+
+  A repeat **falls through to the next generator** rather than ending the cycle.
+  The demo path is the deterministic one, so it is the one that repeats; GEPA
+  and the legacy optimizer are not, and they now know why the last attempt was
+  turned down. Only a cycle in which EVERY generator repeats is refused, with
+  nothing written and a message naming `--forget`.
+
+  The refusal **holds with the approval gate off**. Rejections only ever come
+  from the gate, but the gate can be turned off afterwards, and putting an
+  explicitly rejected text straight onto half of live traffic is worse than
+  asking again.
+
+- **The reviewer's reason reaches the next generation.** `--reason` was recorded
+  for the human up to v0.17. It is now quoted back to whichever optimizer runs
+  next: its own block before the task line in the legacy meta-prompt, and its
+  own feedback entry for the GEPA reflector (score 0, labelled with the rejected
+  version, so the reflector cannot read it as part of some run's critique).
+  Only HUMAN rejections with a reason become notes: a lapsed proposal says
+  nothing about the text, because nobody read it.
+
+- **`darwin approve <agent> --forget <version|all>`**, and
+  `DarwinLoop.forgetRejection()`. The escape hatch for the one way this memory
+  can hurt: a generator that can only produce the rejected text stops proposing
+  anything. Without this the only way out would be `--reset`, which throws the
+  evolved incumbent back to v1. Refused when combined with a decision flag,
+  because "forget v4 and also approve v5" is two commands pretending to be one.
+
+- **`evolution.rejectionNoteLimit` / `--rejection-notes <n>`**: how many past
+  reasons are quoted (default 5, `0` for none). The refusal to re-propose has no
+  flag: it is a correctness property, not a preference.
+
+- **Two metric events**: `rejected_repeat` (with `generator` and `action`:
+  `fell_through`) and `rejection_forgotten`. `EvolutionResult.rejectedRepeat`
+  gets its own CLI branch (`NOTHING NEW TO PROPOSE`) for the same reason
+  `awaitingApproval` did in v0.17: this state RECURS with the same inputs, so
+  under the generic "nothing happened" tail an agent stops evolving quietly.
+
+- The rejection surface is exported from the package root
+  (`fingerprintPromptText`, `findRejectedMatch`, `rejectionsFor`,
+  `rejectionNotes`, `formatRejectionNotes`, `normalizePromptText`, the two caps
+  and the `RejectedChallenger` / `RejectionNote` types), for the same consumers
+  that compose their own loop.
+
+- `darwin status <agent>` shows how many rejections are remembered and the most
+  recent one; `darwin approve <agent>` lists the last three above the diff.
+
+### Changed
+
+- One test in `tests/approval-gate.test.ts` encoded the old behaviour: with a
+  deterministic stub optimizer, the cycle after a rejection used to propose the
+  identical text under a fresh label. It now pins both halves, the refusal and
+  the unchanged v0.13.0 label rule.
+
+### Notes
+
+- **Exact-match, and it says so.** Whitespace is normalised; nothing else is. A
+  challenger differing by one word is a NEW proposal and will be shown. A fuzzy
+  match would eventually refuse something a reviewer wanted to see, and a
+  refusal nobody can predict is worse than one question too many.
+- The list is capped at 100 entries per agent, oldest dropped first.
+- A rejection whose prompt row cannot be read is stored WITHOUT a fingerprint:
+  it records the decision and its reason but can never match, because blocking
+  on a hash that could not be computed would block the wrong text.
+- Both writes happen inside the same `updateState` callback that clears the
+  proposal. Two writes would leave a window in which the proposal is gone and
+  the memory of it does not exist yet, which is exactly when the next cycle
+  would re-propose it.
+- With nothing rejected, every prompt this release touches is byte-identical to
+  v0.17: `formatRejectionNotes([])` returns `''` and both optimizers skip the
+  block.
+
 ## [0.17.0] - 2026-09-02
 
 The README has carried this under Known Limitations since the first release:

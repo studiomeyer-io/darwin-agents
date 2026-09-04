@@ -43,6 +43,7 @@ export type {
   PendingApproval,
   PromptVersion,
   PromptVersionStats,
+  RejectedChallenger,
   RunResult,
   SafetyThresholds,
   TraceToolCall,
@@ -66,6 +67,21 @@ export { ClaudeCliProvider } from './providers/claude-cli.js';
 
 // Memory
 export { createMemory, SqliteMemoryProvider, PostgresMemoryProvider } from './memory/index.js';
+
+// V0.18.0 - the rejection memory. Exported because the same consumers that
+// compose their own loop (below) need to read and reason about what a human
+// turned down: which texts are blocked, and what the reviewer said.
+export {
+  fingerprintPromptText,
+  findRejectedMatch,
+  formatRejectionNotes,
+  normalizePromptText,
+  rejectionNotes,
+  rejectionsFor,
+  REJECTION_MEMORY_CAP,
+  REJECTION_NOTES_LIMIT,
+} from './evolution/rejections.js';
+export type { RejectionNote } from './evolution/rejections.js';
 
 // Notifications
 export { loadNotificationConfig } from './evolution/notifications.js';

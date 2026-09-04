@@ -115,6 +115,39 @@ describe('parseApproveArgs: anything unrecognised is an ERROR, never a shrug', (
   });
 });
 
+describe('parseApproveArgs: --forget (v0.18)', () => {
+  it('takes a version or "all"', () => {
+    assert.equal(parseApproveArgs(['writer', '--forget', 'v4']).forget, 'v4');
+    assert.equal(parseApproveArgs(['writer', '--forget', 'all']).forget, 'all');
+    assert.deepEqual(parseApproveArgs(['writer', '--forget', 'v4']).errors, []);
+  });
+
+  it('treats a following flag as a MISSING value, single dash included', () => {
+    // The same class the rest of this CLI was hardened against: without the
+    // guard, `--forget --reject` would try to forget a version called
+    // "--reject" AND swallow the rejection.
+    for (const following of ['--reject', '--force', '-v']) {
+      const parsed = parseApproveArgs(['writer', '--forget', following]);
+      assert.equal(parsed.forget, undefined, `--forget stored "${following}" as a version`);
+      assert.ok(
+        parsed.errors.some((e) => e.includes('--forget needs a version')),
+        `--forget ${following} must report the missing value, got: ${parsed.errors.join('; ')}`,
+      );
+      // `-v` collects a SECOND error from the unknown-flag branch, because it
+      // is not an approve flag either. Two complaints about one typo is the
+      // documented behaviour of this parser ("collects every problem rather
+      // than stopping at the first"), so the count is not asserted.
+    }
+  });
+
+  it('is not confused with the agent name', () => {
+    const parsed = parseApproveArgs(['--forget', 'v4', 'writer']);
+    assert.equal(parsed.agent, 'writer');
+    assert.equal(parsed.forget, 'v4');
+    assert.deepEqual(parsed.errors, []);
+  });
+});
+
 describe('approveCommand refuses before it touches anything', () => {
   // Round 3 found this fix uncovered: the guard existed, was measured live at
   // exit 1, and no test called `approveCommand` at all. Deleting the guard left
@@ -155,6 +188,29 @@ describe('approveCommand refuses before it touches anything', () => {
       () => approveCommand(['--reject', '--force']),
       /--reject, --force needs an agent/,
     );
+  });
+
+  it('refuses --forget combined with a decision, rather than picking an order', async () => {
+    // v0.18: "forget v4 and also approve v5" is two commands pretending to be
+    // one, and which happens first is not written down anywhere. Refusing is
+    // the only answer that cannot be the wrong one.
+    await assert.rejects(
+      () => approveCommand(['writer', '--forget', 'v4', '--reject']),
+      /cannot be combined with a decision/,
+    );
+    await assert.rejects(
+      () => approveCommand(['writer', '--forget', 'v4', '--force']),
+      /cannot be combined with a decision/,
+    );
+    await assert.rejects(
+      () => approveCommand(['writer', '--forget', 'v4', '--reason', 'x']),
+      /cannot be combined with a decision/,
+    );
+  });
+
+  it('refuses --forget with no agent, naming the empty-variable trap', async () => {
+    await assert.rejects(() => approveCommand(['--forget', 'v4']), /--forget needs an agent/);
+    await assert.rejects(() => approveCommand(['', '--forget', 'v4']), /--forget needs an agent/);
   });
 
   it('throws on a second agent name rather than picking one', async () => {

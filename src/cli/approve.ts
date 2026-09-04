@@ -1,5 +1,5 @@
 /**
- * darwin approve [agent] [--reject] [--reason <text>] [--force]
+ * darwin approve [agent] [--reject] [--reason <text>] [--force] [--forget <v|all>]
  *
  * The human half of the v0.17.0 approval gate
  * ({@link EvolutionConfig.requireApproval}). With the gate on, a generated
@@ -11,6 +11,8 @@
  *   darwin approve researcher --reject   discard it, free the slot
  *   darwin approve researcher --reject --reason "leaks the system prompt"
  *   darwin approve researcher --force    approve even though the incumbent moved
+ *   darwin approve researcher --forget v4      forget one remembered rejection
+ *   darwin approve researcher --forget all     forget all of them
  *
  * Without a diff there is nothing to approve, so the command prints the
  * incumbent and challenger prompts before acting. A proposal is a prompt, and
@@ -34,6 +36,7 @@ import { createMemory } from '../memory/index.js';
 import { loadConfig } from '../core/agent.js';
 import { builtinAgents } from '../agents/index.js';
 import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
+import { rejectionsFor } from '../evolution/rejections.js';
 import type { AgentDefinition, MemoryProvider, PendingApproval } from '../types.js';
 
 /** Everything one walk over argv produces. */
@@ -42,6 +45,13 @@ export interface ApproveArgs {
   reject: boolean;
   force: boolean;
   reason?: string;
+  /**
+   * v0.18.0 - a version label to forget, or `'all'`. Not a decision on a
+   * proposal: it edits the rejection MEMORY and is refused together with a
+   * decision flag, because "forget v4 and also approve v5" is two commands
+   * pretending to be one.
+   */
+  forget?: string;
   /** Human-readable reasons the input was refused. Empty means usable. */
   errors: string[];
 }
@@ -85,6 +95,19 @@ export function parseApproveArgs(args: string[]): ApproveArgs {
       continue;
     }
 
+    if (arg === '--forget') {
+      const next = args[i + 1];
+      // Same dash guard as --reason, same reason: `--forget --reject` must be
+      // a missing value, not a request to forget a version called "--reject".
+      if (next === undefined || next.startsWith('-')) {
+        out.errors.push('--forget needs a version or "all", for example: --forget v4');
+        continue;
+      }
+      out.forget = next;
+      i++;
+      continue;
+    }
+
     if (arg.startsWith('-')) {
       // `--reject=true` is the most likely near-miss, so it gets its own line.
       // Deliberately does NOT suggest `--reject true`: --reject is a boolean,
@@ -101,7 +124,8 @@ export function parseApproveArgs(args: string[]): ApproveArgs {
             }`
           : '';
       out.errors.push(
-        `unknown flag "${arg}".${hint} Valid: --reject, --reason <text>, --force`,
+        `unknown flag "${arg}".${hint} Valid: --reject, --reason <text>, --force, ` +
+          `--forget <version|all>`,
       );
       continue;
     }
@@ -146,6 +170,16 @@ export async function approveCommand(args: string[]): Promise<void> {
   // (it is a non-flag token). What saves it is that `''` is falsy, so both
   // `!agentName` checks still fire. Worth stating precisely, because the
   // wrong version invited someone to rely on `agent === undefined`.
+  // v0.18.0: forgetting is not a decision on a proposal, and mixing it with one
+  // makes the outcome depend on an ordering nobody wrote down. Refuse instead
+  // of picking an order.
+  if (parsed.forget !== undefined && (parsed.reject || parsed.force || parsed.reason !== undefined)) {
+    throw new Error(
+      `darwin approve: --forget edits the rejection memory and cannot be combined with a ` +
+        `decision on a pending proposal. Run them one at a time.`,
+    );
+  }
+
   if (!agentName && (parsed.reject || parsed.force || parsed.reason !== undefined)) {
     const given = [
       parsed.reject ? '--reject' : null,
@@ -159,10 +193,33 @@ export async function approveCommand(args: string[]): Promise<void> {
     );
   }
 
+  if (!agentName && parsed.forget !== undefined) {
+    throw new Error(
+      `darwin approve: --forget needs an agent to act on, and none was given ` +
+        `(an empty shell variable looks exactly like this).\n` +
+        `  Usage: darwin approve <agent> --forget <version|all>`,
+    );
+  }
+
   const config = await loadConfig();
   const memory = createMemory(config);
   await memory.init();
   const state = await memory.getState();
+
+  // v0.18.0: forgetting is handled BEFORE the proposal lookup, because the
+  // normal case has no proposal pending at all: a text is rejected, the memory
+  // outlives the proposal, and this is how it is cleared. It also works for an
+  // agent that no longer exists, for the same reason rejecting does.
+  if (agentName && parsed.forget !== undefined) {
+    const known = builtinAgents[agentName];
+    const target = known ?? stubAgent(agentName);
+    const loop = buildResolvedEvolutionLoop(target, state, config, memory);
+    const which = parsed.forget === 'all' ? 'all' : parsed.forget;
+    const res = await loop.forgetRejection(agentName, which);
+    console.log(`[darwin] ${res.message}`);
+    await memory.close();
+    return;
+  }
 
   // No agent named: list everything pending.
   if (!agentName) {
@@ -218,14 +275,7 @@ export async function approveCommand(args: string[]): Promise<void> {
     }
     // Rejecting only clears state, so it works without a definition. Build the
     // loop against a minimal stand-in: rejectChallenger touches memory only.
-    const stub: AgentDefinition = {
-      name: agentName,
-      role: agentName,
-      description: 'removed agent, proposal cleanup only',
-      type: 'llm',
-      systemPrompt: '',
-      model: 'claude-sonnet-4-6',
-    };
+    const stub = stubAgent(agentName);
     const res = await buildResolvedEvolutionLoop(stub, state, config, memory).rejectChallenger(
       agentName,
       parsed.reason,
@@ -293,10 +343,44 @@ async function printProposal(
     return false;
   }
 
+  const remembered = rejectionsFor(await memory.getState(), agentName);
+  if (remembered.length > 0) {
+    // v0.18.0: what this agent has already had turned down, so the same
+    // objection is not typed twice. Shown before the prompts, because it
+    // changes how the challenger below is read.
+    const recent = remembered.slice(-3).reverse();
+    console.log(`  previously rejected (${remembered.length} remembered):`);
+    for (const r of recent) {
+      const by = r.rejectedBy === 'timeout' ? 'lapsed' : 'rejected';
+      console.log(
+        `    ${r.version} ${by} ${r.rejectedAt.slice(0, 10)}${r.reason ? `: ${r.reason}` : ''}`,
+      );
+    }
+    console.log('');
+  }
+
   console.log(`--- ${p.versionA} (active) ${'-'.repeat(30)}`);
   console.log(incumbent.promptText);
   console.log(`\n--- ${p.versionB} (proposed) ${'-'.repeat(28)}`);
   console.log(challenger.promptText);
   console.log('');
   return true;
+}
+
+/**
+ * A minimal {@link AgentDefinition} for an agent that has no definition any
+ * more (renamed, removed) but still has state to clean up. Only the
+ * memory-touching operations may be run against it: rejecting a proposal and
+ * forgetting a rejection. Approving needs a real agent, because the A/B test
+ * has to run something.
+ */
+function stubAgent(agentName: string): AgentDefinition {
+  return {
+    name: agentName,
+    role: agentName,
+    description: 'removed agent, state cleanup only',
+    type: 'llm',
+    systemPrompt: '',
+    model: 'claude-sonnet-4-6',
+  };
 }

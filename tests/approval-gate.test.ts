@@ -383,7 +383,24 @@ describe('v0.17 approval gate: rejecting', () => {
       'the rejected prompt stays on the record',
     );
 
-    // The next challenger must NOT reuse the rejected label (v0.13.0).
+    // v0.18.0: the optimizer stub is deterministic, so the next cycle produces
+    // the byte-identical text that was just rejected. Before v0.18 that was
+    // proposed again under a fresh label; now it is refused, and the message
+    // names the escape hatch.
+    const repeat = await loop.forceEvolve('researcher');
+    assert.equal(repeat.promptEvolved, false, 'a rejected TEXT is not re-proposed');
+    assert.equal(
+      memory._versions.filter((v) => v.version === 'v3').length,
+      0,
+      'a refused repeat writes no version row',
+    );
+    assert.ok(repeat.message.includes('--forget'), repeat.message);
+
+    // And with genuinely new text, the label rule from v0.13.0 still holds:
+    // v2 is spent even though it lost, so the next challenger is v3.
+    (loop as unknown as { optimizer: PromptOptimizer }).optimizer = new PromptOptimizer(
+      async () => 'You are a careful research agent. Never fabricate sources. Cite primary documents.',
+    );
     const next = await loop.forceEvolve('researcher');
     assert.equal(next.newVersion, 'v3', `expected v3, got ${next.newVersion}`);
 

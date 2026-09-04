@@ -635,6 +635,12 @@ async function runCommandInner(
       // other "nothing to do here" status, which is exactly how an agent
       // quietly stops evolving.
       console.log(`[darwin] APPROVAL NEEDED: ${evoResult.message}`);
+    } else if (evoResult.rejectedRepeat) {
+      // v0.18.0: same reasoning as the branch above, and the same failure mode.
+      // A refused repeat recurs with the same inputs, so an agent sits here
+      // until someone forgets the rejection or its runs change. Under the
+      // generic tail that reads like an ordinary quiet cycle.
+      console.log(`[darwin] NOTHING NEW TO PROPOSE: ${evoResult.message}`);
     } else if (evoResult.abTestStarted) {
       console.log(`[darwin] EVOLVED: ${evoResult.message}`);
     } else if (evoResult.abTestCompleted) {

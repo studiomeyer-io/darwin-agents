@@ -111,6 +111,17 @@ export interface EvolutionConfig {
    */
   approvalTimeoutDays?: number;
   /**
+   * v0.18.0: how many past HUMAN rejections (with a reason) are shown to the
+   * optimizer when it generates the next challenger, most recent first.
+   *
+   * The refusal to re-propose a rejected TEXT is unconditional and needs no
+   * knob: it is a correctness property, not a preference. This number only
+   * controls how much of the reviewer's reasoning is quoted back to the model,
+   * because that costs context. `0` turns the quoting off and leaves the
+   * refusal in place. Default 5.
+   */
+  rejectionNoteLimit?: number;
+  /**
    * v0.14.0 — Per-agent safety-gate thresholds, merged over
    * {@link DEFAULT_SAFETY}. This is the config-level door to the v0.6/v0.7
    * statistical rigor knobs ({@link SafetyThresholds.requireConfidence},
@@ -628,6 +639,42 @@ export interface PendingApproval {
   generatedBy: 'gepa' | 'merge' | 'demos' | 'legacy';
 }
 
+/**
+ * v0.18.0: one challenger a human (or a lapsed approval budget) turned down,
+ * remembered by its TEXT so the same proposal is not put in front of the same
+ * person twice.
+ *
+ * Up to v0.17 Darwin remembered rejected version LABELS only. The demo path
+ * builds its challenger deterministically from the active prompt plus the
+ * agent's best runs, and rejecting does not change the active prompt, so a
+ * rejected demo challenger returned on the next cadence cycle with a new label
+ * and identical text.
+ */
+export interface RejectedChallenger {
+  /** Label of the rejected version, e.g. "v4". Labels are never reused. */
+  version: string;
+  /** The incumbent the rejected challenger was measured against. */
+  versionA: string;
+  /**
+   * SHA-256 of the whitespace-normalised prompt text (see
+   * `evolution/rejections.ts`). Absent when the prompt row could not be read
+   * at rejection time: such an entry still carries a reason but can never
+   * match, because a fingerprint that is not there must not block anything.
+   */
+  textHash?: string;
+  /** ISO timestamp of the rejection. */
+  rejectedAt: string;
+  /** Who said no. `timeout` means the approval budget lapsed. */
+  rejectedBy: 'human' | 'timeout';
+  /**
+   * The reviewer's `--reason`, when they gave one. Only human reasons reach
+   * the optimizers: a timeout says nothing about the text.
+   */
+  reason?: string;
+  /** Which generator produced the rejected challenger. */
+  generatedBy: 'gepa' | 'merge' | 'demos' | 'legacy';
+}
+
 export interface DarwinState {
   /** Active prompt version per agent */
   activeVersions: Record<string, string>;
@@ -675,6 +722,15 @@ export interface DarwinState {
    * other inside a single `updateState` callback.
    */
   pendingApprovals?: Record<string, PendingApproval | null>;
+  /**
+   * v0.18.0: challengers a human turned down, per agent, oldest first and
+   * capped at `REJECTION_MEMORY_CAP` (evolution/rejections.ts). Used for two
+   * things: refusing to re-propose a text that was already rejected, and
+   * passing the reviewer's reasons into the next generation so the optimizer
+   * knows WHY. Optional and read defensively: state rows written before this
+   * field existed simply lack it.
+   */
+  rejectedChallengers?: Record<string, RejectedChallenger[]>;
 }
 
 /**
@@ -710,6 +766,8 @@ export interface EvolutionConfigOverride {
   requireApproval?: boolean;
   /** v0.17.0: auto-reject an untouched proposal after n days (`--approval-timeout-days <n>`). */
   approvalTimeoutDays?: number;
+  /** v0.18.0 - how many rejection reasons reach the optimizer (`--rejection-notes <n>`). */
+  rejectionNoteLimit?: number;
 }
 
 // ─── Patterns ───────────────────────────────────────

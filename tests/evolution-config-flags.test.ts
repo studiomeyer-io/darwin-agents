@@ -223,6 +223,7 @@ const FLAG_FOR_KEY: Record<string, readonly [string, string | undefined]> = {
   confidenceMethod: ['--confidence-method', 'eb'],
   requireApproval: ['--require-approval', undefined],
   approvalTimeoutDays: ['--approval-timeout-days', '5'],
+  rejectionNoteLimit: ['--rejection-notes', '3'],
 };
 
 describe('every OVERRIDE_KEY is wired through the bookkeeping places', () => {
@@ -480,6 +481,69 @@ describe('a persisted override reaches the behaviour it controls', () => {
       'the persisted timeout must actually expire the proposal',
     );
   });
+
+  it('persisted --rejection-notes 0 reaches the loop and silences the quoting', async () => {
+    // Round 2's lesson applied to the v0.18 knob: the bookkeeping guard above
+    // proves the flag is parsed and printed, not that it changes anything. The
+    // observable is the meta-prompt the optimizer is handed, so the stub
+    // records it.
+    const memory = seeded();
+    await setEvolutionConfigOverrides(memory, gateAgent.name, {
+      requireApproval: true,
+      rejectionNoteLimit: 0,
+    });
+
+    const prompts: string[] = [];
+    function loopWithCapture(state: DarwinState): DarwinLoop {
+      const loop = loopFromState(memory, state);
+      (loop as unknown as { optimizer: PromptOptimizer }).optimizer = new PromptOptimizer(
+        async (p: string) => {
+          prompts.push(p);
+          return 'You are a meticulous research agent. Never fabricate sources.';
+        },
+      );
+      return loop;
+    }
+
+    await loopWithCapture(await memory.getState()).forceEvolve(gateAgent.name);
+    await loopWithCapture(await memory.getState()).rejectChallenger(
+      gateAgent.name,
+      'drops the citation rule',
+    );
+    await loopWithCapture(await memory.getState()).forceEvolve(gateAgent.name);
+
+    assert.equal(prompts.length, 2, 'the optimizer ran twice');
+    assert.ok(
+      !prompts[1]!.includes('drops the citation rule'),
+      'the persisted 0 must silence the quoting',
+    );
+
+    // Gegenprobe: without the override, the same sequence DOES quote it, so
+    // the assertion above is not vacuous.
+    const other = seeded();
+    await setEvolutionConfigOverrides(other, gateAgent.name, { requireApproval: true });
+    const quoted: string[] = [];
+    function otherLoop(state: DarwinState): DarwinLoop {
+      const loop = loopFromState(other, state);
+      (loop as unknown as { optimizer: PromptOptimizer }).optimizer = new PromptOptimizer(
+        async (p: string) => {
+          quoted.push(p);
+          return 'You are a meticulous research agent. Never fabricate sources.';
+        },
+      );
+      return loop;
+    }
+    await otherLoop(await other.getState()).forceEvolve(gateAgent.name);
+    await otherLoop(await other.getState()).rejectChallenger(
+      gateAgent.name,
+      'drops the citation rule',
+    );
+    await otherLoop(await other.getState()).forceEvolve(gateAgent.name);
+    assert.ok(
+      quoted[1]!.includes('drops the citation rule'),
+      'without the override the reason IS quoted',
+    );
+  });
 });
 
 // ─── Every command reaches for the SHARED wiring ──────────────────────────
@@ -571,6 +635,7 @@ describe('both confirmation summaries bind every OVERRIDE_KEY to its own label',
     confidenceMethod: 'confidenceMethod',
     requireApproval: 'requireApproval',
     approvalTimeoutDays: 'approvalTimeoutDays',
+    rejectionNoteLimit: 'rejectionNotes',
   };
 
   /** A value each key accepts, in override shape. */
@@ -589,6 +654,7 @@ describe('both confirmation summaries bind every OVERRIDE_KEY to its own label',
     confidenceMethod: 'eb',
     requireApproval: true,
     approvalTimeoutDays: 5,
+    rejectionNoteLimit: 3,
   };
 
   it('every key has a label and a sample recorded here', () => {

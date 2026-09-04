@@ -34,7 +34,14 @@ export type DarwinMetricEventType =
   /** v0.17.0: a pending challenger was discarded, by a human or by timeout
    *  (`data.expired` says which). Never emitted for an auto-approval: there
    *  is no such thing. */
-  | 'approval_rejected';
+  | 'approval_rejected'
+  /** v0.18.0: a generator produced text that was already rejected. `data.action`
+   *  is `fell_through` (another generator got the cycle) or `refused` (none
+   *  did, and nothing was proposed). */
+  | 'rejected_repeat'
+  /** v0.18.0: remembered rejections were cleared by hand
+   *  (`darwin approve <agent> --forget`). */
+  | 'rejection_forgotten';
 
 export interface DarwinMetricEvent {
   /** What happened. */

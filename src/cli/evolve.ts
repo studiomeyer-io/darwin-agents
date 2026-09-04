@@ -26,6 +26,7 @@
  *   --confidence-method <m>       effect-size | msprt | hoeffding | eb (v0.14; eb v0.16)
  *   --require-approval / --no-require-approval   hold challengers for a human (v0.17)
  *   --approval-timeout-days <n>   auto-reject an untouched proposal after n days (v0.17)
+ *   --rejection-notes <n>         how many rejection reasons reach the optimizer (v0.18)
  *
  * This list is checked: `tests/evolution-config-flags.test.ts` walks
  * OVERRIDE_KEYS against it. The two v0.14 lines were missing for three
@@ -170,6 +171,11 @@ export async function evolveCommand(args: string[]): Promise<void> {
       // did something and needs a decision; the plain tail below reads like a
       // refusal.
       console.log(`[darwin] APPROVAL NEEDED: ${evoResult.message}`);
+    } else if (evoResult.rejectedRepeat) {
+      // v0.18.0, same reason as in run.ts: a forced cycle that produced only
+      // an already-rejected text needs a person, and the plain tail below
+      // reads like "nothing to do".
+      console.log(`[darwin] NOTHING NEW TO PROPOSE: ${evoResult.message}`);
     } else {
       console.log(`[darwin] ${evoResult.message}`);
     }
@@ -235,6 +241,7 @@ export function describeOverride(o: EvolutionConfigOverride): string {
   if (o.confidenceMethod !== undefined) parts.push(`confidenceMethod=${o.confidenceMethod}`);
   if (o.requireApproval !== undefined) parts.push(`requireApproval=${o.requireApproval}`);
   if (o.approvalTimeoutDays !== undefined) parts.push(`approvalTimeoutDays=${o.approvalTimeoutDays}`);
+  if (o.rejectionNoteLimit !== undefined) parts.push(`rejectionNotes=${o.rejectionNoteLimit}`);
   return parts.length > 0 ? parts.join(', ') : '(none)';
 }
 
@@ -267,6 +274,12 @@ export function describeConfig(evo: EvolutionConfig | undefined): string {
   // indefinitely, which is the default and needs no slot.
   if (evo.approvalTimeoutDays !== undefined) {
     parts.push(`approvalTimeoutDays=${evo.approvalTimeoutDays}`);
+  }
+  // Only-when-set like the two above: unset means the default note window, and
+  // the refusal to re-propose a rejected text is unconditional either way, so
+  // an unset value has nothing to report.
+  if (evo.rejectionNoteLimit !== undefined) {
+    parts.push(`rejectionNotes=${evo.rejectionNoteLimit}`);
   }
   // v0.14 knobs, same omission as in describeOverride above.
   if (evo.safety?.requireConfidence !== undefined) {

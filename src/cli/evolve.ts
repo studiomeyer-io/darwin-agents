@@ -135,6 +135,12 @@ export async function evolveCommand(args: string[]): Promise<void> {
       if (state.pendingApprovals?.[agentName]) {
         state.pendingApprovals[agentName] = null;
       }
+      // v0.18.0: the refusal brake is keyed on the experiment count, and a
+      // reset does not move that. Left behind it would keep the agent quiet
+      // for one more run after a reset meant to unstick it.
+      if (state.rejectionStalls?.[agentName]) {
+        state.rejectionStalls[agentName] = null;
+      }
       return state;
     });
     // The state map alone was never the whole reset. run.ts ROUTES on

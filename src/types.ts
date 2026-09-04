@@ -731,6 +731,46 @@ export interface DarwinState {
    * field existed simply lack it.
    */
   rejectedChallengers?: Record<string, RejectedChallenger[]>;
+  /**
+   * v0.18.0: the brake on a refused cycle, per agent.
+   *
+   * A refused repeat writes no A/B test and no proposal, so nothing about the
+   * state changed and `SafetyGate.canEvolve` (runs >= threshold) is monotonic:
+   * without this marker the NEXT qualifying run pays the whole generator chain
+   * again, and the one after that, forever. With a deterministic generator
+   * that is a model call per run for an answer already known, and under
+   * `useMerge` it also burns the persisted lifetime merge budget on
+   * challengers nobody ever sees.
+   *
+   * It is a COOL-DOWN, not a lock, and it clears itself: after `minRuns` more
+   * recorded runs the loop tries again, because by then the optimizer is
+   * looking at meaningfully different evidence. No human action needed and
+   * nothing to forget. `darwin evolve <agent> --force` ignores it, because a
+   * human asking for a cycle should get a real attempt.
+   *
+   * "One new run" would NOT do as the key: `afterRun` records the run before
+   * it evaluates, so the count has always moved by the time the marker is
+   * read, and a brake keyed that way never fires. Measured, not reasoned.
+   */
+  rejectionStalls?: Record<string, RejectionStall | null>;
+}
+
+/**
+ * v0.18.0: the record of a cycle that ended in a refused repeat, and the
+ * experiment count at which the loop may try again.
+ * See {@link DarwinState.rejectionStalls}.
+ */
+export interface RejectionStall {
+  /**
+   * The value `experimentCounts[agent]` has to REACH before the automatic loop
+   * generates again. Snapshotted as `count at refusal + minRuns`, so a later
+   * config change cannot move a cool-down already running.
+   */
+  retryAtExperimentCount: number;
+  /** ISO timestamp of the refusal. */
+  at: string;
+  /** The remembered rejection whose text came back. */
+  version: string;
 }
 
 /**

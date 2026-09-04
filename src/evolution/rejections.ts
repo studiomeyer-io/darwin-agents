@@ -40,6 +40,33 @@ export const REJECTION_NOTES_LIMIT = 5;
 export const REJECTION_REASON_CAP = 500;
 
 /**
+ * Longest reviewer reason kept in the STATE, which is a different question
+ * from what an optimizer is shown and needs its own answer.
+ *
+ * The state blob is read on every run and rewritten on every state write. With
+ * no cap here, `--reject --reason "$(cat build.log)"` stored 200 kB in one
+ * entry (measured), and the list holds up to {@link REJECTION_MEMORY_CAP} of
+ * them. Higher than the render cap because this is also the audit record and
+ * what `darwin approve` prints back, so a little more than the optimizer sees
+ * is useful; low enough that a full list stays well under a megabyte.
+ */
+export const REJECTION_STORED_REASON_CAP = 1000;
+
+/**
+ * Trim a reviewer's reason to what may be persisted. Returns `undefined` for
+ * anything with no content, so an empty reason is an ABSENT field rather than
+ * an empty string in the record.
+ */
+export function clampStoredReason(reason: string | undefined): string | undefined {
+  if (typeof reason !== 'string') return undefined;
+  const trimmed = reason.trim();
+  if (trimmed === '') return undefined;
+  return trimmed.length > REJECTION_STORED_REASON_CAP
+    ? trimmed.slice(0, REJECTION_STORED_REASON_CAP) + ' [cut]'
+    : trimmed;
+}
+
+/**
  * Normalise a prompt for fingerprinting. Exported so a caller comparing two
  * prompts by hand applies the same rule the memory does.
  */
@@ -172,7 +199,10 @@ export function rejectionNotes(
  * describe the constraint in two different ways. Returns '' for no notes,
  * which the callers treat as "add nothing" (byte-identical prompts).
  */
-export function formatRejectionNotes(notes: ReadonlyArray<RejectionNote>): string {
+export function formatRejectionNotes(
+  notes: ReadonlyArray<RejectionNote>,
+  opts: { maxChars?: number } = {},
+): string {
   if (notes.length === 0) return '';
   const lines: string[] = [
     'A human reviewer turned down these earlier proposals before any test ran.',
@@ -183,7 +213,43 @@ export function formatRejectionNotes(notes: ReadonlyArray<RejectionNote>): strin
   for (const note of notes) {
     lines.push(`[${note.version}, rejected ${note.rejectedOn}] ${note.reason}`);
   }
-  return lines.join('\n');
+  const block = lines.join('\n');
+
+  // One renderer, two budgets. The legacy meta-prompt has no size limit; the
+  // GEPA reflector caps each feedback entry at DEFAULT_FEEDBACK_CAP characters
+  // and appends "[...truncated]" past it. Round 1 of the review did the sum:
+  // five notes at the 500-character reason cap plus this preamble is about
+  // 2.867 characters against a 2.000 cap, so at the DOCUMENTED defaults the
+  // reflector was cutting the block, silently and mid-sentence.
+  //
+  // Dropping whole notes from the END (the oldest, since notes arrive
+  // newest-first) beats a mid-sentence cut: half a constraint reads like a
+  // different constraint. The preamble always survives, because without it the
+  // remaining lines are unlabelled text.
+  const max = opts.maxChars;
+  if (typeof max !== 'number' || !Number.isFinite(max) || max <= 0 || block.length <= max) {
+    return block;
+  }
+  // Room for the "not shown" line is RESERVED before deciding what fits, not
+  // appended afterwards and dropped when it does not. Getting that backwards
+  // hides the fact that anything was dropped, which is the one thing a reader
+  // of a truncated constraint list has to know. Reserved at the worst-case
+  // width (every note dropped), so the reservation never needs a second pass.
+  const head = lines.slice(0, 4).join('\n');
+  const tailFor = (dropped: number) => `(${dropped} older rejection(s) not shown here)`;
+  const reserve = tailFor(notes.length).length + 1;
+  const budget = max - reserve;
+
+  const kept: string[] = [];
+  for (const line of lines.slice(4)) {
+    const candidate = [head, ...kept, line].join('\n');
+    if (candidate.length > budget) break;
+    kept.push(line);
+  }
+  // A preamble with no constraints under it is worse than nothing: it tells a
+  // model that binding constraints exist and then does not name one.
+  if (kept.length === 0) return '';
+  return [head, ...kept, tailFor(notes.length - kept.length)].join('\n');
 }
 
 function clampPositiveInt(value: number | undefined, fallback: number): number {

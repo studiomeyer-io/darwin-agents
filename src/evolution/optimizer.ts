@@ -199,19 +199,29 @@ export class PromptOptimizer {
       }
     }
 
-    // v0.18.0: what a human already turned down, and why. Placed LAST, right
-    // before the task line, because a constraint the model has to still be
-    // holding when it starts writing belongs next to the instruction, not
-    // buried above the statistics. Absent when there is nothing to say, so a
-    // fresh agent's meta-prompt is byte-identical to v0.17.
+    sections.push(
+      '',
+      '--- DETECTED PATTERNS ---',
+      patternSummary,
+    );
+
+    // v0.18.0: what a human already turned down, and why. LAST, with nothing
+    // between it and the task line, because a constraint the model has to
+    // still be holding when it starts writing belongs next to the instruction
+    // rather than above a pattern block that can run to dozens of lines.
+    // Absent when there is nothing to say, so a fresh agent's meta-prompt is
+    // byte-identical to v0.17.
+    //
+    // The first version of this said LAST in the comment and sat ABOVE the
+    // patterns in the code. The test that was meant to pin it asserted
+    // `indexOf(reason) < indexOf(task)`, which is true from anywhere in the
+    // prompt: an ordering assertion cannot pin a placement. The guard below
+    // reads the SLICE between the two and demands it hold nothing else.
     if (rejectionNotes !== undefined && rejectionNotes.trim() !== '') {
       sections.push('', '--- REJECTED BY A HUMAN REVIEWER ---', rejectionNotes);
     }
 
     sections.push(
-      '',
-      '--- DETECTED PATTERNS ---',
-      patternSummary,
       '',
       '--- YOUR TASK ---',
       'Output the improved prompt. Nothing else.',

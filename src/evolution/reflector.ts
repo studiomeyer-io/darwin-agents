@@ -90,7 +90,13 @@ export interface ReflectOptions {
   maxMutationLength?: number;
 }
 
-const DEFAULT_FEEDBACK_CAP = 2000;
+/**
+ * Per-variant feedback budget, in characters. Exported since v0.18.0 so the
+ * rejection-note renderer can size its block against the SAME number instead
+ * of a copy that drifts: at the documented defaults the block used to exceed
+ * this and be cut mid-sentence.
+ */
+export const DEFAULT_FEEDBACK_CAP = 2000;
 const DEFAULT_REFLECTION_TEMPLATE = `
 You are a prompt-engineering reflector. Below is an instruction prompt followed by feedback from {N} variant evaluations.
 

@@ -20,6 +20,7 @@ import type {
   PromptVersion,
   PromptVersionStats,
   RejectedChallenger,
+  RejectionStall,
 } from '../types.js';
 import type { ExperimentTracker } from './tracker.js';
 import type { PromptOptimizer, AgentToolContext } from './optimizer.js';
@@ -37,12 +38,14 @@ import {
 import type { GepaOptimizer, ScoredVariant } from './optimizer-gepa.js';
 import { epochShuffledMinibatch } from './optimizer-gepa.js';
 import type { ReflectiveFeedback } from './reflector.js';
+import { DEFAULT_FEEDBACK_CAP } from './reflector.js';
 import { checkAlignmentPreservation, checkAlignmentPreservationSemantic, type EmbedFn } from './alignment.js';
 import { dominatesEpsilon, paretoSelect, DARWIN_DEFAULT_OBJECTIVES, type ParetoObjective } from './pareto.js';
 import { selectDemoCandidates, buildDemoSection, applyDemoSection } from './demos.js';
 import { selectParentVariant } from './selection.js';
 import { isPerfectScore, resolvePerfectFeedbackScore } from './feedback-filter.js';
 import {
+  clampStoredReason,
   fingerprintPromptText,
   findRejectedMatch,
   forgetRejections,
@@ -53,6 +56,7 @@ import {
   REJECTION_NOTES_LIMIT,
   type RejectionNote,
 } from './rejections.js';
+import { DEFAULT_SAFETY } from '../types.js';
 import { emitMetric, type MetricsSink } from '../metrics/sink.js';
 
 // ─── Result Type ───────────────────────────────────────
@@ -371,6 +375,35 @@ export class DarwinLoop {
       return result;
     }
 
+    // ── Step 3c: refusal brake (v0.18.0) ──────────────
+    // A refused repeat writes no test and no proposal, so nothing stops the
+    // next qualifying run doing the whole generator chain again for an answer
+    // already known. Round 1 of the adversarial review measured three extra
+    // model calls over three cycles, and under `useMerge` the lifetime merge
+    // budget burning down on challengers nobody sees.
+    //
+    // Keyed on the experiment count, so ONE new recorded run lifts it. This is
+    // the automatic path only: `forceEvolve` ignores the marker, because a
+    // human asking for a cycle should get a real attempt.
+    const stall = approvalState.rejectionStalls?.[agent] ?? null;
+    const runsNow = approvalState.experimentCounts[agent] ?? 0;
+    if (stall && runsNow < stall.retryAtExperimentCount) {
+      const remaining = stall.retryAtExperimentCount - runsNow;
+      result.message =
+        `${stall.version}'s text came back after being rejected (${stall.at.slice(0, 10)}), so ` +
+        `this agent is waiting for ${remaining} more run(s) before generating again. ` +
+        `Nothing has changed yet that would produce a different challenger. To try now: ` +
+        `"darwin evolve ${agent} --force", or clear the memory with ` +
+        `"darwin approve ${agent} --forget ${stall.version}".`;
+      emitMetric(this.metrics, 'evolution_skipped', agent, {
+        reason: 'rejected_repeat_stalled',
+        rejectedVersion: stall.version,
+        retryAt: stall.retryAtExperimentCount,
+        runsNow,
+      });
+      return result;
+    }
+
     // ── Step 4: Check if we should evolve ─────────────
     const stats = await this.tracker.getStats(agent);
 
@@ -673,10 +706,25 @@ export class DarwinLoop {
         `proposed. This usually means the agent's runs have not changed enough to suggest ` +
         `anything new. Let it collect more runs, or clear the memory with ` +
         `"darwin approve ${agent} --forget ${finalRepeat.version}".`;
+      // BOTH events, deliberately, and this is the same shape the expiry path
+      // already had (`evolution_skipped {reason: 'approval_expired'}` next to
+      // `approval_rejected {expired: true}`). Round 1 of the review measured
+      // what one alone costs: `rejected_repeat` documents an `action: 'refused'`
+      // arm, an operator builds the "this agent proposes nothing any more"
+      // alarm on it, and the counter stays at zero for the COMMON case while
+      // only the rare in-lock race ever fires it. The generic skip stays for
+      // anyone counting quiet cycles.
       emitMetric(this.metrics, 'evolution_skipped', agent, {
         reason: 'rejected_repeat',
         rejectedVersion: finalRepeat.version,
       });
+      emitMetric(this.metrics, 'rejected_repeat', agent, {
+        generator: generatedBy,
+        rejectedVersion: finalRepeat.version,
+        action: 'refused',
+        discarded: null,
+      });
+      await this.recordRejectionStall(agent, finalRepeat.version);
       return result;
     }
 
@@ -797,6 +845,10 @@ export class DarwinLoop {
         return result;
       }
 
+      // Something DID get proposed, so the brake from an earlier refused cycle
+      // no longer describes reality.
+      await this.clearRejectionStall(agent);
+
       result.promptEvolved = true;
       result.abTestStarted = false;
       result.awaitingApproval = true;
@@ -866,6 +918,8 @@ export class DarwinLoop {
       });
       return result;
     }
+
+    await this.clearRejectionStall(agent);
 
     result.promptEvolved = true;
     result.abTestStarted = true;
@@ -1239,6 +1293,51 @@ export class DarwinLoop {
   }
 
   /**
+   * Mark the agent as stalled on a refused repeat at the CURRENT experiment
+   * count, so the automatic loop stops paying for the same answer every run.
+   * Read inside the callback rather than passed in: the count may have moved
+   * while the model was thinking, and the marker has to name the state it is
+   * actually stalling on.
+   */
+  private async recordRejectionStall(agentName: string, version: string): Promise<void> {
+    // The cool-down length is `minRuns`, the same number Darwin already uses
+    // for "enough new evidence to decide something". Snapshotted like every
+    // other budget in this file (v0.13.1), so changing the config does not
+    // move a cool-down that is already running.
+    const cooldown = Math.max(
+      1,
+      this.agent?.evolution?.minRuns ?? DEFAULT_SAFETY.minDataPoints,
+    );
+    await this.memory.updateState((s) => {
+      if (!s.rejectionStalls) s.rejectionStalls = {};
+      const stall: RejectionStall = {
+        retryAtExperimentCount: (s.experimentCounts[agentName] ?? 0) + cooldown,
+        at: new Date().toISOString(),
+        version,
+      };
+      s.rejectionStalls[agentName] = stall;
+      return s;
+    });
+  }
+
+  /**
+   * Drop the stall marker. Called wherever something happened that could make
+   * the next cycle produce a different challenger: a proposal or a test that
+   * actually opened, and a forgotten rejection.
+   *
+   * Cheap and idempotent, so it is called unconditionally rather than behind a
+   * "was there one?" read: a marker left behind after a successful cycle would
+   * silence the loop for one run with a message about a refusal that no longer
+   * applies.
+   */
+  private async clearRejectionStall(agentName: string): Promise<void> {
+    await this.memory.updateState((s) => {
+      if (s.rejectionStalls?.[agentName]) s.rejectionStalls[agentName] = null;
+      return s;
+    });
+  }
+
+  /**
    * Build the {@link RejectedChallenger} record for a proposal being turned
    * down. Reads the challenger's prompt row to fingerprint it; a row that
    * cannot be read yields an entry WITHOUT a fingerprint, which is a record
@@ -1266,8 +1365,11 @@ export class DarwinLoop {
       ...(textHash !== undefined ? { textHash } : {}),
       rejectedAt: new Date().toISOString(),
       rejectedBy,
-      ...(rejectedBy === 'human' && reason !== undefined && reason.trim() !== ''
-        ? { reason: reason.trim() }
+      // Capped HERE, not only where it is rendered: this string goes into the
+      // state blob, which is read on every run. Round 1 of the review measured
+      // `--reason "$(cat build.log)"` storing 200 kB in one entry.
+      ...(rejectedBy === 'human' && clampStoredReason(reason) !== undefined
+        ? { reason: clampStoredReason(reason)! }
         : {}),
       generatedBy: pending.generatedBy,
     };
@@ -1299,7 +1401,11 @@ export class DarwinLoop {
     feedbacks: ReadonlyArray<ReflectiveFeedback>,
     notes: ReadonlyArray<RejectionNote>,
   ): ReflectiveFeedback[] {
-    const block = formatRejectionNotes(notes);
+    // Sized against the reflector's OWN cap, not a copy of the number. Over
+    // it, the reflector cuts mid-sentence and appends "[...truncated]", and
+    // half a constraint reads like a different constraint. Leave room for the
+    // header line this entry gets below.
+    const block = formatRejectionNotes(notes, { maxChars: DEFAULT_FEEDBACK_CAP - 40 });
     if (block === '') return [...feedbacks];
     return [
       ...feedbacks,
@@ -1319,8 +1425,14 @@ export class DarwinLoop {
    *
    * The escape hatch for the one way this memory can hurt: a deterministic
    * generator that can only produce the rejected text stops proposing
-   * anything, and without this the only way out would be `--reset`, which
-   * throws the evolved incumbent back to v1.
+   * anything.
+   *
+   * It is the ONLY escape hatch, which is why it exists. `darwin evolve
+   * --reset` does not clear this memory (a rejection is a judgment about a
+   * text, and the text did not change because the version pointer moved), so
+   * reaching for it there gives up the evolved incumbent AND stays stuck. An
+   * earlier version of this comment claimed the opposite and was caught in
+   * review: the sentence would have sent an operator down exactly that path.
    */
   async forgetRejection(
     agentName: string,
@@ -1340,6 +1452,11 @@ export class DarwinLoop {
             : `"${agentName}" has no remembered rejection for ${which}.`,
       };
     }
+    // Forgetting is the escape hatch, so it has to actually release the loop:
+    // a stall marker surviving it would keep the agent quiet until the next
+    // recorded run, with a message about a rejection that is gone.
+    await this.clearRejectionStall(agentName);
+
     emitMetric(this.metrics, 'rejection_forgotten', agentName, {
       which,
       forgotten,

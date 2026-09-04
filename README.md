@@ -633,6 +633,23 @@ Where it stops, said plainly:
 - **`--rejection-notes <n>`** controls how many reasons are quoted (default 5,
   `0` for none). The refusal to re-propose is unconditional and has no flag: it
   is a correctness property, not a preference.
+- **`--reason` text reaches the model as an instruction, so treat it like the
+  prompt itself.** It is quoted into the optimizer's meta-prompt and into the
+  GEPA reflector under a line that calls it a binding constraint, which is
+  exactly the point: a reviewer's objection has to carry weight. It also means
+  a reason is not inert data. Do not pipe untrusted text into it (a ticket
+  body, an issue comment, a script's output) any more than you would paste
+  that text into the agent's system prompt. The alignment guard catches
+  REMOVED safety constraints, not added instructions. Stored reasons are
+  capped at 1.000 characters; the optimizer sees at most 500 per note.
+- **Whoever can reject can steer.** `darwin approve --reject --reason` is a
+  write to the same database the prompts live in, so this adds no privilege
+  that was not already there. It does add a quieter path: a prompt edited
+  through a reason is one nobody reviews as a prompt.
+- **A refused cycle costs one generation, then goes quiet for `minRuns`
+  runs.** Without that cool-down, every later run would pay the full generator
+  chain for an answer already known. `darwin evolve <agent> --force` ignores
+  the cool-down, because a human asking for a cycle should get a real attempt.
 - **`darwin evolve <agent> --reset` does NOT clear it.** A rejection is a
   judgment about a text, and the text did not change because the version
   pointer moved. The reset says so on its way out, and names `--forget all`.

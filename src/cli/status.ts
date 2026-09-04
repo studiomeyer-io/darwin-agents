@@ -146,6 +146,19 @@ async function showAgentStatus(
     );
   }
 
+  // v0.18.0: an agent inside the cool-down is quiet for a REASON, and a status
+  // view that shows the memory but not the wait explains the silence only
+  // halfway. Same argument as the pending-approval block above.
+  const stall = typedState.rejectionStalls?.[agentName];
+  if (stall && totalRuns < stall.retryAtExperimentCount) {
+    console.log(
+      boxLine(
+        `    waiting ${stall.retryAtExperimentCount - totalRuns} more run(s) after ` +
+          `${stall.version} came back`,
+      ),
+    );
+  }
+
   // Version history
   if (versions.length > 1) {
     console.log('║  Evolution History:                                      ║');

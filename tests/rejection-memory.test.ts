@@ -43,7 +43,12 @@ import {
   rejectionsFor,
   rememberRejection,
   REJECTION_MEMORY_CAP,
+  REJECTION_NOTES_LIMIT,
+  REJECTION_REASON_CAP,
+  REJECTION_STORED_REASON_CAP,
+  clampStoredReason,
 } from '../src/evolution/rejections.js';
+import { DEFAULT_FEEDBACK_CAP } from '../src/evolution/reflector.js';
 import { createMockMemory, makeExperiment, makePromptVersion, isolateTestEnv } from './helpers.js';
 import type {
   AgentDefinition,
@@ -202,6 +207,31 @@ describe('v0.18 rejection memory: the stored list', () => {
     assert.equal(list[list.length - 1]!.version, `v${REJECTION_MEMORY_CAP + 4}`);
   });
 
+  it('caps the STORED reason, not only the rendered one', async () => {
+    // Round 1 measured `--reject --reason "$(cat build.log)"`: 200 kB in one
+    // entry, in a blob that is read on every run, with room for 100 of them.
+    const { memory, loop } = scenario({ enabled: true, requireApproval: true });
+    await loop.forceEvolve('researcher');
+    await loop.rejectChallenger('researcher', 'x'.repeat(200_000));
+
+    const stored = rejectionsFor(memory._state, 'researcher')[0]!;
+    assert.ok(
+      stored.reason!.length <= REJECTION_STORED_REASON_CAP + ' [cut]'.length,
+      `stored ${stored.reason!.length} characters`,
+    );
+    assert.ok(stored.reason!.endsWith(' [cut]'));
+    assert.ok(
+      JSON.stringify(memory._state).length < 10_000,
+      'the whole state blob stays small',
+    );
+  });
+
+  it('an empty reason is an ABSENT field, not an empty string', () => {
+    assert.equal(clampStoredReason('   '), undefined);
+    assert.equal(clampStoredReason(undefined), undefined);
+    assert.equal(clampStoredReason('  keep me  '), 'keep me');
+  });
+
   it('rejectionsFor never hands out the live array', () => {
     const state = { rejectedChallengers: { researcher: [entry()] } } as unknown as DarwinState;
     const copy = rejectionsFor(state, 'researcher');
@@ -251,6 +281,59 @@ describe('v0.18 rejection memory: which rejections get a voice', () => {
 
   it('renders nothing at all for no notes, so an unaffected prompt is unchanged', () => {
     assert.equal(formatRejectionNotes([]), '');
+  });
+
+  it('fits inside the reflector budget at the DOCUMENTED defaults', () => {
+    // Round 1 of the review did this sum and found it did not add up: five
+    // notes at the 500-character reason cap plus the preamble is about 2.867
+    // characters against a 2.000 cap, so the reflector was cutting the block
+    // mid-sentence at the defaults the README advertises.
+    const worst = [1, 2, 3, 4, 5].map((i) =>
+      entry({ version: `v${i}`, reason: 'x'.repeat(REJECTION_REASON_CAP) }),
+    );
+    const notes = rejectionNotes(worst);
+    assert.equal(notes.length, REJECTION_NOTES_LIMIT, 'the default window is full');
+    const unbudgeted = formatRejectionNotes(notes);
+    assert.ok(
+      unbudgeted.length > DEFAULT_FEEDBACK_CAP,
+      'the premise: at the defaults the block DOES exceed the reflector cap',
+    );
+    const budgeted = formatRejectionNotes(notes, { maxChars: DEFAULT_FEEDBACK_CAP - 40 });
+    assert.ok(
+      budgeted.length <= DEFAULT_FEEDBACK_CAP - 40,
+      `budgeted block is ${budgeted.length} characters`,
+    );
+  });
+
+  it('drops WHOLE notes, oldest first, rather than cutting one in half', () => {
+    const notes = rejectionNotes([
+      entry({ version: 'v1', reason: 'oldest constraint' }),
+      entry({ version: 'v2', reason: 'middle constraint' }),
+      entry({ version: 'v3', reason: 'newest constraint' }),
+    ]);
+    // A budget that fits the preamble and the two newest lines, plus the
+    // reserved "not shown" line. Measured off the full block rather than
+    // counted by hand: hand-counting into a width budget is how the first
+    // draft of the status box came out nine columns wrong.
+    const full = formatRejectionNotes(notes);
+    const oldestLine = full.split('\n').find((l) => l.includes('oldest constraint'))!;
+    const budget = full.length - oldestLine.length - 1
+      + '(1 older rejection(s) not shown here)'.length + 1;
+    const block = formatRejectionNotes(notes, { maxChars: budget });
+
+    assert.ok(block.includes('newest constraint'), block);
+    assert.ok(!block.includes('oldest constraint'), `the oldest must go first:\n${block}`);
+    assert.ok(block.includes('not shown here'), `the drop must be stated:\n${block}`);
+    assert.ok(block.length <= budget, `${block.length} > ${budget}`);
+    // No half sentence anywhere.
+    for (const line of block.split('\n').filter((l) => l.startsWith('['))) {
+      assert.ok(/constraint$/.test(line), `line was cut mid-sentence: ${line}`);
+    }
+  });
+
+  it('renders nothing rather than a preamble with no constraints under it', () => {
+    const notes = rejectionNotes([entry({ reason: 'a reason that will not fit' })]);
+    assert.equal(formatRejectionNotes(notes, { maxChars: 50 }), '');
   });
 
   it('renders version, date and reason when there is something to say', () => {
@@ -309,6 +392,17 @@ describe('v0.18 rejection memory: a rejected text is not proposed again', () => 
     assert.equal(memory._state.pendingApprovals!['researcher'], null, 'nothing new is pending');
     assert.ok(
       sink.events.some((e) => e.type === 'evolution_skipped' && e.data.reason === 'rejected_repeat'),
+    );
+    // Round 1 of the review: the sink documents an `action: 'refused'` arm on
+    // `rejected_repeat`, and before this it only ever fired on the rare
+    // in-lock race. An operator building the "this agent proposes nothing any
+    // more" alarm on the documented event would have watched a counter that
+    // stays at zero for the case the alarm exists for.
+    assert.ok(
+      sink.events.some((e) => e.type === 'rejected_repeat' && e.data.action === 'refused'),
+      `the documented refusal event must fire on the COMMON path, got: ${
+        sink.events.map((e) => `${e.type}/${String(e.data.action ?? e.data.reason ?? '')}`).join(', ')
+      }`,
     );
     // Its own flag, so the CLI can say so instead of printing it under the
     // generic "nothing happened" tail. This state RECURS: same inputs, same
@@ -379,6 +473,157 @@ describe('v0.18 rejection memory: a rejected text is not proposed again', () => 
     const res = await loop.forgetRejection('researcher', 'v7');
     assert.equal(res.forgotten, 0);
     assert.ok(res.message.includes('v7'), res.message);
+  });
+});
+
+// ─── The brake on a refused cycle ───────────────────────────────────────
+
+describe('v0.18 rejection memory: a refused cycle does not pay twice', () => {
+  /**
+   * Round 1 of the adversarial review: a refusal writes no test and no
+   * proposal, and `SafetyGate.canEvolve` is `totalRuns >= threshold`, which is
+   * monotonic. So without a brake the next qualifying run pays the whole
+   * generator chain again, and the one after that, forever. Measured cost was
+   * one optimizer call per run, plus a reflection call under `useGepa`, plus
+   * the persisted lifetime merge budget burning down under `useMerge`.
+   */
+  function countingScenario(evolution: AgentDefinition['evolution']) {
+    const memory = createMockMemory();
+    memory._versions.push(
+      makePromptVersion({ version: 'v1', agentName: 'researcher', active: true, promptText: SAFE_PROMPT }),
+    );
+    // Weak runs, so the automatic loop wants to evolve.
+    for (let i = 0; i < 15; i++) {
+      memory._experiments.push(makeExperiment({
+        agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+        metrics: { qualityScore: 3, sourceCount: 11, outputLength: 6000, errorCount: 0, durationMs: 30000 },
+        feedback: { score: 3, report: 'Weak: shallow analysis.', evaluator: 'multi-critic' },
+      }));
+    }
+    let calls = 0;
+    const sink = makeSink();
+    const loop = new DarwinLoop({
+      memory,
+      tracker: new ExperimentTracker(memory),
+      safety: new SafetyGate(),
+      patterns: new PatternDetector(memory),
+      optimizer: new PromptOptimizer(async () => { calls++; return CHALLENGER; }),
+      agent: makeAgent(evolution),
+      metrics: sink,
+    });
+    const trigger = () => makeExperiment({
+      agentName: 'researcher', promptVersion: 'v1', taskType: 'tech', success: true,
+      metrics: { qualityScore: 3, sourceCount: 11, outputLength: 6000, errorCount: 0, durationMs: 30000 },
+      feedback: { score: 3, report: 'Still weak.', evaluator: 'multi-critic' },
+    });
+    return { memory, loop, sink, trigger, calls: () => calls };
+  }
+
+  it('generates once, is refused, and then STOPS generating for the cool-down', async () => {
+    // The measurement the review asked for: how many optimizer calls does a
+    // stuck agent cost over five runs? Before the cool-down: five. After: two.
+    const { memory, loop, trigger, calls, sink } = countingScenario({
+      enabled: true, requireApproval: true, minRuns: 3,
+    });
+
+    await loop.afterRun(trigger());
+    assert.equal(calls(), 1, 'the first cycle generates');
+    assert.ok(memory._state.pendingApprovals?.['researcher'], 'and proposes');
+
+    await loop.rejectChallenger('researcher', 'drops the citation rule');
+
+    // The cycle that DISCOVERS the repeat still has to generate: the only way
+    // to know what a generator produces is to run it.
+    const refused = await loop.afterRun(trigger());
+    assert.equal(refused.rejectedRepeat, true);
+    assert.equal(calls(), 2, 'the refusing cycle generated once');
+
+    const stall = memory._state.rejectionStalls?.['researcher'];
+    assert.ok(stall, 'a cool-down must be written');
+    assert.equal(stall!.version, 'v2');
+    assert.equal(
+      stall!.retryAtExperimentCount,
+      (memory._state.experimentCounts['researcher'] ?? 0) + 3,
+      'the cool-down is minRuns long and snapshotted',
+    );
+
+    // Three more runs. The first two are inside the cool-down and must cost
+    // nothing; the third reaches the retry point and generates again.
+    const during1 = await loop.afterRun(trigger());
+    assert.equal(calls(), 2, 'inside the cool-down, no model call');
+    assert.ok(during1.message.includes('waiting for'), during1.message);
+    assert.ok(
+      sink.events.some(
+        (e) => e.type === 'evolution_skipped' && e.data.reason === 'rejected_repeat_stalled',
+      ),
+      'and the wait is observable',
+    );
+
+    await loop.afterRun(trigger());
+    assert.equal(calls(), 2, 'still inside the cool-down');
+
+    await loop.afterRun(trigger());
+    assert.equal(calls(), 3, 'the cool-down expires on its own, with nobody acting');
+  });
+
+  it('counts down, and says how many runs are left', async () => {
+    const { memory, loop, trigger } = countingScenario({
+      enabled: true, requireApproval: true, minRuns: 3,
+    });
+    await loop.afterRun(trigger());
+    await loop.rejectChallenger('researcher', 'drops the citation rule');
+    await loop.afterRun(trigger());
+
+    const first = await loop.afterRun(trigger());
+    assert.ok(first.message.includes('waiting for 2 more run'), first.message);
+    const second = await loop.afterRun(trigger());
+    assert.ok(second.message.includes('waiting for 1 more run'), second.message);
+    assert.ok(memory._state.rejectionStalls?.['researcher'], 'and it is still parked');
+  });
+
+  it('forceEvolve ignores the brake, because a human asked', async () => {
+    const { memory, loop, calls } = countingScenario({ enabled: true, requireApproval: true });
+    memory._state.rejectionStalls = {
+      researcher: { retryAtExperimentCount: 9999, at: new Date().toISOString(), version: 'v2' },
+    };
+    memory._state.experimentCounts['researcher'] = 0;
+
+    const forced = await loop.forceEvolve('researcher');
+
+    assert.equal(calls(), 1, 'a forced cycle must actually generate');
+    assert.ok(memory._state.pendingApprovals?.['researcher'], forced.message);
+  });
+
+  it('a proposal that DOES open clears the brake', async () => {
+    const { memory, loop } = countingScenario({ enabled: true, requireApproval: true });
+    memory._state.rejectionStalls = {
+      researcher: { retryAtExperimentCount: 9999, at: new Date().toISOString(), version: 'v2' },
+    };
+
+    await loop.forceEvolve('researcher');
+
+    assert.equal(
+      memory._state.rejectionStalls?.['researcher'] ?? null,
+      null,
+      'a marker surviving a successful cycle would silence the next run for nothing',
+    );
+  });
+
+  it('forgetting clears the brake, so the escape hatch actually releases', async () => {
+    const { memory, loop } = countingScenario({ enabled: true, requireApproval: true });
+    memory._state.rejectedChallengers = {
+      researcher: [{
+        version: 'v2', versionA: 'v1', textHash: fingerprintPromptText(CHALLENGER),
+        rejectedAt: new Date().toISOString(), rejectedBy: 'human', generatedBy: 'legacy',
+      }],
+    };
+    memory._state.rejectionStalls = {
+      researcher: { retryAtExperimentCount: 9999, at: new Date().toISOString(), version: 'v2' },
+    };
+
+    await loop.forgetRejection('researcher', 'v2');
+
+    assert.equal(memory._state.rejectionStalls?.['researcher'] ?? null, null);
   });
 });
 
@@ -538,10 +783,32 @@ describe('v0.18 rejection memory: the reviewer teaches the optimizer', () => {
     assert.ok(secondPrompt.includes('REJECTED BY A HUMAN REVIEWER'), secondPrompt.slice(-400));
     assert.ok(secondPrompt.includes('drops the citation rule'));
     assert.ok(secondPrompt.includes('v2'));
-    // Placed before the task line, so the constraint is still in view when the
-    // model starts writing.
+    // Round 1 of the adversarial review killed the assertion that used to sit
+    // here: `indexOf(reason) < indexOf(task)` is true from ANYWHERE in the
+    // prompt, so it passed with the block moved to position 0 and it passed
+    // with the block buried above a pattern list of any length. An ordering
+    // assertion cannot pin a placement.
+    //
+    // What the comment in optimizer.ts claims is ADJACENCY: nothing between
+    // the reviewer's block and the task line. So read the slice between them
+    // and demand it holds nothing but that block.
+    const between = secondPrompt.slice(
+      secondPrompt.indexOf('--- REJECTED BY A HUMAN REVIEWER ---'),
+      secondPrompt.indexOf('--- YOUR TASK ---'),
+    );
     assert.ok(
-      secondPrompt.indexOf('drops the citation rule') < secondPrompt.indexOf('--- YOUR TASK ---'),
+      !between.includes('--- DETECTED PATTERNS ---'),
+      `the pattern block must not sit between the constraint and the task:\n${between}`,
+    );
+    assert.equal(
+      between.replace('--- REJECTED BY A HUMAN REVIEWER ---', '').replace(formatRejectionNotes(
+        rejectionNotes([{
+          version: 'v2', versionA: 'v1', rejectedAt: '2026-09-04T10:00:00.000Z',
+          rejectedBy: 'human', reason: 'drops the citation rule', generatedBy: 'legacy',
+        }]),
+      ), '').trim(),
+      '',
+      `nothing but the reviewer block may sit between it and the task line:\n${between}`,
     );
   });
 

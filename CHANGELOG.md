@@ -41,8 +41,10 @@ piece of work.
 - **`darwin approve <agent> --forget <version|all>`**, and
   `DarwinLoop.forgetRejection()`. The escape hatch for the one way this memory
   can hurt: a generator that can only produce the rejected text stops proposing
-  anything. Without this the only way out would be `--reset`, which throws the
-  evolved incumbent back to v1. Refused when combined with a decision flag,
+  anything. Note what it is NOT: `darwin evolve --reset` never cleared this
+  memory and still does not, so it is no escape hatch here. It would throw the
+  evolved incumbent back to v1 and leave the agent just as stuck.
+  `--forget` is refused when combined with a decision flag,
   because "forget v4 and also approve v5" is two commands pretending to be one.
 
 - **`evolution.rejectionNoteLimit` / `--rejection-notes <n>`**: how many past
@@ -70,6 +72,52 @@ piece of work.
   deterministic stub optimizer, the cycle after a rejection used to propose the
   identical text under a fresh label. It now pins both halves, the refusal and
   the unchanged v0.13.0 label rule.
+
+### Hardened in review
+
+Round 1 of the adversarial review returned NO-GO with seven findings, six of
+them confirmed against the code. Each fix is checked against the mutation that
+would undo it.
+
+- **The comment said LAST, the code was not.** The reviewer block sat ABOVE the
+  detected-pattern list, which runs to dozens of lines. The test meant to pin
+  the placement asserted `indexOf(reason) < indexOf(task)`, which is true from
+  anywhere in the prompt: an ordering assertion cannot pin a placement. The
+  block is now genuinely adjacent to the task line, and the guard reads the
+  SLICE between the two and demands it hold nothing else. Proved against both
+  mutations the old assertion allowed.
+- **A documented metric event that never fired in the common case.** The sink
+  documents `rejected_repeat {action: 'refused'}`, and the ordinary refusal
+  emitted only `evolution_skipped`. An operator building the "this agent
+  proposes nothing any more" alarm on the documented event would have watched a
+  counter stuck at zero. Both events now fire, and the contract says which to
+  count.
+- **The refusal had no brake.** It writes no test and no proposal, and
+  `canEvolve` is monotonic, so every later run paid the whole generator chain
+  again: a model call per run for an answer already known, and under `useMerge`
+  the persisted lifetime merge budget burning down on challengers nobody sees.
+  There is now a cool-down of `minRuns` runs, snapshotted like every other
+  budget, cleared by a successful cycle or by `--forget`, and ignored by
+  `--force`. Measured: five runs after a refusal cost two generations instead
+  of five. The first attempt at this keyed the brake on "one new run" and never
+  fired, because `afterRun` records the run before it evaluates. That was found
+  by the test, not by reasoning.
+- **`--reason` was stored uncapped.** `--reason "$(cat build.log)"` put 200 kB
+  into one entry of a blob that is read on every run, with room for 100 of
+  them. Capped at 1.000 characters on the way in, separately from the 500 the
+  optimizer sees.
+- **Two caps that did not fit each other.** Five notes at the reason cap plus
+  the preamble is about 2.867 characters against the reflector's 2.000, so at
+  the documented defaults the block was cut mid-sentence. The renderer now
+  takes a budget, drops WHOLE notes oldest-first, and always says how many it
+  dropped.
+- **A false sentence about `--reset`**, in the changelog AND in the code
+  comment: it claimed `--reset` was the fallback escape hatch. It never cleared
+  this memory, so following that sentence would have cost the evolved incumbent
+  and left the agent just as stuck.
+- **`--reason` as a trust boundary** is now stated in the README rather than
+  left implicit: the text reaches the model as an instruction, so it is not
+  inert data.
 
 ### Notes
 

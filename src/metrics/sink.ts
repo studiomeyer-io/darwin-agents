@@ -35,9 +35,19 @@ export type DarwinMetricEventType =
    *  (`data.expired` says which). Never emitted for an auto-approval: there
    *  is no such thing. */
   | 'approval_rejected'
-  /** v0.18.0: a generator produced text that was already rejected. `data.action`
-   *  is `fell_through` (another generator got the cycle) or `refused` (none
-   *  did, and nothing was proposed). */
+  /**
+   * v0.18.0: a generator produced text that was already rejected.
+   * `data.action` is `fell_through` (another generator got the cycle) or
+   * `refused` (nothing was proposed).
+   *
+   * A `refused` event is always accompanied by
+   * `evolution_skipped {reason: 'rejected_repeat'}` for the same cycle, the
+   * way an expiry emits both `evolution_skipped` and `approval_rejected`.
+   * Count ONE of the two, not their sum: `rejected_repeat` is the specific
+   * fact, `evolution_skipped` the generic "this cycle produced nothing" one.
+   * The alarm worth building ("this agent proposes nothing any more") belongs
+   * on `rejected_repeat {action: 'refused'}`.
+   */
   | 'rejected_repeat'
   /** v0.18.0: remembered rejections were cleared by hand
    *  (`darwin approve <agent> --forget`). */

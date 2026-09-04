@@ -626,6 +626,10 @@ Where it stops, said plainly:
   proposal and will be shown to you. That is deliberate: a fuzzy match would
   eventually refuse something a reviewer wanted to see, and a refusal nobody can
   predict is worse than one question too many.
+- **The GEPA merge path does not see the reasons.** It combines two existing
+  prompts under the paper's own template, which has no slot for an external
+  constraint. A merged challenger that repeats a rejected text is still caught
+  and still falls through; it just does not learn from the reason.
 - **A timeout is remembered too, and teaches nothing.** A lapsed proposal blocks
   its own text from coming straight back, but carries no reason into the next
   generation, because nobody read it.

@@ -194,9 +194,17 @@ export function rejectionNotes(
 }
 
 /**
- * Render reviewer notes as the block both optimizers embed in their prompt.
- * One place, so the legacy meta-prompt and the GEPA feedback entry never
- * describe the constraint in two different ways. Returns '' for no notes,
+ * Render reviewer notes as the block the two GENERATING optimizers embed in
+ * their prompt: the legacy meta-prompt and the GEPA reflector. One place, so
+ * they never describe the constraint in two different ways.
+ *
+ * The GEPA MERGE path is a third generator and does NOT get this block: it
+ * combines two existing prompts under the paper's Appendix-F template, which
+ * has no slot for an external constraint, and bolting one on would change what
+ * merge means. A merged challenger that repeats a rejected text is still
+ * caught, by the post-generation check, and still falls through. It just does
+ * not learn from the reason. Said here rather than glossed over as "both
+ * optimizers". Returns '' for no notes,
  * which the callers treat as "add nothing" (byte-identical prompts).
  */
 export function formatRejectionNotes(

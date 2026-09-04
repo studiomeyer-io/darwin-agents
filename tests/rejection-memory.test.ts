@@ -521,7 +521,9 @@ describe('v0.18 rejection memory: a refused cycle does not pay twice', () => {
 
   it('generates once, is refused, and then STOPS generating for the cool-down', async () => {
     // The measurement the review asked for: how many optimizer calls does a
-    // stuck agent cost over five runs? Before the cool-down: five. After: two.
+    // stuck agent cost over five runs? Before the cool-down: five. After:
+    // three, and the third only because the cool-down expires on its own.
+    // The number below is the one this test asserts, not a remembered one.
     const { memory, loop, trigger, calls, sink } = countingScenario({
       enabled: true, requireApproval: true, minRuns: 3,
     });
@@ -579,6 +581,54 @@ describe('v0.18 rejection memory: a refused cycle does not pay twice', () => {
     const second = await loop.afterRun(trigger());
     assert.ok(second.message.includes('waiting for 1 more run'), second.message);
     assert.ok(memory._state.rejectionStalls?.['researcher'], 'and it is still parked');
+  });
+
+  it('a forced attempt does NOT push the automatic retry further out', async () => {
+    // Round 2, measured: the refusal message recommends `--force`, and
+    // `forceEvolve` shares the same tail. Arming the cool-down there too meant
+    // every forced attempt moved the automatic retry later (minRuns 5: refusal
+    // at run 2 set retry to 7, a force at run 4 moved it to 9). Following the
+    // advice in the message made the situation worse.
+    const { memory, loop, trigger } = countingScenario({
+      enabled: true, requireApproval: true, minRuns: 5,
+    });
+    await loop.afterRun(trigger());
+    await loop.rejectChallenger('researcher', 'drops the citation rule');
+    await loop.afterRun(trigger());
+
+    const before = memory._state.rejectionStalls!['researcher']!.retryAtExperimentCount;
+    await loop.afterRun(trigger());
+    await loop.forceEvolve('researcher');
+
+    assert.equal(
+      memory._state.rejectionStalls!['researcher']!.retryAtExperimentCount,
+      before,
+      'a forced attempt must not move the automatic retry point',
+    );
+  });
+
+  it('forgetting a DIFFERENT label leaves the cool-down alone', async () => {
+    const { memory, loop } = countingScenario({ enabled: true, requireApproval: true });
+    memory._state.rejectedChallengers = {
+      researcher: [
+        { version: 'v2', versionA: 'v1', textHash: 'a'.repeat(64),
+          rejectedAt: new Date().toISOString(), rejectedBy: 'human', generatedBy: 'legacy' },
+        { version: 'v3', versionA: 'v1', textHash: fingerprintPromptText(CHALLENGER),
+          rejectedAt: new Date().toISOString(), rejectedBy: 'human', generatedBy: 'legacy' },
+      ],
+    };
+    memory._state.rejectionStalls = {
+      researcher: { retryAtExperimentCount: 9999, at: new Date().toISOString(), version: 'v3' },
+    };
+
+    await loop.forgetRejection('researcher', 'v2');
+    assert.ok(
+      memory._state.rejectionStalls?.['researcher'],
+      'forgetting v2 does not release a cool-down that names v3',
+    );
+
+    await loop.forgetRejection('researcher', 'v3');
+    assert.equal(memory._state.rejectionStalls?.['researcher'] ?? null, null);
   });
 
   it('forceEvolve ignores the brake, because a human asked', async () => {
@@ -757,6 +807,53 @@ describe('v0.18 rejection memory: the demo path falls through instead of repeati
         (e) => e.type === 'rejected_repeat' && e.data.generator === 'demos' && e.data.action === 'fell_through',
       ),
       'the fall-through is observable, not silent',
+    );
+  });
+});
+
+describe('v0.18 rejection memory: the GEPA path falls through as well', () => {
+  it('a repeat from the reflector falls through to legacy, and says which generator', async () => {
+    // Round 2 named this coverage gap: `rejected_repeat {action:'fell_through'}`
+    // was pinned for the demo generator only, so the GEPA arm of the same
+    // branch had no test at all.
+    const memory = createMockMemory();
+    memory._versions.push(
+      makePromptVersion({ version: 'v1', agentName: 'researcher', active: true, promptText: SAFE_PROMPT }),
+    );
+    seedExperiments(memory, 3);
+    memory._state.rejectedChallengers = {
+      researcher: [{
+        version: 'v9', versionA: 'v1', textHash: fingerprintPromptText(CHALLENGER),
+        rejectedAt: new Date().toISOString(), rejectedBy: 'human',
+        reason: 'drops the citation rule', generatedBy: 'gepa',
+      }],
+    };
+
+    const sink = makeSink();
+    // The reflector returns the rejected text; the legacy optimizer returns
+    // something else. So the cycle must end on legacy, not be refused.
+    const gepa = new GepaOptimizer(async () => CHALLENGER);
+    const { loop } = buildLoop({
+      memory,
+      agent: makeAgent({ enabled: true, requireApproval: true, useGepa: true }),
+      outputs: [OTHER],
+      metrics: sink,
+      gepa,
+    });
+
+    const result = await loop.forceEvolve('researcher');
+
+    assert.equal(result.promptEvolved, true, 'the agent keeps evolving');
+    assert.ok(result.message.includes('via legacy'), result.message);
+    assert.ok(
+      sink.events.some(
+        (e) => e.type === 'rejected_repeat'
+          && e.data.generator === 'gepa'
+          && e.data.action === 'fell_through',
+      ),
+      `the GEPA fall-through must name its generator, got: ${
+        sink.events.filter((e) => e.type === 'rejected_repeat').map((e) => JSON.stringify(e.data)).join(', ')
+      }`,
     );
   });
 });

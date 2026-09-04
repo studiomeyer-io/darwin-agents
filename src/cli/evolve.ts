@@ -46,6 +46,7 @@ import {
 import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
 import { parseEvolutionConfigFlags, hasAnyEvolutionFlag } from './evolution-flags.js';
 import { rejectionsFor } from '../evolution/rejections.js';
+import { DEFAULT_SAFETY } from '../types.js';
 import type { EvolutionConfig, EvolutionConfigOverride } from '../types.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
@@ -135,9 +136,9 @@ export async function evolveCommand(args: string[]): Promise<void> {
       if (state.pendingApprovals?.[agentName]) {
         state.pendingApprovals[agentName] = null;
       }
-      // v0.18.0: the refusal brake is keyed on the experiment count, and a
+      // v0.18.0: the refusal cool-down is keyed on the experiment count, and a
       // reset does not move that. Left behind it would keep the agent quiet
-      // for one more run after a reset meant to unstick it.
+      // for the rest of the cool-down after a reset meant to unstick it.
       if (state.rejectionStalls?.[agentName]) {
         state.rejectionStalls[agentName] = null;
       }
@@ -221,7 +222,13 @@ export async function evolveCommand(args: string[]): Promise<void> {
     console.log(`  Version:   ${version}`);
     console.log(`  Runs:      ${runs}`);
     console.log(`  A/B Test:  ${abTest ? `${abTest.versionA} vs ${abTest.versionB}` : 'none'}`);
-    console.log(`  Min Runs:  ${agent.evolution?.minRuns ?? 5}`);
+    // v0.18.0, round 2: this printed `?? 5` while every path that USES the
+    // number falls back to 10 (`computeDynamicMinRuns` floors at
+    // DYNAMIC_MIN_RUNS_FLOOR, and the v0.18 cool-down at
+    // DEFAULT_SAFETY.minDataPoints). Pre-existing, and harmless while the
+    // number was only an A/B detail; v0.18 turns it into a visible wait, so a
+    // display that is off by five is now a display that misleads.
+    console.log(`  Min Runs:  ${agent.evolution?.minRuns ?? DEFAULT_SAFETY.minDataPoints}`);
     console.log(`  Advanced:  ${describeConfig(evo)}`);
   }
 

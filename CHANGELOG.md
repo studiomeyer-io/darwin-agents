@@ -51,8 +51,12 @@ piece of work.
   reasons are quoted (default 5, `0` for none). The refusal to re-propose has no
   flag: it is a correctness property, not a preference.
 
-- **Two metric events**: `rejected_repeat` (with `generator` and `action`:
-  `fell_through`) and `rejection_forgotten`. `EvolutionResult.rejectedRepeat`
+- **Two metric events**: `rejected_repeat` (with `generator` and `action`,
+  which is `fell_through` when another generator took the cycle and `refused`
+  when none did) and `rejection_forgotten`. Plus two new `evolution_skipped`
+  reasons: `rejected_repeat` (accompanies every `refused`, so count one of the
+  two and not their sum) and `rejected_repeat_stalled` (a run inside the
+  cool-down). `EvolutionResult.rejectedRepeat`
   gets its own CLI branch (`NOTHING NEW TO PROPOSE`) for the same reason
   `awaitingApproval` did in v0.17: this state RECURS with the same inputs, so
   under the generic "nothing happened" tail an agent stops evolving quietly.
@@ -97,9 +101,12 @@ would undo it.
   again: a model call per run for an answer already known, and under `useMerge`
   the persisted lifetime merge budget burning down on challengers nobody sees.
   There is now a cool-down of `minRuns` runs, snapshotted like every other
-  budget, cleared by a successful cycle or by `--forget`, and ignored by
-  `--force`. Measured: five runs after a refusal cost two generations instead
-  of five. The first attempt at this keyed the brake on "one new run" and never
+  budget, cleared by a successful cycle or by a `--forget` that names it, and
+  neither honoured nor RE-ARMED by `--force`. Measured over five runs after a
+  refusal with `minRuns: 3`: three generations instead of five, the third only
+  because the cool-down expired on its own. An earlier draft of this entry said
+  two, which was remembered rather than read off the test that pins it.
+  The first attempt at this keyed the brake on "one new run" and never
   fired, because `afterRun` records the run before it evaluates. That was found
   by the test, not by reasoning.
 - **`--reason` was stored uncapped.** `--reason "$(cat build.log)"` put 200 kB
@@ -138,8 +145,12 @@ would undo it.
   the memory of it does not exist yet, which is exactly when the next cycle
   would re-propose it.
 - With nothing rejected, every prompt this release touches is byte-identical to
-  v0.17: `formatRejectionNotes([])` returns `''` and both optimizers skip the
-  block.
+  v0.17: `formatRejectionNotes([])` returns `''` and both generating optimizers
+  skip the block.
+- The GEPA **merge** path does not receive the reviewer notes. It combines two
+  existing prompts under the paper's Appendix-F template, which has no slot for
+  an external constraint. A merged challenger that repeats a rejected text is
+  still caught and still falls through; it just does not learn from the reason.
 
 ## [0.17.0] - 2026-09-02
 

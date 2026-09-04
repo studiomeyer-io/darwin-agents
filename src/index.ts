@@ -44,6 +44,7 @@ export type {
   PromptVersion,
   PromptVersionStats,
   RejectedChallenger,
+  RejectionStall,
   RunResult,
   SafetyThresholds,
   TraceToolCall,

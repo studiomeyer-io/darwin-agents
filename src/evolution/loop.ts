@@ -382,9 +382,15 @@ export class DarwinLoop {
     // model calls over three cycles, and under `useMerge` the lifetime merge
     // budget burning down on challengers nobody sees.
     //
-    // Keyed on the experiment count, so ONE new recorded run lifts it. This is
-    // the automatic path only: `forceEvolve` ignores the marker, because a
-    // human asking for a cycle should get a real attempt.
+    // A COOL-DOWN of `minRuns` runs, not a one-run pause. The first attempt at
+    // this brake was keyed on "one new run" and NEVER fired, because `afterRun`
+    // records the run before it evaluates, so the count had always moved by the
+    // time the marker was read. Found by the test, not by the reasoning that
+    // produced it, and this comment kept the dead wording for a round.
+    //
+    // `forceEvolve` ignores the marker AND does not re-arm it: a human asking
+    // for a cycle should get a real attempt, and should not push the automatic
+    // retry further out by taking one.
     const stall = approvalState.rejectionStalls?.[agent] ?? null;
     const runsNow = approvalState.experimentCounts[agent] ?? 0;
     if (stall && runsNow < stall.retryAtExperimentCount) {
@@ -551,7 +557,9 @@ export class DarwinLoop {
     const detectedPatterns = await this.patterns.detectPatterns(agentName);
     result.patternsFound = detectedPatterns;
 
-    return this.generateAndStartABTest(agentName, activePrompt, detectedPatterns, stats, result);
+    return this.generateAndStartABTest(
+      agentName, activePrompt, detectedPatterns, stats, result, { automatic: false },
+    );
   }
 
   /**
@@ -567,6 +575,7 @@ export class DarwinLoop {
     detectedPatterns: DarwinPattern[],
     stats: PromptVersionStats,
     result: EvolutionResult,
+    opts: { automatic: boolean } = { automatic: true },
   ): Promise<EvolutionResult> {
     // Build tool context (P0-2) and category stats (P2-5) for optimizer
     const toolContext: AgentToolContext | undefined = this.agent
@@ -724,7 +733,14 @@ export class DarwinLoop {
         action: 'refused',
         discarded: null,
       });
-      await this.recordRejectionStall(agent, finalRepeat.version);
+      // v0.18.0, round 2: ONLY the automatic path arms the cool-down. The
+      // refusal message tells the operator to try `darwin evolve --force`, and
+      // `forceEvolve` shares this tail: arming here too meant every forced
+      // attempt pushed the automatic retry FURTHER out (measured with
+      // minRuns 5: refusal at run 2 set retry at 7, a force at run 4 moved it
+      // to 9). Someone forcing every other run would have parked the automatic
+      // path permanently while believing they were unsticking it.
+      if (opts.automatic) await this.recordRejectionStall(agent, finalRepeat.version);
       return result;
     }
 
@@ -1330,9 +1346,21 @@ export class DarwinLoop {
    * silence the loop for one run with a message about a refusal that no longer
    * applies.
    */
-  private async clearRejectionStall(agentName: string): Promise<void> {
+  private async clearRejectionStall(
+    agentName: string,
+    onlyForVersion?: string | 'all',
+  ): Promise<void> {
     await this.memory.updateState((s) => {
-      if (s.rejectionStalls?.[agentName]) s.rejectionStalls[agentName] = null;
+      const live = s.rejectionStalls?.[agentName];
+      if (!live) return s;
+      if (
+        onlyForVersion !== undefined &&
+        onlyForVersion !== 'all' &&
+        live.version !== onlyForVersion
+      ) {
+        return s;
+      }
+      s.rejectionStalls![agentName] = null;
       return s;
     });
   }
@@ -1452,10 +1480,12 @@ export class DarwinLoop {
             : `"${agentName}" has no remembered rejection for ${which}.`,
       };
     }
-    // Forgetting is the escape hatch, so it has to actually release the loop:
-    // a stall marker surviving it would keep the agent quiet until the next
-    // recorded run, with a message about a rejection that is gone.
-    await this.clearRejectionStall(agentName);
+    // Forgetting is the escape hatch, so it has to release the loop: a stall
+    // marker surviving it would keep the agent quiet with a message about a
+    // rejection that is gone. But only when it released THAT stall: clearing a
+    // marker naming v3 because someone forgot v2 buys a full generator chain
+    // that ends in the same refusal (round 2, minor but free to get right).
+    await this.clearRejectionStall(agentName, which);
 
     emitMetric(this.metrics, 'rejection_forgotten', agentName, {
       which,

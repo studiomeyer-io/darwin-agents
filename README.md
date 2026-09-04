@@ -600,9 +600,11 @@ half of live traffic is worse than asking again.
 
 **The reviewer's reason reaches the next generation.** `--reason` was recorded
 for the human's benefit up to v0.17. Now it is quoted back to whichever
-optimizer runs next: as its own block before the task line in the legacy
-meta-prompt, and as its own feedback entry (score 0, labelled with the rejected
-version) for the GEPA reflector. A "no" buys one cycle. A "no, because it drops
+optimizer runs next: in the legacy meta-prompt as its own block IMMEDIATELY
+before the task line, with nothing between (a constraint the model has to be
+holding when it starts writing does not belong above a pattern list), and for
+the GEPA reflector as its own feedback entry, score 0, labelled with the
+rejected version. A "no" buys one cycle. A "no, because it drops
 the citation rule" buys the rest of them.
 
 ```bash

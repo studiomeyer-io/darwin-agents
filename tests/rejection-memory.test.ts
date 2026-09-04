@@ -792,10 +792,25 @@ describe('v0.18 rejection memory: the reviewer teaches the optimizer', () => {
     // What the comment in optimizer.ts claims is ADJACENCY: nothing between
     // the reviewer's block and the task line. So read the slice between them
     // and demand it holds nothing but that block.
-    const between = secondPrompt.slice(
-      secondPrompt.indexOf('--- REJECTED BY A HUMAN REVIEWER ---'),
-      secondPrompt.indexOf('--- YOUR TASK ---'),
+    // Round 2 killed the FIRST replacement for the vacuous ordering check.
+    // `slice(start, end)` returns '' when start > end, and an empty string
+    // satisfies every assertion about what it does not contain: moving the
+    // block BEHIND the task line (the exact opposite of what the comment and
+    // the README claim) left all 35 tests green. The fix traded one blind spot
+    // for another, on the side the README had just sharpened.
+    //
+    // So: the ordering assertion goes back, NEXT TO the slice one. Ordering
+    // alone cannot pin a placement; a slice alone cannot pin a direction.
+    const blockAt = secondPrompt.indexOf('--- REJECTED BY A HUMAN REVIEWER ---');
+    const taskAt = secondPrompt.indexOf('--- YOUR TASK ---');
+    assert.ok(blockAt >= 0, 'the reviewer block must be in the prompt at all');
+    assert.ok(taskAt >= 0, 'and so must the task line');
+    assert.ok(
+      blockAt < taskAt,
+      `the constraint must come BEFORE the task line (block at ${blockAt}, task at ${taskAt})`,
     );
+    const between = secondPrompt.slice(blockAt, taskAt);
+    assert.ok(between.length > 0, 'a zero-length slice proves nothing');
     assert.ok(
       !between.includes('--- DETECTED PATTERNS ---'),
       `the pattern block must not sit between the constraint and the task:\n${between}`,

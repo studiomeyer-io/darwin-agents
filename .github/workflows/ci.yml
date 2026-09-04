@@ -75,5 +75,22 @@ jobs:
       # Darwin ships zero runtime dependencies, so this is really a guard on
       # the dev toolchain and on that promise staying true. A high or critical
       # advisory should stop a release, not surface after it.
-      - name: npm audit (high and above)
-        run: npm audit --audit-level=high
+      - name: npm audit (high and above), mit Wiederholung bei Registry-Ausfall
+        # Der Audit-Endpunkt von npm ist unzuverlaessig: gemessen am 04.09.2026
+        # ein 503 und mehrfach ein 400 "Invalid package tree" bei identischem
+        # Lockfile, teils erst nach Minuten. Ein Fund soll den Lauf weiter rot
+        # faerben, ein Ausfall bei npm nicht. Deshalb bis zu drei Versuche, und
+        # nur wenn ALLE an einem Netz- oder Serverfehler scheitern, wird der
+        # Schritt uebersprungen statt zu scheitern.
+        run: |
+          for versuch in 1 2 3; do
+            ausgabe=$(npm audit --audit-level=high 2>&1) && exit 0
+            echo "$ausgabe"
+            if ! echo "$ausgabe" | grep -qE "audit endpoint returned an error|ECONNRESET|ETIMEDOUT|socket hang up"; then
+              echo "Echter Befund, kein Ausfall."
+              exit 1
+            fi
+            echo "Versuch $versuch: npm-Endpunkt nicht erreichbar, neuer Versuch in 30s."
+            sleep 30
+          done
+          echo "::warning::npm audit uebersprungen, der Endpunkt war dreimal nicht erreichbar."

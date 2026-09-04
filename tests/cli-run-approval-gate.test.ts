@@ -631,6 +631,40 @@ describe('v0.18 rejection memory, through the real commands', () => {
     );
   });
 
+  it('--reset keeps the memory, and SAYS so instead of quietly keeping it', async () => {
+    // Keeping is the right default: a rejection is a judgment about a TEXT, and
+    // the text did not change because the version pointer moved. But "reset"
+    // reads like "clean slate", and an agent that then refuses to propose is a
+    // surprise. So the reset has to mention it.
+    freshWorkspace();
+    const after1 = await proposeOnce();
+    await after1.close();
+    await approveCommand(['writer', '--reject']);
+
+    const said: string[] = [];
+    const realLog = console.log;
+    console.log = (...args: unknown[]) => { said.push(args.join(' ')); };
+    try {
+      await evolveCommand(['writer', '--reset']);
+    } finally {
+      console.log = realLog;
+    }
+
+    const verify = createMemory(await loadConfig());
+    await verify.init();
+    const state = await verify.getState();
+    await verify.close();
+    assert.equal(
+      (state.rejectedChallengers?.['writer'] ?? []).length,
+      1,
+      '--reset must NOT throw away what a human decided',
+    );
+    assert.ok(
+      said.some((l) => l.includes('--forget all')),
+      `the reset must name the way to clear it, said: ${said.join(' | ')}`,
+    );
+  });
+
   it('nothing here reached the network beyond the stub', () => {
     // Same counter the rest of this file uses: if a future change routes the
     // optimizer back through a spawned CLI, this stays at zero and says so.

@@ -45,6 +45,7 @@ import {
 } from '../evolution/enabled-state.js';
 import { buildResolvedEvolutionLoop } from '../evolution/build-loop.js';
 import { parseEvolutionConfigFlags, hasAnyEvolutionFlag } from './evolution-flags.js';
+import { rejectionsFor } from '../evolution/rejections.js';
 import type { EvolutionConfig, EvolutionConfigOverride } from '../types.js';
 
 export async function evolveCommand(args: string[]): Promise<void> {
@@ -151,6 +152,18 @@ export async function evolveCommand(args: string[]): Promise<void> {
       }
     }
     console.log(`[darwin] Evolution RESET for ${agentName}. Back to v1.`);
+    // v0.18.0: --reset does NOT clear the rejection memory, and reads like it
+    // does. Keeping it is the right default (a rejection is a judgment about a
+    // TEXT, and the text did not change because the version pointer moved),
+    // but an agent that then refuses to propose is a surprise unless the reset
+    // says so here.
+    const remembered = rejectionsFor(await memory.getState(), agentName);
+    if (remembered.length > 0) {
+      console.log(
+        `[darwin] ${remembered.length} rejected prompt(s) are still remembered and will not be ` +
+          `proposed again. Clear them with "darwin approve ${agentName} --forget all".`,
+      );
+    }
   } else if (flags.includes('--force')) {
     // On-demand manual trigger: run the loop's variant-generation + A/B-start
     // path ONCE, bypassing the "enough runs / actionable patterns / data

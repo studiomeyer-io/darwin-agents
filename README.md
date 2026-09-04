@@ -633,6 +633,9 @@ Where it stops, said plainly:
 - **`--rejection-notes <n>`** controls how many reasons are quoted (default 5,
   `0` for none). The refusal to re-propose is unconditional and has no flag: it
   is a correctness property, not a preference.
+- **`darwin evolve <agent> --reset` does NOT clear it.** A rejection is a
+  judgment about a text, and the text did not change because the version
+  pointer moved. The reset says so on its way out, and names `--forget all`.
 - **A deterministic generator can run out of ideas.** If the only text your
   agent can produce has been rejected, it stops proposing and says so on every
   run. That is the honest state of affairs rather than a bug, and `--forget` is
@@ -805,7 +808,11 @@ Against the Python frameworks the category grew up in:
 | Built-in Critic agent | **Yes** | No | No | No | No |
 
 And against the TypeScript prompt-optimization packages that have since
-appeared — worth knowing, and each good at what it does:
+appeared. Worth knowing, and each good at what it does, but check the dates
+before you read this as a crowded field: measured on 2026-09-04, `gepa-ts` is
+ARCHIVED (last push 2025-09-05), `@currentai/dsts` has been on 1.0.1 since
+2026-03-09, and `@kamiyo-org/selfimprove` on 1.2.1 since 2026-04-17. We would
+rather say that than let a stale table flatter us.
 
 | | Darwin | [gepa-ts](https://github.com/tangle-network/gepa-ts) | [@currentai/dsts](https://www.npmjs.com/package/@currentai/dsts) | [@kamiyo-org/selfimprove](https://www.npmjs.com/package/@kamiyo-org/selfimprove) |
 |---|---|---|---|---|

@@ -78,6 +78,10 @@ piece of work.
   match would eventually refuse something a reviewer wanted to see, and a
   refusal nobody can predict is worse than one question too many.
 - The list is capped at 100 entries per agent, oldest dropped first.
+- `darwin evolve <agent> --reset` deliberately does NOT clear the memory, and
+  now says so on its way out. Keeping it is right (the text did not change
+  because the version pointer moved) but "reset" reads like "clean slate", and
+  an agent that then refuses to propose would be a surprise.
 - A rejection whose prompt row cannot be read is stored WITHOUT a fingerprint:
   it records the decision and its reason but can never match, because blocking
   on a hash that could not be computed would block the wrong text.

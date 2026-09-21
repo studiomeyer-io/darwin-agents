@@ -862,7 +862,7 @@ describe('v0.18 rejection memory: the GEPA path falls through as well', () => {
 
 describe('v0.18 rejection memory: the reviewer teaches the optimizer', () => {
   it('puts the reason into the legacy meta-prompt, and nothing when there is none', async () => {
-    const { loop, prompts } = scenario({ enabled: true, requireApproval: true }, {
+    const { memory, loop, prompts } = scenario({ enabled: true, requireApproval: true }, {
       outputs: [CHALLENGER, OTHER],
     });
 
@@ -912,12 +912,16 @@ describe('v0.18 rejection memory: the reviewer teaches the optimizer', () => {
       !between.includes('--- DETECTED PATTERNS ---'),
       `the pattern block must not sit between the constraint and the task:\n${between}`,
     );
+    // The expected block is rendered from the entry the loop actually stored.
+    // It used to be a literal with `rejectedAt: '2026-09-04...'`, but the loop
+    // stamps the rejection with the current date, so the test only passed on
+    // the day it was written and failed on every run after it.
+    const stored = rejectionsFor(memory._state, 'researcher');
+    assert.equal(stored.length, 1, 'exactly the one rejection from this test is remembered');
+    assert.equal(stored[0]!.reason, 'drops the citation rule');
     assert.equal(
       between.replace('--- REJECTED BY A HUMAN REVIEWER ---', '').replace(formatRejectionNotes(
-        rejectionNotes([{
-          version: 'v2', versionA: 'v1', rejectedAt: '2026-09-04T10:00:00.000Z',
-          rejectedBy: 'human', reason: 'drops the citation rule', generatedBy: 'legacy',
-        }]),
+        rejectionNotes(stored),
       ), '').trim(),
       '',
       `nothing but the reviewer block may sit between it and the task line:\n${between}`,
